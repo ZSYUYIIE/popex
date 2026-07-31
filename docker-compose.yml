@@ -1,0 +1,17 @@
+services:
+  popex:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      POPEX_DATA_DIR: /data
+      POPEX_ALLOWED_HOSTS: youtube.com,www.youtube.com,m.youtube.com,music.youtube.com,youtu.be
+      POPEX_MAX_DURATION_SECONDS: 1800
+      POPEX_MAX_FILESIZE_MB: 250
+      POPEX_AUDIO_QUALITY: 192
+    volumes:
+      - popex-data:/data
+    restart: unless-stopped
+
+volumes:
+  popex-data:
