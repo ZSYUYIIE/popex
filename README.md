@@ -1,18 +1,22 @@
 # PopEx MVP
 
-PopEx is the first working slice of a local-first pop-music transcription product. This MVP accepts a supported video URL, extracts an MP3 audio source, stores it persistently, and shows a downloadable job history.
+PopEx is a local-first media-ingestion foundation for a pop-music transcription product. This cycle supports direct audio/video upload and the existing YouTube URL workflow. Every new successful job retains its source artifact and creates a 44.1 kHz PCM WAV labeled **Analysis audio** for later chord analysis.
+
+Chord recognition, Demucs, lyrics, note transcription, score generation, and waveform display are deliberately outside this cycle.
 
 ## Current scope
 
-- Submit a YouTube video URL.
-- Queue extraction without blocking the browser request.
-- Extract the best available audio and convert it to MP3 with FFmpeg.
-- Save the MP3 plus normalized metadata under a persistent data directory.
-- Track queued, processing, completed, and failed jobs in SQLite.
-- Download saved output files from the web interface.
-- Enforce a configurable source allowlist, duration limit, and file-size limit.
-
-Chord, note, stem, lyric, and score extraction are intentionally not included in this first slice. The saved audio becomes the input for those later stages.
+- Drag-and-drop or select MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, or WebM.
+- Continue importing supported YouTube URLs.
+- Validate extension, MIME type, upload size, duration, and audio-stream presence.
+- Store uploads with generated names; original filenames are metadata only.
+- Retain the original/compressed source artifact.
+- Create `analysis.wav` with FFmpeg using PCM signed 16-bit at 44.1 kHz.
+- Preserve available mono/stereo channel layout.
+- Persist source type, filename, title, uploader, duration, format, sample rate, channels, source path, normalized path, current stage, status, progress, and errors in SQLite.
+- Preview compatible audio and download source, analysis WAV, and metadata.
+- Recover the complete result after restarting the server.
+- Preserve existing URL job records through an in-place SQLite migration.
 
 ## Windows: run without Docker
 
@@ -20,7 +24,7 @@ Requirements:
 
 - Python 3.10 or newer
 - FFmpeg and ffprobe available on `PATH`
-- Node.js LTS available on `PATH`
+- Node.js LTS available on `PATH` for YouTube extraction
 
 From PowerShell in the repository root:
 
@@ -29,83 +33,91 @@ powershell -ExecutionPolicy Bypass -File .\scripts\check_windows.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\run_windows.ps1
 ```
 
-The runner creates `.venv`, installs the Python dependencies, creates the local `data` directory, and starts PopEx at <http://localhost:8000>.
+The dependency check verifies Python, FFmpeg, ffprobe, Node.js, and that the local `data` directory is writable. The runner creates `.venv`, installs dependencies, and starts PopEx at <http://localhost:8000>.
 
-If PowerShell reports that `ffmpeg`, `ffprobe`, or `node` is missing, install the dependency, close PowerShell, reopen it, and run the dependency check again.
+Common free installations:
+
+```powershell
+winget install -e --id Python.Python.3.12
+winget install -e --id OpenJS.NodeJS.LTS
+winget install -e --id Gyan.FFmpeg
+```
+
+Close and reopen PowerShell after installation.
 
 ## Run with Docker
 
-Docker Desktop must be open and its Linux engine must be running before this command is used:
+Docker Desktop must be open with its Linux engine running:
 
 ```bash
 docker compose up --build
 ```
 
-Open <http://localhost:8000>.
-
-The Compose file mounts a named volume at `/data`, so extracted files and the SQLite database survive container restarts.
-
-On Windows, verify Docker first:
-
-```powershell
-docker desktop status
-docker version
-docker context show
-```
-
-The expected context is normally `desktop-linux`. If Docker Desktop is stopped, start it from the Windows Start menu. If it is using Windows containers, switch it to Linux containers.
+Open <http://localhost:8000>. The Compose volume mounted at `/data` preserves uploaded media, generated WAV files, metadata, and SQLite history.
 
 ## Manual local setup: macOS, Linux, or Windows
-
-Requirements:
-
-- Python 3.10+
-- FFmpeg and ffprobe available on `PATH`
-- A supported JavaScript runtime such as Node.js or Deno for full YouTube extraction support
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
 pip install -e '.[dev]'
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Open <http://localhost:8000>.
 
 ## Configuration
 
-Copy `.env.example` values into your environment or Docker deployment settings.
-
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `POPEX_DATA_DIR` | `data` | Database and extracted-file root |
-| `POPEX_ALLOWED_HOSTS` | YouTube hosts | Comma-separated source host allowlist |
-| `POPEX_MAX_DURATION_SECONDS` | `1800` | Reject videos longer than this limit |
-| `POPEX_MAX_FILESIZE_MB` | `250` | Maximum source download size |
-| `POPEX_AUDIO_QUALITY` | `192` | MP3 bitrate passed to FFmpeg |
+| `POPEX_DATA_DIR` | `data` | Database and imported-file root |
+| `POPEX_ALLOWED_HOSTS` | YouTube hosts | URL source allowlist |
+| `POPEX_MAX_DURATION_SECONDS` | `1800` | Maximum accepted media duration |
+| `POPEX_MAX_FILESIZE_MB` | `250` | URL source download limit |
+| `POPEX_MAX_UPLOAD_MB` | `500` | Direct upload limit |
+| `POPEX_AUDIO_QUALITY` | `192` | URL source MP3 bitrate |
+| `POPEX_FFMPEG_BINARY` | `ffmpeg` | FFmpeg executable or explicit path |
+| `POPEX_FFPROBE_BINARY` | `ffprobe` | ffprobe executable or explicit path |
 
 ## API
 
 - `GET /api/health`
 - `POST /api/jobs` with `{ "url": "https://www.youtube.com/watch?v=..." }`
+- `POST /api/uploads` as multipart form data with field `file`
 - `GET /api/jobs`
 - `GET /api/jobs/{job_id}`
 - `GET /api/jobs/{job_id}/files/{file_name}`
+
+## Storage
+
+Each job is stored under:
+
+```text
+data/
+└── exports/
+    └── {job_id}/
+        ├── source-{generated-id}.{original-extension}  # local upload
+        ├── source.mp3                                  # URL import
+        ├── analysis.wav
+        └── metadata.json
+```
+
+Submitted filenames never determine filesystem paths.
 
 ## Validation
 
 ```bash
 pytest
+python -m compileall -q app tests
+node --check app/static/app.js
 ```
+
+Tests use generated bytes and mocked processors/subprocesses. No copyrighted media is committed.
 
 ## Important usage limitation
 
 Only process media you own or are authorized to download and transform. PopEx does not bypass DRM, authentication, paywalls, or private-access controls.
 
-## Next product slices
+## Next cycle
 
-1. WAV export for analysis-quality input.
-2. Source separation into vocals, drums, bass, and accompaniment using local Demucs `htdemucs`.
-3. Chord and beat extraction.
-4. Local Whisper lyrics alignment.
-5. Basic Pitch note transcription and MusicXML/MIDI export.
+The next cycle can consume `analysis.wav` for beat, key, and chord extraction. Demucs and transcription features remain separate later work.

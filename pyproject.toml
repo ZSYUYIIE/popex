@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "popex"
-version = "0.1.0"
-description = "Single-user video-link audio extraction MVP for PopEx"
+version = "0.2.0"
+description = "Local media ingestion and analysis-WAV preparation MVP for PopEx"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "fastapi[standard]==0.139.2",
+  "python-multipart>=0.0.20,<1",
   "yt-dlp[default]==2026.7.4",
 ]
 
