@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "popex"
+version = "0.1.0"
+description = "Single-user video-link audio extraction MVP for PopEx"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi[standard]==0.139.2",
+  "yt-dlp[default]==2026.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "httpx>=0.28,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
