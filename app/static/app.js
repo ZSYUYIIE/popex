@@ -1,297 +1,46 @@
-const urlForm = document.querySelector("#extract-form");
-const urlInput = document.querySelector("#video-url");
-const submitButton = document.querySelector("#submit-button");
-const formMessage = document.querySelector("#form-message");
-const uploadForm = document.querySelector("#upload-form");
-const fileInput = document.querySelector("#media-file");
-const uploadButton = document.querySelector("#upload-button");
-const uploadMessage = document.querySelector("#upload-message");
-const dropZone = document.querySelector("#drop-zone");
-const jobsContainer = document.querySelector("#jobs");
-const refreshButton = document.querySelector("#refresh-button");
+const $=(s)=>document.querySelector(s);
+const urlForm=$("#extract-form"),urlInput=$("#video-url"),submitButton=$("#submit-button"),formMessage=$("#form-message");
+const uploadForm=$("#upload-form"),fileInput=$("#media-file"),uploadButton=$("#upload-button"),uploadMessage=$("#upload-message"),dropZone=$("#drop-zone"),dropTitle=$("#drop-title"),selectedFileMessage=$("#selected-file");
+const jobsContainer=$("#jobs"),jobsMessage=$("#jobs-message"),refreshButton=$("#refresh-button");
+const supportedExtensions=new Set(["mp3","wav","flac","m4a","aac","ogg","mp4","mov","webm"]);const maxUploadBytes=500*1024*1024;
+let selectedUploadFile=null,pollHandle=null,lastStates=new Map();const analysisCache=new Map();
 
-const activeStatuses = new Set(["queued", "processing"]);
-let pollHandle = null;
+urlForm.addEventListener("submit",async(e)=>{e.preventDefault();if(!urlForm.reportValidity())return;setBusy(urlForm,submitButton,true,"Starting…","Prepare audio");setMessage(formMessage,"Creating the source job…");try{await requestJson("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:urlInput.value.trim()})});urlInput.value="";setMessage(formMessage,"Audio preparation and analysis started.");await loadJobs();jobsContainer.scrollIntoView({behavior:"smooth",block:"start"})}catch(error){setMessage(formMessage,error.message||"The video-link job could not be started.",true)}finally{setBusy(urlForm,submitButton,false,"Starting…","Prepare audio")}});
 
-urlForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  setButton(submitButton, true, "Starting…", "Extract audio");
-  setMessage(formMessage, "Creating URL import job…", false);
+uploadForm.addEventListener("submit",async(e)=>{e.preventDefault();const file=selectedUploadFile||fileInput.files[0];if(!file){setMessage(uploadMessage,"Select a local audio or video file before continuing.",true);fileInput.focus();return}const issue=validateFile(file);if(issue){setMessage(uploadMessage,issue,true);return}setBusy(uploadForm,uploadButton,true,"Uploading…","Upload and prepare");try{await uploadFile(file);clearFile();setMessage(uploadMessage,"Upload saved. Preparation and analysis started.");await loadJobs();jobsContainer.scrollIntoView({behavior:"smooth",block:"start"})}catch(error){setMessage(uploadMessage,error.message||"The local file could not be uploaded.",true)}finally{setBusy(uploadForm,uploadButton,false,"Uploading…","Upload and prepare")}});
 
-  try {
-    const response = await fetch("/api/jobs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: urlInput.value.trim() }),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || "The URL job could not be created.");
-    }
-    urlInput.value = "";
-    setMessage(formMessage, "Import and baseline audio analysis started.", false);
-    await loadJobs();
-  } catch (error) {
-    setMessage(formMessage, error.message, true);
-  } finally {
-    setButton(submitButton, false, "Starting…", "Extract audio");
-  }
-});
+fileInput.addEventListener("change",()=>selectFile(fileInput.files[0]||null));
+for(const name of ["dragenter","dragover"])dropZone.addEventListener(name,e=>{e.preventDefault();if(!uploadButton.disabled)dropZone.classList.add("is-dragging")});
+for(const name of ["dragleave","dragend"])dropZone.addEventListener(name,e=>{e.preventDefault();dropZone.classList.remove("is-dragging")});
+dropZone.addEventListener("drop",e=>{e.preventDefault();dropZone.classList.remove("is-dragging");if(!uploadButton.disabled)selectFile(e.dataTransfer?.files?.[0]||null)});
+refreshButton.addEventListener("click",()=>loadJobs({announce:true}));
 
-uploadForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const file = fileInput.files[0];
-  if (!file) {
-    setMessage(uploadMessage, "Select a local media file.", true);
-    return;
-  }
-  setButton(uploadButton, true, "Uploading…", "Upload and prepare");
-  setMessage(uploadMessage, `Uploading ${file.name}…`, false);
+jobsContainer.addEventListener("click",async(e)=>{const button=e.target.closest("button[data-action]");if(!button)return;const action=button.dataset.action;if(action==="retry-url"){urlInput.value=button.dataset.source||"";setMessage(formMessage,"The link is restored. Review it, then prepare audio again.");urlInput.focus();return}if(action==="retry-upload"){clearFile();setMessage(uploadMessage,"Select the original local file again to retry source preparation.");fileInput.focus();return}if(action==="analysis"){button.disabled=true;const ready=button.dataset.retry==="true"?"Retry analysis":"Analyze";button.textContent="Starting…";setJobsMessage("Starting audio analysis…");try{await requestJson(`/api/jobs/${encodeURIComponent(button.dataset.jobId)}/analyze`,{method:"POST"});analysisCache.delete(button.dataset.jobId);setJobsMessage("Audio analysis started. Progress will update automatically.");await loadJobs()}catch(error){setJobsMessage(error.message||"Audio analysis could not be started.",true);button.disabled=false;button.textContent=ready}}});
 
-  try {
-    const body = new FormData();
-    body.append("file", file, file.name);
-    const response = await fetch("/api/uploads", { method: "POST", body });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || "The local file could not be imported.");
-    }
-    fileInput.value = "";
-    updateDropZone();
-    setMessage(uploadMessage, "Upload saved. Audio preparation and analysis started.", false);
-    await loadJobs();
-  } catch (error) {
-    setMessage(uploadMessage, error.message, true);
-  } finally {
-    setButton(uploadButton, false, "Uploading…", "Upload and prepare");
-  }
-});
+function selectFile(file){selectedUploadFile=file;updateFilePresentation();if(!file){setMessage(uploadMessage,"");return}const issue=validateFile(file);setMessage(uploadMessage,issue||`${file.name} is selected and ready to upload.`,Boolean(issue))}
+function clearFile(){selectedUploadFile=null;fileInput.value="";updateFilePresentation()}
+function updateFilePresentation(){dropTitle.textContent=selectedUploadFile?"File selected":"Choose a file or drop it here";selectedFileMessage.textContent=selectedUploadFile?`${selectedUploadFile.name} · ${formatBytes(selectedUploadFile.size)}`:"No file selected";dropZone.classList.toggle("has-file",Boolean(selectedUploadFile))}
+function validateFile(file){const ext=String(file.name).split(".").pop().toLowerCase();if(!supportedExtensions.has(ext))return"Choose MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, or WebM.";if(!file.size)return"The selected file is empty.";if(file.size>maxUploadBytes)return"The selected file is larger than 500 MB.";return""}
+function uploadFile(file){return new Promise((resolve,reject)=>{const request=new XMLHttpRequest(),body=new FormData();body.append("file",file,file.name);request.open("POST","/api/uploads");request.upload.addEventListener("progress",e=>{const percent=e.lengthComputable?Math.min(99,Math.round(e.loaded/e.total*100)):null;setMessage(uploadMessage,percent===null?`Uploading ${file.name}…`:`Uploading ${file.name}: ${percent}%`)});request.addEventListener("load",()=>{const payload=parseJson(request.responseText);request.status>=200&&request.status<300?resolve(payload):reject(new Error(apiError(payload)||"The upload could not be completed."))});request.addEventListener("error",()=>reject(new Error("The upload connection failed.")));request.send(body)})}
 
-for (const eventName of ["dragenter", "dragover"]) {
-  dropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    dropZone.classList.add("dragging");
-  });
-}
-for (const eventName of ["dragleave", "drop"]) {
-  dropZone.addEventListener(eventName, (event) => {
-    event.preventDefault();
-    dropZone.classList.remove("dragging");
-  });
-}
-dropZone.addEventListener("drop", (event) => {
-  if (event.dataTransfer.files.length) {
-    fileInput.files = event.dataTransfer.files;
-    updateDropZone();
-  }
-});
-fileInput.addEventListener("change", updateDropZone);
-refreshButton.addEventListener("click", loadJobs);
-
-jobsContainer.addEventListener("click", async (event) => {
-  const button = event.target.closest("[data-analyze-job]");
-  if (!button) return;
-
-  button.disabled = true;
-  button.textContent = "Starting…";
-  try {
-    const response = await fetch(
-      `/api/jobs/${button.dataset.analyzeJob}/analyze`,
-      { method: "POST" },
-    );
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || "Audio analysis could not be started.");
-    }
-    await loadJobs();
-  } catch (error) {
-    window.alert(error.message);
-    button.disabled = false;
-    button.textContent = button.dataset.retry === "true" ? "Retry analysis" : "Analyze";
-  }
-});
-
-function updateDropZone() {
-  const selected = fileInput.files[0];
-  const strong = dropZone.querySelector("strong");
-  strong.textContent = selected ? selected.name : "Drop a file here";
-}
-
-async function loadJobs() {
-  try {
-    const response = await fetch("/api/jobs", { cache: "no-store" });
-    if (!response.ok) throw new Error("Could not load import history.");
-    const jobs = await response.json();
-    renderJobs(jobs);
-    schedulePolling(
-      jobs.some(
-        (job) => activeStatuses.has(job.status) || job.analysis?.status === "processing",
-      ),
-    );
-  } catch (error) {
-    jobsContainer.innerHTML = `<p class="empty-state error">${escapeHtml(error.message)}</p>`;
-  }
-}
-
-function renderJobs(jobs) {
-  if (!jobs.length) {
-    jobsContainer.innerHTML = `
-      <div class="empty-state">
-        <strong>No saved media yet.</strong>
-        <span>Upload a file or submit a video URL above.</span>
-      </div>`;
-    return;
-  }
-
-  jobsContainer.innerHTML = jobs.map((job) => {
-    const title = job.title || job.original_filename || "Waiting for source metadata";
-    const sourceLabel = job.source_type === "upload" ? "Local upload" : safeHost(job.source_url);
-    const statusLabel = capitalize(job.status);
-    const stageLabel = capitalize((job.stage || "queued").replaceAll("_", " "));
-    const fileLinks = job.files.length
-      ? `<div class="files">${job.files.map((file) => `
-          <div class="file-row">
-            <div>
-              <strong>${escapeHtml(file.label)}</strong>
-              <small>${escapeHtml(file.name)} · ${formatBytes(file.size_bytes)}</small>
-            </div>
-            <div class="file-actions">
-              ${file.preview_url ? `<audio controls preload="none" src="${file.preview_url}"></audio>` : ""}
-              <a href="${file.download_url}">Download</a>
-            </div>
-          </div>`).join("")}</div>`
-      : "";
-    const error = job.error
-      ? `<p class="job-error">${escapeHtml(job.error)}</p>`
-      : "";
-    const detail = [
-      job.uploader,
-      formatDuration(job.duration_seconds),
-      job.source_format,
-      job.sample_rate ? `${job.sample_rate} Hz` : "",
-      job.channel_count ? `${job.channel_count} channel${job.channel_count === 1 ? "" : "s"}` : "",
-      sourceLabel,
-    ].filter(Boolean).map(escapeHtml).join(" · ");
-
-    return `
-      <article class="job-card">
-        <div class="job-topline">
-          <span class="status status-${job.status}">${statusLabel}</span>
-          <time>${formatDate(job.created_at)}</time>
-        </div>
-        <h3>${escapeHtml(title)}</h3>
-        <p class="job-detail">${detail || "Source details pending"}</p>
-        <p class="stage-detail"><strong>${escapeHtml(stageLabel)}</strong> · ${escapeHtml(job.message || "")}</p>
-        <div class="progress-track" aria-label="${job.progress}% complete">
-          <span style="width: ${Math.max(2, job.progress)}%"></span>
-        </div>
-        ${error}
-        ${renderAnalysis(job)}
-        ${fileLinks}
-      </article>`;
-  }).join("");
-}
-
-function renderAnalysis(job) {
-  const analysis = job.analysis || { status: "not_started" };
-  const preparation = job.preparation || { status: "pending" };
-  const analysisStatus = analysis.status || "not_started";
-  const preparationStatus = preparation.status || "pending";
-  const tempo = analysis.tempoBpm
-    ? `${analysis.tempoBpm.toFixed(1)} BPM`
-    : "Unavailable";
-  const key = analysis.keySymbol || "Unavailable";
-  const preparationComplete = preparationStatus === "completed";
-
-  let action = "";
-  if (
-    preparationComplete &&
-    job.normalized_file_name &&
-    analysisStatus === "not_started"
-  ) {
-    action = `<button class="secondary-button analysis-action" data-analyze-job="${job.id}">Analyze</button>`;
-  } else if (
-    preparationComplete &&
-    job.normalized_file_name &&
-    analysisStatus === "failed"
-  ) {
-    action = `<button class="secondary-button analysis-action" data-analyze-job="${job.id}" data-retry="true">Retry analysis</button>`;
-  }
-
-  const download = analysis.download_url
-    ? `<a class="analysis-download" href="${analysis.download_url}">Download JSON</a>`
-    : "";
-
-  return `
-    <section class="analysis-panel">
-      <div class="analysis-heading">
-        <strong>Audio analysis</strong>
-        <span>
-          Source ${escapeHtml(capitalize(preparationStatus.replaceAll("_", " ")))} ·
-          Analysis ${escapeHtml(capitalize(analysisStatus.replaceAll("_", " ")))}
-        </span>
-      </div>
-      <div class="analysis-grid">
-        <span><small>Tempo estimate</small>${escapeHtml(tempo)}</span>
-        <span><small>Tonal estimate</small>${escapeHtml(key)}</span>
-        <span><small>Duration</small>${escapeHtml(formatDuration(job.duration_seconds) || "Unavailable")}</span>
-      </div>
-      ${analysis.error ? `<p class="job-error">${escapeHtml(analysis.error)}</p>` : ""}
-      <div class="analysis-actions">${action}${download}</div>
-    </section>`;
-}
-
-function schedulePolling(shouldPoll) {
-  if (pollHandle) window.clearTimeout(pollHandle);
-  pollHandle = shouldPoll ? window.setTimeout(loadJobs, 1500) : null;
-}
-
-function setButton(button, submitting, pendingLabel, readyLabel) {
-  button.disabled = submitting;
-  button.textContent = submitting ? pendingLabel : readyLabel;
-}
-
-function setMessage(element, message, isError) {
-  element.textContent = message;
-  element.classList.toggle("error", isError);
-}
-
-function safeHost(value) {
-  try { return new URL(value).hostname; } catch { return ""; }
-}
-
-function capitalize(value) {
-  return value ? value[0].toUpperCase() + value.slice(1) : "";
-}
-
-function formatDuration(seconds) {
-  if (seconds === null || seconds === undefined) return "";
-  const rounded = Math.round(seconds);
-  const minutes = Math.floor(rounded / 60);
-  const remainder = String(rounded % 60).padStart(2, "0");
-  return `${minutes}:${remainder}`;
-}
-
-function formatDate(value) {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
-}
-
-function formatBytes(value) {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 ** 2).toFixed(1)} MB`;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-loadJobs();
+async function loadJobs({announce=false}={}){jobsContainer.setAttribute("aria-busy","true");if(announce){refreshButton.disabled=true;setJobsMessage("Refreshing recent audio…")}try{const jobs=await requestJson("/api/jobs",{cache:"no-store"});const list=Array.isArray(jobs)?jobs:[];renderJobs(list);announceChanges(list);schedulePolling(list.some(job=>["queued","processing"].includes(job.status)||job.analysis?.status==="processing"));await hydrateCompletedAnalyses(list);if(announce)setJobsMessage("Recent audio is up to date.")}catch(error){jobsContainer.innerHTML=`<li class="empty-state error"><strong>Recent audio could not be loaded.</strong><span>${escapeHtml(error.message)}</span></li>`;setJobsMessage("Recent audio could not be refreshed.",true)}finally{jobsContainer.setAttribute("aria-busy","false");refreshButton.disabled=false}}
+function renderJobs(jobs){if(!jobs.length){jobsContainer.innerHTML='<li class="empty-state"><strong>No saved audio yet.</strong><span>Add a local file or supported video link above.</span></li>';return}jobsContainer.innerHTML=jobs.map(renderJob).join("")}
+function renderJob(job){const state=deriveState(job),progress=clampProgress(job.progress),title=job.title||job.original_filename||"Preparing source details",files=Array.isArray(job.files)?job.files:[],metadata=[job.original_filename,job.uploader,formatDuration(job.duration_seconds),job.source_format?.toUpperCase(),formatSampleRate(job.sample_rate),formatChannels(job.channel_count),sourceLabel(job)].filter(Boolean);return `<li><article class="job-card" aria-labelledby="job-${safeId(job.id)}-title"><div class="job-topline"><div class="badges"><span class="status status-${state.tone}"><span aria-hidden="true">${state.symbol}</span>${escapeHtml(state.label)}</span><span class="source-badge">${job.source_type==="upload"?"Local file":"Video link"}</span></div><time datetime="${escapeHtml(job.created_at||"")}">${formatDate(job.created_at)}</time></div><h3 id="job-${safeId(job.id)}-title">${escapeHtml(title)}</h3><ul class="job-meta" aria-label="Source information">${metadata.length?metadata.map(item=>`<li>${escapeHtml(item)}</li>`).join(""):"<li>Source details pending</li>"}</ul><section class="status-grid" aria-label="Job status"><div><small>Source preparation</small><strong>${escapeHtml(state.preparation)}</strong></div><div><small>Audio analysis</small><strong>${escapeHtml(state.analysis)}</strong></div></section><div class="job-progress"><div><span>${escapeHtml(humanize(job.stage||"queued"))}</span><strong>${progress}%</strong></div><progress value="${progress}" max="100" aria-label="${escapeHtml(humanize(job.stage||"queued"))}, ${progress}% complete">${progress}%</progress><p>${escapeHtml(job.message||state.message)}</p></div>${renderIngestionError(job)}${renderAnalysis(job)}${renderFiles(files)}</article></li>`}
+function deriveState(job){const prep=job.preparation?.status||job.preparation_status||(job.status==="failed"?"failed":"pending"),analysis=job.analysis?.status||job.analysis_status||"not_started";if(prep==="failed")return{label:"Source needs attention",symbol:"!",tone:"failed",preparation:"Failed",analysis:"Not available",message:"Source preparation stopped."};if(prep!=="completed")return{label:"Preparing source",symbol:"◐",tone:"processing",preparation:humanize(prep),analysis:"Not started",message:"Source preparation is in progress."};if(analysis==="processing")return{label:"Analyzing audio",symbol:"◐",tone:"processing",preparation:"Ready",analysis:"In progress",message:"Audio analysis is in progress."};if(analysis==="completed")return{label:"Source and analysis ready",symbol:"✓",tone:"completed",preparation:"Ready",analysis:"Ready",message:"Source and analysis are ready."};if(analysis==="failed")return{label:"Analysis needs attention",symbol:"!",tone:"warning",preparation:"Ready",analysis:"Failed",message:"Source audio is ready, but audio analysis could not be completed."};return{label:"Source ready",symbol:"✓",tone:"ready",preparation:"Ready",analysis:"Not started",message:"Source audio is ready. Analysis has not started."}}
+function renderIngestionError(job){const prep=job.preparation?.status||job.preparation_status;if(prep!=="failed"&&job.status!=="failed")return"";const upload=job.source_type==="upload";return `<section class="error-panel" role="alert"><strong>Audio could not be prepared.</strong><p>${escapeHtml(job.error||"Source preparation failed.")}</p><p>${upload?"Select the original file again to retry.":"Restore the link to review and retry it."}</p><button type="button" data-action="${upload?"retry-upload":"retry-url"}" data-source="${escapeHtml(job.source_url||"")}">${upload?"Select file again":"Use this link again"}</button><details><summary>Technical details</summary><p>${escapeHtml(job.error||"No additional details were provided.")}</p></details></section>`}
+function renderAnalysis(job){const analysis=job.analysis||{},status=analysis.status||job.analysis_status||"not_started",ready=(job.preparation?.status||job.preparation_status)==="completed",canAnalyze=ready&&(status==="not_started"||status==="failed")&&(job.preparation?.analysisAudioAvailable??Boolean(job.normalized_file_name)),detail=analysisCache.get(job.id),warnings=detail?.warnings||[],candidates=detail?.result?.tonality?.candidates||detail?.result?.tonality?.alternatives||[];return `<section class="analysis-panel" aria-labelledby="analysis-${safeId(job.id)}"><div class="analysis-heading"><div><h4 id="analysis-${safeId(job.id)}">Audio analysis</h4><p>${escapeHtml(analysisStatusText(status))}</p></div><span class="analysis-status">${escapeHtml(humanize(status))}</span></div><dl class="analysis-summary"><div><dt>Tempo estimate</dt><dd>${escapeHtml(formatEstimate(analysis.tempoBpm,"BPM"))}${confidenceText(analysis.tempoConfidence)}</dd></div><div><dt>Tonal estimate</dt><dd>${escapeHtml(analysis.keySymbol||"Not available")}${confidenceText(analysis.keyConfidence)}</dd></div></dl>${candidates.length?`<details><summary>Ranked tonal candidates</summary><ol class="candidate-list">${candidates.slice(0,5).map(candidate=>`<li><span>${escapeHtml(candidate.displayName||candidate.symbol||"Candidate")}</span><span>${confidenceLabel(candidate.confidence??candidate.score)}</span></li>`).join("")}</ol></details>`:""}${warnings.length?`<div class="warning-panel"><strong>Analysis warnings</strong><ul>${warnings.map(w=>`<li>${escapeHtml(w)}</li>`).join("")}</ul></div>`:""}${status==="failed"?`<div class="error-panel" role="status"><strong>Source audio is ready, but audio analysis could not be completed.</strong><p>Re-upload is not required. Source and analysis WAV artifacts remain available below.</p><details><summary>Technical details</summary><p>${escapeHtml(analysis.error||"No additional details were provided.")}</p></details></div>`:""}<div class="analysis-actions">${canAnalyze?`<button type="button" data-action="analysis" data-job-id="${escapeHtml(job.id)}" data-retry="${status==="failed"}">${status==="failed"?"Retry analysis":"Analyze"}</button>`:""}${analysis.download_url?`<a href="${escapeHtml(analysis.download_url)}" download>Download analysis JSON</a>`:""}</div></section>`}
+function renderFiles(files){if(!files.length)return"";return `<section class="artifacts" aria-label="Saved artifacts"><h4>Saved artifacts</h4><ul>${files.map(file=>`<li><div><strong>${escapeHtml(file.label||"Saved file")}</strong><small>${escapeHtml(file.name)} · ${formatBytes(file.size_bytes)}</small></div><div>${file.preview_url?`<audio controls preload="metadata" src="${escapeHtml(file.preview_url)}">Audio preview unavailable.</audio>`:""}<a href="${escapeHtml(file.download_url)}" download>Download</a></div></li>`).join("")}</ul></section>`}
+async function hydrateCompletedAnalyses(jobs){const targets=jobs.filter(job=>job.analysis?.status==="completed"&&job.analysis?.endpoint&&!analysisCache.has(job.id));if(!targets.length)return;await Promise.all(targets.map(async job=>{try{analysisCache.set(job.id,await requestJson(job.analysis.endpoint,{cache:"no-store"}))}catch{analysisCache.set(job.id,null)}}));renderJobs(jobs)}
+function analysisStatusText(status){if(status==="processing")return"Backend-provided analysis progress is shown above.";if(status==="completed")return"These are confidence-scored estimates, not the only possible musical interpretation.";if(status==="failed")return"The prepared source remains usable and analysis can be retried.";return"The source is ready. Start analysis when needed."}
+function announceChanges(jobs){const next=new Map(),changes=[];for(const job of jobs){const state=`${job.status}:${job.stage}:${job.message}:${job.analysis?.status}`;next.set(job.id,state);const prior=lastStates.get(job.id);if(prior&&prior!==state)changes.push(`${job.title||job.original_filename||"Audio job"}: ${deriveState(job).label}.`)}lastStates=next;if(changes.length)setJobsMessage(changes.slice(0,2).join(" "))}
+function schedulePolling(active){if(pollHandle)clearTimeout(pollHandle);pollHandle=active?setTimeout(loadJobs,1500):null}
+async function requestJson(url,options={}){const response=await fetch(url,options);let payload=null;try{payload=await response.json()}catch{}if(!response.ok)throw new Error(apiError(payload)||`Request failed (${response.status}).`);return payload}
+function apiError(payload){if(typeof payload?.detail==="string")return payload.detail;if(Array.isArray(payload?.detail))return payload.detail.map(item=>item.msg).filter(Boolean).join(" ");return""}
+function parseJson(value){try{return JSON.parse(value)}catch{return null}}
+function setBusy(form,button,busy,pending,ready){form.setAttribute("aria-busy",String(busy));button.disabled=busy;button.textContent=busy?pending:ready}
+function setMessage(element,message,error=false){element.textContent=message;element.classList.toggle("error",error)}function setJobsMessage(message,error=false){setMessage(jobsMessage,message,error)}
+function sourceLabel(job){if(job.source_type==="upload")return"Local upload";try{return new URL(job.source_url).hostname.replace(/^www\./,"")}catch{return"Video link"}}
+function confidenceText(value){return value===null||value===undefined?"":`<small>Confidence: ${confidenceLabel(value)}</small>`}function confidenceLabel(value){const n=Number(value);if(!Number.isFinite(n))return"not available";if(n>=.67)return"high";if(n>=.34)return"moderate";return"low"}
+function formatEstimate(value,suffix){const n=Number(value);return Number.isFinite(n)?`${n.toFixed(1)} ${suffix}`:"Not available"}function humanize(value){return String(value||"").replaceAll("_"," ").replaceAll("-"," ").replace(/\b\w/g,l=>l.toUpperCase())}function safeId(value){return String(value||"job").replace(/[^a-zA-Z0-9_-]/g,"-")}function clampProgress(value){const n=Number(value);return Number.isFinite(n)?Math.round(Math.max(0,Math.min(100,n))):0}
+function formatDuration(seconds){const n=Number(seconds);if(!Number.isFinite(n))return"";const rounded=Math.max(0,Math.round(n)),minutes=Math.floor(rounded/60);return`${minutes}:${String(rounded%60).padStart(2,"0")}`}function formatSampleRate(value){const n=Number(value);return Number.isFinite(n)&&n>0?`${n>=1000?(n/1000).toFixed(n%1000===0?0:1):n} ${n>=1000?"kHz":"Hz"}`:""}function formatChannels(value){const n=Number(value);return n===1?"Mono":n===2?"Stereo":Number.isFinite(n)&&n>0?`${n} channels`:""}function formatDate(value){const d=new Date(value);return Number.isNaN(d.getTime())?"Date unavailable":new Intl.DateTimeFormat(undefined,{dateStyle:"medium",timeStyle:"short"}).format(d)}function formatBytes(value){const bytes=Number(value);if(!Number.isFinite(bytes))return"Size unavailable";if(bytes<1024)return`${bytes} B`;if(bytes<1024**2)return`${(bytes/1024).toFixed(1)} KB`;return`${(bytes/1024**2).toFixed(1)} MB`}function escapeHtml(value){return String(value??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;")}
+updateFilePresentation();loadJobs();
