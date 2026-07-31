@@ -200,6 +200,22 @@ button:disabled { cursor: wait; opacity: 0.65; }
   background: #2a2d34;
 }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width 300ms ease; }
+.analysis-panel {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0c0e12;
+}
+.analysis-heading, .analysis-actions { display: flex; align-items: center; }
+.analysis-heading { justify-content: space-between; gap: 16px; }
+.analysis-heading span { color: var(--muted); font-size: 12px; text-align: right; }
+.analysis-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+.analysis-grid span { display: grid; gap: 4px; }
+.analysis-grid small { color: var(--muted); }
+.analysis-actions { gap: 10px; margin-top: 14px; }
+.analysis-action { padding: 9px 12px; }
+.analysis-download { color: var(--text); font-size: 13px; }
 .files { display: grid; gap: 8px; margin-top: 18px; }
 .file-row {
   display: flex;
@@ -234,6 +250,9 @@ button:disabled { cursor: wait; opacity: 0.65; }
   .input-row { align-items: stretch; flex-direction: column; }
   .workflow { grid-template-columns: 1fr; }
   .jobs-section { padding-top: 70px; }
+  .analysis-grid { grid-template-columns: 1fr; }
+  .analysis-heading { align-items: flex-start; flex-direction: column; }
+  .analysis-heading span { text-align: left; }
   .file-row, .file-actions { align-items: stretch; flex-direction: column; }
   .file-actions audio { width: 100%; }
 }

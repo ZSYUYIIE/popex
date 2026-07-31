@@ -29,7 +29,7 @@ urlForm.addEventListener("submit", async (event) => {
       throw new Error(payload.detail || "The URL job could not be created.");
     }
     urlInput.value = "";
-    setMessage(formMessage, "Import started. This page will update automatically.", false);
+    setMessage(formMessage, "Import and baseline audio analysis started.", false);
     await loadJobs();
   } catch (error) {
     setMessage(formMessage, error.message, true);
@@ -58,7 +58,7 @@ uploadForm.addEventListener("submit", async (event) => {
     }
     fileInput.value = "";
     updateDropZone();
-    setMessage(uploadMessage, "Upload saved. WAV preparation has started.", false);
+    setMessage(uploadMessage, "Upload saved. Audio preparation and analysis started.", false);
     await loadJobs();
   } catch (error) {
     setMessage(uploadMessage, error.message, true);
@@ -88,6 +88,29 @@ dropZone.addEventListener("drop", (event) => {
 fileInput.addEventListener("change", updateDropZone);
 refreshButton.addEventListener("click", loadJobs);
 
+jobsContainer.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-analyze-job]");
+  if (!button) return;
+
+  button.disabled = true;
+  button.textContent = "Starting…";
+  try {
+    const response = await fetch(
+      `/api/jobs/${button.dataset.analyzeJob}/analyze`,
+      { method: "POST" },
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.detail || "Audio analysis could not be started.");
+    }
+    await loadJobs();
+  } catch (error) {
+    window.alert(error.message);
+    button.disabled = false;
+    button.textContent = button.dataset.retry === "true" ? "Retry analysis" : "Analyze";
+  }
+});
+
 function updateDropZone() {
   const selected = fileInput.files[0];
   const strong = dropZone.querySelector("strong");
@@ -100,7 +123,11 @@ async function loadJobs() {
     if (!response.ok) throw new Error("Could not load import history.");
     const jobs = await response.json();
     renderJobs(jobs);
-    schedulePolling(jobs.some((job) => activeStatuses.has(job.status)));
+    schedulePolling(
+      jobs.some(
+        (job) => activeStatuses.has(job.status) || job.analysis?.status === "processing",
+      ),
+    );
   } catch (error) {
     jobsContainer.innerHTML = `<p class="empty-state error">${escapeHtml(error.message)}</p>`;
   }
@@ -159,9 +186,59 @@ function renderJobs(jobs) {
           <span style="width: ${Math.max(2, job.progress)}%"></span>
         </div>
         ${error}
+        ${renderAnalysis(job)}
         ${fileLinks}
       </article>`;
   }).join("");
+}
+
+function renderAnalysis(job) {
+  const analysis = job.analysis || { status: "not_started" };
+  const preparation = job.preparation || { status: "pending" };
+  const analysisStatus = analysis.status || "not_started";
+  const preparationStatus = preparation.status || "pending";
+  const tempo = analysis.tempoBpm
+    ? `${analysis.tempoBpm.toFixed(1)} BPM`
+    : "Unavailable";
+  const key = analysis.keySymbol || "Unavailable";
+  const preparationComplete = preparationStatus === "completed";
+
+  let action = "";
+  if (
+    preparationComplete &&
+    job.normalized_file_name &&
+    analysisStatus === "not_started"
+  ) {
+    action = `<button class="secondary-button analysis-action" data-analyze-job="${job.id}">Analyze</button>`;
+  } else if (
+    preparationComplete &&
+    job.normalized_file_name &&
+    analysisStatus === "failed"
+  ) {
+    action = `<button class="secondary-button analysis-action" data-analyze-job="${job.id}" data-retry="true">Retry analysis</button>`;
+  }
+
+  const download = analysis.download_url
+    ? `<a class="analysis-download" href="${analysis.download_url}">Download JSON</a>`
+    : "";
+
+  return `
+    <section class="analysis-panel">
+      <div class="analysis-heading">
+        <strong>Audio analysis</strong>
+        <span>
+          Source ${escapeHtml(capitalize(preparationStatus.replaceAll("_", " ")))} ·
+          Analysis ${escapeHtml(capitalize(analysisStatus.replaceAll("_", " ")))}
+        </span>
+      </div>
+      <div class="analysis-grid">
+        <span><small>Tempo estimate</small>${escapeHtml(tempo)}</span>
+        <span><small>Tonal estimate</small>${escapeHtml(key)}</span>
+        <span><small>Duration</small>${escapeHtml(formatDuration(job.duration_seconds) || "Unavailable")}</span>
+      </div>
+      ${analysis.error ? `<p class="job-error">${escapeHtml(analysis.error)}</p>` : ""}
+      <div class="analysis-actions">${action}${download}</div>
+    </section>`;
 }
 
 function schedulePolling(shouldPoll) {

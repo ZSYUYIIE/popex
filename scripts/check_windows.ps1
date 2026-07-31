@@ -49,6 +49,23 @@ try {
     $allPresent = $false
 }
 
+$venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+if (Test-Path $venvPython) {
+    & $venvPython -c @"
+import librosa
+import numpy
+import scipy
+import soundfile
+print('[ok]      local audio-analysis Python packages')
+"@
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[invalid] Re-run scripts\run_windows.ps1 to install the audio-analysis dependencies." -ForegroundColor Red
+        $allPresent = $false
+    }
+} else {
+    Write-Host "[info]    .venv is not created yet; run_windows.ps1 will install analysis packages." -ForegroundColor DarkGray
+}
+
 if (-not $allPresent) {
     Write-Host ""
     Write-Host "Install or fix the missing dependencies, reopen PowerShell, and run this check again." -ForegroundColor Yellow

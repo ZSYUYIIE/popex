@@ -16,6 +16,17 @@ NEW_COLUMNS: dict[str, str] = {
     "channel_count": "INTEGER",
     "source_file_name": "TEXT",
     "normalized_file_name": "TEXT",
+    "metadata_file_name": "TEXT",
+    "preparation_status": "TEXT NOT NULL DEFAULT 'pending'",
+    "analysis_status": "TEXT NOT NULL DEFAULT 'not_started'",
+    "analysis_version": "TEXT",
+    "tempo_bpm": "REAL",
+    "tempo_confidence": "REAL",
+    "key_symbol": "TEXT",
+    "key_confidence": "REAL",
+    "analysis_json_file_name": "TEXT",
+    "analyzed_at": "TEXT",
+    "analysis_error": "TEXT",
 }
 
 
@@ -54,7 +65,18 @@ def init_database(database_path: Path) -> None:
                 sample_rate INTEGER,
                 channel_count INTEGER,
                 source_file_name TEXT,
-                normalized_file_name TEXT
+                normalized_file_name TEXT,
+                metadata_file_name TEXT,
+                preparation_status TEXT NOT NULL DEFAULT 'pending',
+                analysis_status TEXT NOT NULL DEFAULT 'not_started',
+                analysis_version TEXT,
+                tempo_bpm REAL,
+                tempo_confidence REAL,
+                key_symbol TEXT,
+                key_confidence REAL,
+                analysis_json_file_name TEXT,
+                analyzed_at TEXT,
+                analysis_error TEXT
             )
             """
         )
@@ -67,17 +89,46 @@ def init_database(database_path: Path) -> None:
                 connection.execute(
                     f"ALTER TABLE jobs ADD COLUMN {column} {definition}"
                 )
+
         connection.execute(
             """
             UPDATE jobs
             SET source_type = COALESCE(NULLIF(source_type, ''), 'url'),
-                stage = CASE
+                metadata_file_name = CASE
+                    WHEN normalized_file_name IS NOT NULL
+                         AND normalized_file_name != ''
+                        THEN COALESCE(NULLIF(metadata_file_name, ''), 'metadata.json')
+                    ELSE metadata_file_name
+                END,
+                preparation_status = CASE
+                    WHEN normalized_file_name IS NOT NULL
+                         AND normalized_file_name != '' THEN 'completed'
                     WHEN status = 'completed' THEN 'completed'
                     WHEN status = 'failed' THEN 'failed'
-                    WHEN status = 'processing' AND stage = 'queued' THEN 'importing'
+                    WHEN preparation_status IS NULL
+                         OR preparation_status = '' THEN 'pending'
+                    ELSE preparation_status
+                END,
+                stage = CASE
+                    WHEN normalized_file_name IS NOT NULL
+                         AND normalized_file_name != ''
+                         AND analysis_status = 'failed' THEN 'completed'
+                    WHEN status = 'completed'
+                         AND (stage IS NULL OR stage = '' OR stage = 'queued')
+                        THEN 'completed'
+                    WHEN status = 'failed'
+                         AND (stage IS NULL OR stage = '' OR stage = 'queued')
+                        THEN 'failed'
+                    WHEN status = 'processing'
+                         AND (stage IS NULL OR stage = '' OR stage = 'queued')
+                        THEN 'importing'
                     WHEN stage IS NULL OR stage = '' THEN 'queued'
                     ELSE stage
-                END
+                END,
+                analysis_status = COALESCE(
+                    NULLIF(analysis_status, ''),
+                    'not_started'
+                )
             """
         )
 
@@ -88,10 +139,37 @@ def fail_incomplete_jobs(database_path: Path) -> None:
         connection.execute(
             """
             UPDATE jobs
-            SET status = 'failed',
-                stage = 'failed',
-                message = 'Processing was interrupted by a server restart.',
-                error = 'The server restarted before this extraction completed.',
+            SET status = CASE
+                    WHEN preparation_status = 'completed' THEN 'completed'
+                    ELSE 'failed'
+                END,
+                stage = CASE
+                    WHEN preparation_status = 'completed' THEN 'completed'
+                    ELSE 'failed'
+                END,
+                progress = CASE
+                    WHEN preparation_status = 'completed' AND progress >= 100
+                        THEN 95
+                    ELSE progress
+                END,
+                message = CASE
+                    WHEN preparation_status = 'completed'
+                        THEN 'Source preparation is complete; audio analysis was interrupted.'
+                    ELSE 'Processing was interrupted by a server restart.'
+                END,
+                error = CASE
+                    WHEN preparation_status = 'completed' THEN NULL
+                    ELSE 'The server restarted before source preparation completed.'
+                END,
+                analysis_status = CASE
+                    WHEN analysis_status = 'processing' THEN 'failed'
+                    ELSE analysis_status
+                END,
+                analysis_error = CASE
+                    WHEN analysis_status = 'processing'
+                        THEN 'Audio analysis was interrupted by a server restart.'
+                    ELSE analysis_error
+                END,
                 updated_at = ?
             WHERE status IN ('queued', 'processing')
             """,
@@ -112,9 +190,23 @@ def create_job(
         connection.execute(
             """
             INSERT INTO jobs (
-                id, source_url, source_type, original_filename,
-                status, stage, progress, message, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, 'Waiting to start.', ?, ?)
+                id,
+                source_url,
+                source_type,
+                original_filename,
+                status,
+                stage,
+                progress,
+                message,
+                preparation_status,
+                analysis_status,
+                created_at,
+                updated_at
+            ) VALUES (
+                ?, ?, ?, ?,
+                'queued', 'queued', 0, 'Waiting to start.',
+                'pending', 'not_started', ?, ?
+            )
             """,
             (job_id, source_url, source_type, original_filename, now, now),
         )
@@ -125,23 +217,14 @@ def create_job(
 
 
 def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
-    allowed = {
+    allowed = set(NEW_COLUMNS) | {
         "source_url",
-        "source_type",
         "status",
-        "stage",
         "progress",
-        "message",
         "title",
         "uploader",
         "duration_seconds",
         "error",
-        "original_filename",
-        "source_format",
-        "sample_rate",
-        "channel_count",
-        "source_file_name",
-        "normalized_file_name",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
     if not values:
@@ -158,7 +241,9 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
 
 def get_job(database_path: Path, job_id: str) -> dict[str, Any] | None:
     with connect(database_path) as connection:
-        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
     return dict(row) if row else None
 
 

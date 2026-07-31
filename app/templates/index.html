@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PopEx — audio ingestion workspace</title>
+    <title>PopEx — audio analysis workspace</title>
     <link rel="stylesheet" href="/static/styles.css" />
     <script src="/static/app.js" defer></script>
   </head>
@@ -14,16 +14,17 @@
           <span class="brand-mark">PX</span>
           <span>PopEx</span>
         </a>
-        <span class="badge">MVP · source preparation</span>
+        <span class="badge">MVP · audio analysis</span>
       </header>
 
       <section class="hero" aria-labelledby="page-title">
-        <p class="eyebrow">INGESTION PIPELINE</p>
-        <h1 id="page-title">Prepare local or linked media for analysis.</h1>
+        <p class="eyebrow">INGESTION + ANALYSIS</p>
+        <h1 id="page-title">Prepare media and extract reliable audio metadata.</h1>
         <p class="lede">
-          Import a local audio or video file, or keep using a supported YouTube
-          link. PopEx saves the source and creates a 44.1 kHz PCM WAV for later
-          chord analysis.
+          Import a local audio or video file, or use a supported YouTube link.
+          PopEx retains the source, creates analysis audio, then estimates timing
+          and tonal metadata for planned stem separation and version-specific
+          sheet-music generation.
         </p>
 
         <div class="source-grid">
@@ -79,8 +80,8 @@
         </article>
         <article>
           <span>03</span>
-          <h2>Persist</h2>
-          <p>Store metadata and both artifacts for the next analysis cycle.</p>
+          <h2>Analyze</h2>
+          <p>Estimate levels, tempo, beats, tuning, and tonal center.</p>
         </article>
       </section>
 
