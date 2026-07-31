@@ -4,12 +4,26 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+
 DEFAULT_ALLOWED_HOSTS = (
-    "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
 )
 SUPPORTED_MEDIA_EXTENSIONS = (
-    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".mp4", ".mov", ".webm",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".mp4",
+    ".mov",
+    ".webm",
 )
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -50,13 +64,17 @@ class Settings:
             probe.write_text("ok", encoding="utf-8")
             probe.unlink()
         except OSError as exc:
-            raise RuntimeError(f"PopEx data directory is not writable: {self.data_dir}") from exc
+            raise RuntimeError(
+                f"PopEx data directory is not writable: {self.data_dir}"
+            ) from exc
 
     @classmethod
     def from_env(cls) -> "Settings":
         hosts = tuple(
             host.strip().lower()
-            for host in os.getenv("POPEX_ALLOWED_HOSTS", ",".join(DEFAULT_ALLOWED_HOSTS)).split(",")
+            for host in os.getenv(
+                "POPEX_ALLOWED_HOSTS", ",".join(DEFAULT_ALLOWED_HOSTS)
+            ).split(",")
             if host.strip()
         )
         return cls(
@@ -66,12 +84,21 @@ class Settings:
             max_filesize_mb=_positive_int("POPEX_MAX_FILESIZE_MB", 250),
             max_upload_mb=_positive_int("POPEX_MAX_UPLOAD_MB", 500),
             audio_quality=os.getenv("POPEX_AUDIO_QUALITY", "192").strip() or "192",
-            ffmpeg_binary=os.getenv("POPEX_FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg",
-            ffprobe_binary=os.getenv("POPEX_FFPROBE_BINARY", "ffprobe").strip() or "ffprobe",
+            ffmpeg_binary=os.getenv("POPEX_FFMPEG_BINARY", "ffmpeg").strip()
+            or "ffmpeg",
+            ffprobe_binary=os.getenv("POPEX_FFPROBE_BINARY", "ffprobe").strip()
+            or "ffprobe",
             audio_analysis_enabled=_boolean("AUDIO_ANALYSIS_ENABLED", True),
-            audio_analysis_version=os.getenv("AUDIO_ANALYSIS_VERSION", "baseline-librosa-v1").strip() or "baseline-librosa-v1",
-            audio_analysis_timeout_seconds=_positive_int("AUDIO_ANALYSIS_TIMEOUT_SECONDS", 300),
-            audio_silence_rms_threshold=_positive_float("AUDIO_SILENCE_RMS_THRESHOLD", 0.0001),
+            audio_analysis_version=os.getenv(
+                "AUDIO_ANALYSIS_VERSION", "baseline-librosa-v1"
+            ).strip()
+            or "baseline-librosa-v1",
+            audio_analysis_timeout_seconds=_positive_int(
+                "AUDIO_ANALYSIS_TIMEOUT_SECONDS", 300
+            ),
+            audio_silence_rms_threshold=_positive_float(
+                "AUDIO_SILENCE_RMS_THRESHOLD", 0.0001
+            ),
         )
 
 
