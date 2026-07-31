@@ -1,5 +1,66 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>PopEx</title></head>
-<body><a href="#main-content">Skip to main content</a><main id="main-content"><h1>PopEx audio preparation and analysis</h1></main></body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f5f7">
+  <title>PopEx — audio preparation and analysis</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <header class="app-header" role="banner">
+    <div class="header-inner">
+      <a class="brand" href="/" aria-label="PopEx home"><span class="brand-mark" aria-hidden="true">P</span><span><strong>PopEx</strong><small>Audio preparation and analysis</small></span></a>
+      <span class="workspace-state"><span aria-hidden="true">●</span> Local workspace</span>
+    </div>
+  </header>
+  <main id="main-content" class="page-shell">
+    <section class="intro" aria-labelledby="page-title">
+      <p class="eyebrow">Analysis foundation</p>
+      <h1 id="page-title">Prepare a recording and inspect its first musical estimates.</h1>
+      <p>Upload local audio or video, or import a supported video link. PopEx retains the source, creates analysis-ready WAV audio, and estimates timing and tonal candidates.</p>
+      <p class="scope-note">The eventual product goal is version-specific sheet music, parts, tabs, drums, percussion, and chord symbols. This MVP does not yet generate notation or separated stems.</p>
+    </section>
+    <section aria-labelledby="source-title">
+      <div class="section-heading"><div><p class="section-kicker">New source</p><h2 id="source-title">Add media</h2><p>Both methods use the same preparation and analysis pipeline.</p></div></div>
+      <div class="source-grid">
+        <section class="panel" aria-labelledby="upload-title">
+          <h3 id="upload-title">Local file</h3>
+          <form id="upload-form" aria-describedby="upload-guidance upload-message">
+            <label id="drop-zone" class="drop-zone" for="media-file">
+              <span class="drop-icon" aria-hidden="true">＋</span>
+              <strong id="drop-title">Choose a file or drop it here</strong>
+              <span id="selected-file" aria-live="polite">No file selected</span>
+              <input id="media-file" name="file" type="file" required accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.mp4,.mov,.webm,audio/*,video/*">
+            </label>
+            <p id="upload-guidance" class="hint">MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, or WebM. Maximum 500 MB.</p>
+            <button id="upload-button" type="submit">Upload and prepare</button>
+            <p id="upload-message" class="form-message" role="status" aria-live="polite"></p>
+          </form>
+        </section>
+        <section class="panel" aria-labelledby="url-title">
+          <h3 id="url-title">Video link</h3>
+          <form id="extract-form" aria-describedby="url-guidance form-message">
+            <label for="video-url">Supported video URL</label>
+            <input id="video-url" name="url" type="url" required autocomplete="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=...">
+            <p id="url-guidance" class="hint">Use one public, non-live source you are authorized to process.</p>
+            <button id="submit-button" type="submit">Prepare audio</button>
+            <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
+          </form>
+        </section>
+      </div>
+    </section>
+    <aside class="panel process-panel" aria-labelledby="process-title">
+      <h2 id="process-title">Current workflow</h2>
+      <ol><li><strong>Prepare source</strong><span>Validate, retain, and normalize the media.</span></li><li><strong>Analyze audio</strong><span>Estimate signal quality, tempo, beats, tuning, and tonal candidates.</span></li><li><strong>Review results</strong><span>Download source artifacts, analysis WAV, metadata, and versioned analysis JSON.</span></li></ol>
+    </aside>
+    <section class="jobs-section" aria-labelledby="jobs-title">
+      <div class="section-heading"><div><p class="section-kicker">Workspace</p><h2 id="jobs-title" tabindex="-1">Recent audio</h2><p>Active jobs update automatically. Backend stage, message, and progress are shown directly.</p></div><button id="refresh-button" class="secondary" type="button">Refresh</button></div>
+      <p id="jobs-message" class="form-message" role="status" aria-live="polite"></p>
+      <ol id="jobs" class="job-list" aria-busy="true"><li class="empty-state"><strong>Loading recent audio…</strong></li></ol>
+    </section>
+  </main>
+</body>
 </html>
