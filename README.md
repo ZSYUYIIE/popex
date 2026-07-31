@@ -1,6 +1,6 @@
 # PopEx MVP
 
-PopEx is the first working slice of a pop-music transcription product. This MVP accepts a supported video URL, extracts an MP3 audio source, stores it persistently, and shows a downloadable job history.
+PopEx is the first working slice of a local-first pop-music transcription product. This MVP accepts a supported video URL, extracts an MP3 audio source, stores it persistently, and shows a downloadable job history.
 
 ## Current scope
 
@@ -14,7 +14,28 @@ PopEx is the first working slice of a pop-music transcription product. This MVP 
 
 Chord, note, stem, lyric, and score extraction are intentionally not included in this first slice. The saved audio becomes the input for those later stages.
 
+## Windows: run without Docker
+
+Requirements:
+
+- Python 3.10 or newer
+- FFmpeg and ffprobe available on `PATH`
+- Node.js LTS available on `PATH`
+
+From PowerShell in the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check_windows.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_windows.ps1
+```
+
+The runner creates `.venv`, installs the Python dependencies, creates the local `data` directory, and starts PopEx at <http://localhost:8000>.
+
+If PowerShell reports that `ffmpeg`, `ffprobe`, or `node` is missing, install the dependency, close PowerShell, reopen it, and run the dependency check again.
+
 ## Run with Docker
+
+Docker Desktop must be open and its Linux engine must be running before this command is used:
 
 ```bash
 docker compose up --build
@@ -24,7 +45,17 @@ Open <http://localhost:8000>.
 
 The Compose file mounts a named volume at `/data`, so extracted files and the SQLite database survive container restarts.
 
-## Run locally
+On Windows, verify Docker first:
+
+```powershell
+docker desktop status
+docker version
+docker context show
+```
+
+The expected context is normally `desktop-linux`. If Docker Desktop is stopped, start it from the Windows Start menu. If it is using Windows containers, switch it to Linux containers.
+
+## Manual local setup: macOS, Linux, or Windows
 
 Requirements:
 
@@ -74,7 +105,7 @@ Only process media you own or are authorized to download and transform. PopEx do
 ## Next product slices
 
 1. WAV export for analysis-quality input.
-2. Source separation into vocals, drums, bass, and accompaniment.
+2. Source separation into vocals, drums, bass, and accompaniment using local Demucs `htdemucs`.
 3. Chord and beat extraction.
-4. Lyrics alignment.
-5. Note transcription and MusicXML/PDF export.
+4. Local Whisper lyrics alignment.
+5. Basic Pitch note transcription and MusicXML/MIDI export.
