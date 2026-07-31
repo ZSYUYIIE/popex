@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PopEx — audio extraction workspace</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <a class="brand" href="/" aria-label="PopEx home">
+          <span class="brand-mark">PX</span>
+          <span>PopEx</span>
+        </a>
+        <span class="badge">MVP · source capture</span>
+      </header>
+
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">FIRST PIPELINE STAGE</p>
+        <h1 id="page-title">Turn a video link into a saved audio source.</h1>
+        <p class="lede">
+          Paste a supported YouTube link. PopEx extracts an MP3, stores it in your
+          workspace, and keeps the file ready for later chord and note analysis.
+        </p>
+
+        <form id="extract-form" class="extract-form">
+          <label for="video-url">Video URL</label>
+          <div class="input-row">
+            <input
+              id="video-url"
+              name="url"
+              type="url"
+              required
+              autocomplete="off"
+              placeholder="https://www.youtube.com/watch?v=..."
+            />
+            <button id="submit-button" type="submit">Extract audio</button>
+          </div>
+          <p class="form-note">
+            Use media you own or are authorized to download. Playlists, live streams,
+            private content, DRM, and paywall bypass are not supported.
+          </p>
+          <p id="form-message" class="form-message" role="status"></p>
+        </form>
+      </section>
+
+      <section class="workflow" aria-label="Current workflow">
+        <article>
+          <span>01</span>
+          <h2>Capture</h2>
+          <p>Validate the link and retrieve one source video.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h2>Convert</h2>
+          <p>Use FFmpeg to create a consistent MP3 source.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h2>Save</h2>
+          <p>Persist audio and metadata for future score extraction.</p>
+        </article>
+      </section>
+
+      <section class="jobs-section" aria-labelledby="jobs-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">WORKSPACE</p>
+            <h2 id="jobs-title">Saved extractions</h2>
+          </div>
+          <button id="refresh-button" class="secondary-button" type="button">Refresh</button>
+        </div>
+        <div id="jobs" class="jobs" aria-live="polite">
+          <p class="empty-state">Loading extraction history…</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
