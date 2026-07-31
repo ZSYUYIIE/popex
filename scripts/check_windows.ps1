@@ -21,26 +21,10 @@ Write-Host "PopEx Windows dependency check" -ForegroundColor Cyan
 Write-Host ""
 
 $allPresent = $true
-$allPresent = (
-    Test-Command `
-        -Name "python" `
-        -InstallHint "Install Python 3.10+ and enable Add Python to PATH."
-) -and $allPresent
-$allPresent = (
-    Test-Command `
-        -Name "ffmpeg" `
-        -InstallHint "Install FFmpeg, then reopen PowerShell so PATH is refreshed."
-) -and $allPresent
-$allPresent = (
-    Test-Command `
-        -Name "ffprobe" `
-        -InstallHint "ffprobe is included with normal FFmpeg distributions."
-) -and $allPresent
-$allPresent = (
-    Test-Command `
-        -Name "node" `
-        -InstallHint "Install Node.js LTS for reliable YouTube extraction support."
-) -and $allPresent
+$allPresent = (Test-Command -Name "python" -InstallHint "Install Python 3.10+ and enable Add Python to PATH.") -and $allPresent
+$allPresent = (Test-Command -Name "ffmpeg" -InstallHint "Install FFmpeg, then reopen PowerShell so PATH is refreshed.") -and $allPresent
+$allPresent = (Test-Command -Name "ffprobe" -InstallHint "ffprobe is included with normal FFmpeg distributions.") -and $allPresent
+$allPresent = (Test-Command -Name "node" -InstallHint "Install Node.js LTS for reliable YouTube extraction support.") -and $allPresent
 
 if (Get-Command python -ErrorAction SilentlyContinue) {
     $pythonVersion = python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
