@@ -29,11 +29,7 @@ urlForm.addEventListener("submit", async (event) => {
       throw new Error(payload.detail || "The URL job could not be created.");
     }
     urlInput.value = "";
-    setMessage(
-      formMessage,
-      "Import and baseline audio analysis started.",
-      false,
-    );
+    setMessage(formMessage, "Import and baseline audio analysis started.", false);
     await loadJobs();
   } catch (error) {
     setMessage(formMessage, error.message, true);
@@ -55,21 +51,14 @@ uploadForm.addEventListener("submit", async (event) => {
   try {
     const body = new FormData();
     body.append("file", file, file.name);
-    const response = await fetch("/api/uploads", {
-      method: "POST",
-      body,
-    });
+    const response = await fetch("/api/uploads", { method: "POST", body });
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload.detail || "The local file could not be imported.");
     }
     fileInput.value = "";
     updateDropZone();
-    setMessage(
-      uploadMessage,
-      "Upload saved. Audio preparation and analysis started.",
-      false,
-    );
+    setMessage(uploadMessage, "Upload saved. Audio preparation and analysis started.", false);
     await loadJobs();
   } catch (error) {
     setMessage(uploadMessage, error.message, true);
@@ -112,16 +101,13 @@ jobsContainer.addEventListener("click", async (event) => {
     );
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(
-        payload.detail || "Audio analysis could not be started.",
-      );
+      throw new Error(payload.detail || "Audio analysis could not be started.");
     }
     await loadJobs();
   } catch (error) {
     window.alert(error.message);
     button.disabled = false;
-    button.textContent =
-      button.dataset.retry === "true" ? "Retry analysis" : "Analyze";
+    button.textContent = button.dataset.retry === "true" ? "Retry analysis" : "Analyze";
   }
 });
 
@@ -139,9 +125,7 @@ async function loadJobs() {
     renderJobs(jobs);
     schedulePolling(
       jobs.some(
-        (job) =>
-          activeStatuses.has(job.status) ||
-          job.analysis?.status === "processing",
+        (job) => activeStatuses.has(job.status) || job.analysis?.status === "processing",
       ),
     );
   } catch (error) {
@@ -159,57 +143,37 @@ function renderJobs(jobs) {
     return;
   }
 
-  jobsContainer.innerHTML = jobs
-    .map((job) => {
-      const title =
-        job.title || job.original_filename || "Waiting for source metadata";
-      const sourceLabel =
-        job.source_type === "upload"
-          ? "Local upload"
-          : safeHost(job.source_url);
-      const statusLabel = capitalize(job.status);
-      const stageLabel = capitalize(
-        (job.stage || "queued").replaceAll("_", " "),
-      );
-      const fileLinks = job.files.length
-        ? `<div class="files">${job.files
-            .map(
-              (file) => `
+  jobsContainer.innerHTML = jobs.map((job) => {
+    const title = job.title || job.original_filename || "Waiting for source metadata";
+    const sourceLabel = job.source_type === "upload" ? "Local upload" : safeHost(job.source_url);
+    const statusLabel = capitalize(job.status);
+    const stageLabel = capitalize((job.stage || "queued").replaceAll("_", " "));
+    const fileLinks = job.files.length
+      ? `<div class="files">${job.files.map((file) => `
           <div class="file-row">
             <div>
               <strong>${escapeHtml(file.label)}</strong>
               <small>${escapeHtml(file.name)} · ${formatBytes(file.size_bytes)}</small>
             </div>
             <div class="file-actions">
-              ${
-                file.preview_url
-                  ? `<audio controls preload="none" src="${file.preview_url}"></audio>`
-                  : ""
-              }
+              ${file.preview_url ? `<audio controls preload="none" src="${file.preview_url}"></audio>` : ""}
               <a href="${file.download_url}">Download</a>
             </div>
-          </div>`,
-            )
-            .join("")}</div>`
-        : "";
-      const error = job.error
-        ? `<p class="job-error">${escapeHtml(job.error)}</p>`
-        : "";
-      const detail = [
-        job.uploader,
-        formatDuration(job.duration_seconds),
-        job.source_format,
-        job.sample_rate ? `${job.sample_rate} Hz` : "",
-        job.channel_count
-          ? `${job.channel_count} channel${job.channel_count === 1 ? "" : "s"}`
-          : "",
-        sourceLabel,
-      ]
-        .filter(Boolean)
-        .map(escapeHtml)
-        .join(" · ");
+          </div>`).join("")}</div>`
+      : "";
+    const error = job.error
+      ? `<p class="job-error">${escapeHtml(job.error)}</p>`
+      : "";
+    const detail = [
+      job.uploader,
+      formatDuration(job.duration_seconds),
+      job.source_format,
+      job.sample_rate ? `${job.sample_rate} Hz` : "",
+      job.channel_count ? `${job.channel_count} channel${job.channel_count === 1 ? "" : "s"}` : "",
+      sourceLabel,
+    ].filter(Boolean).map(escapeHtml).join(" · ");
 
-      return `
+    return `
       <article class="job-card">
         <div class="job-topline">
           <span class="status status-${job.status}">${statusLabel}</span>
@@ -217,9 +181,7 @@ function renderJobs(jobs) {
         </div>
         <h3>${escapeHtml(title)}</h3>
         <p class="job-detail">${detail || "Source details pending"}</p>
-        <p class="stage-detail">
-          <strong>${escapeHtml(stageLabel)}</strong> · ${escapeHtml(job.message || "")}
-        </p>
+        <p class="stage-detail"><strong>${escapeHtml(stageLabel)}</strong> · ${escapeHtml(job.message || "")}</p>
         <div class="progress-track" aria-label="${job.progress}% complete">
           <span style="width: ${Math.max(2, job.progress)}%"></span>
         </div>
@@ -227,8 +189,7 @@ function renderJobs(jobs) {
         ${renderAnalysis(job)}
         ${fileLinks}
       </article>`;
-    })
-    .join("");
+  }).join("");
 }
 
 function renderAnalysis(job) {
@@ -275,11 +236,7 @@ function renderAnalysis(job) {
         <span><small>Tonal estimate</small>${escapeHtml(key)}</span>
         <span><small>Duration</small>${escapeHtml(formatDuration(job.duration_seconds) || "Unavailable")}</span>
       </div>
-      ${
-        analysis.error
-          ? `<p class="job-error">${escapeHtml(analysis.error)}</p>`
-          : ""
-      }
+      ${analysis.error ? `<p class="job-error">${escapeHtml(analysis.error)}</p>` : ""}
       <div class="analysis-actions">${action}${download}</div>
     </section>`;
 }
@@ -300,11 +257,7 @@ function setMessage(element, message, isError) {
 }
 
 function safeHost(value) {
-  try {
-    return new URL(value).hostname;
-  } catch {
-    return "";
-  }
+  try { return new URL(value).hostname; } catch { return ""; }
 }
 
 function capitalize(value) {
