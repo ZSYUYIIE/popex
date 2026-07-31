@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg nodejs ca-certificates \
+    && apt-get install -y --no-install-recommends ffmpeg nodejs ca-certificates libsndfile1 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 popex
 
