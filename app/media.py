@@ -51,9 +51,7 @@ def process_url(
         cleanup_job_dir(job_dir)
         raise MediaProcessingError("yt-dlp is not installed.") from exc
 
-    def match_filter(
-        info: Mapping[str, Any], *, incomplete: bool = False
-    ) -> str | None:
+    def match_filter(info: Mapping[str, Any], *, incomplete: bool = False) -> str | None:
         if incomplete:
             return None
         if info.get("is_live"):
@@ -71,9 +69,7 @@ def process_url(
             total = data.get("total_bytes") or data.get("total_bytes_estimate")
             downloaded = data.get("downloaded_bytes") or 0
             if total:
-                progress_callback(
-                    min(62.0, max(10.0, downloaded / total * 52 + 10))
-                )
+                progress_callback(min(62.0, max(10.0, downloaded / total * 52 + 10)))
         elif data.get("status") == "finished":
             progress_callback(65.0)
 
@@ -102,9 +98,7 @@ def process_url(
                 info = downloader.extract_info(source_url, download=True)
     except Exception as exc:
         cleanup_job_dir(job_dir)
-        raise MediaProcessingError(
-            friendly_error(exc, settings=settings)
-        ) from exc
+        raise MediaProcessingError(friendly_error(exc, settings=settings)) from exc
 
     source_path = job_dir / "source.mp3"
     if not source_path.is_file():
@@ -246,9 +240,7 @@ def probe_media(path: Path, settings: Settings) -> dict[str, Any]:
     try:
         payload = json.loads(completed.stdout or "{}")
     except json.JSONDecodeError as exc:
-        raise MediaProcessingError(
-            "ffprobe returned invalid media metadata."
-        ) from exc
+        raise MediaProcessingError("ffprobe returned invalid media metadata.") from exc
     audio_stream = next(
         (
             stream
@@ -258,9 +250,7 @@ def probe_media(path: Path, settings: Settings) -> dict[str, Any]:
         None,
     )
     if not audio_stream:
-        raise MediaProcessingError(
-            "The selected file does not contain an audio stream."
-        )
+        raise MediaProcessingError("The selected file does not contain an audio stream.")
     duration_raw = payload.get("format", {}).get("duration")
     sample_rate_raw = audio_stream.get("sample_rate")
     return {
@@ -268,16 +258,12 @@ def probe_media(path: Path, settings: Settings) -> dict[str, Any]:
         "format_name": payload.get("format", {}).get("format_name"),
         "sample_rate": int(sample_rate_raw) if sample_rate_raw else None,
         "channel_count": (
-            int(audio_stream["channels"])
-            if audio_stream.get("channels")
-            else None
+            int(audio_stream["channels"]) if audio_stream.get("channels") else None
         ),
     }
 
 
-def normalize_audio(
-    source_path: Path, output_path: Path, settings: Settings
-) -> None:
+def normalize_audio(source_path: Path, output_path: Path, settings: Settings) -> None:
     require_binary(settings.ffmpeg_binary, "FFmpeg")
     output_path.unlink(missing_ok=True)
     command = [
@@ -338,21 +324,14 @@ def require_binary(binary: str, display_name: str) -> None:
     if Path(binary).is_file() or shutil.which(binary):
         return
     raise MediaProcessingError(
-        f"{display_name} is unavailable. "
-        f"Install it and ensure '{binary}' is on PATH."
+        f"{display_name} is unavailable. Install it and ensure '{binary}' is on PATH."
     )
 
 
 def dependency_report(settings: Settings) -> dict[str, Any]:
     return {
-        "ffmpeg": bool(
-            Path(settings.ffmpeg_binary).is_file()
-            or shutil.which(settings.ffmpeg_binary)
-        ),
-        "ffprobe": bool(
-            Path(settings.ffprobe_binary).is_file()
-            or shutil.which(settings.ffprobe_binary)
-        ),
+        "ffmpeg": bool(Path(settings.ffmpeg_binary).is_file() or shutil.which(settings.ffmpeg_binary)),
+        "ffprobe": bool(Path(settings.ffprobe_binary).is_file() or shutil.which(settings.ffprobe_binary)),
         "data_directory_writable": _directory_is_writable(settings.data_dir),
     }
 
@@ -368,9 +347,7 @@ def _directory_is_writable(path: Path) -> bool:
         return False
 
 
-def secure_job_dir(
-    settings: Settings, job_id: str, *, create: bool = False
-) -> Path:
+def secure_job_dir(settings: Settings, job_id: str, *, create: bool = False) -> Path:
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise MediaProcessingError("Invalid job identifier.")
     root = settings.exports_dir.resolve()
@@ -404,15 +381,10 @@ def friendly_error(
     paths: tuple[Path, ...] = (),
 ) -> str:
     message = str(error).strip() or "Media processing failed."
-    replacements = [
-        settings.data_dir.resolve(),
-        *[path.resolve() for path in paths],
-    ]
+    replacements = [settings.data_dir.resolve(), *[path.resolve() for path in paths]]
     for path in replacements:
         message = message.replace(str(path), "<local media>")
-        message = message.replace(
-            str(path).replace("\\", "/"), "<local media>"
-        )
+        message = message.replace(str(path).replace("\\", "/"), "<local media>")
     message = re.sub(
         r"(?i)(?:[a-z]:\\|/)(?:[^:\n\r]+[\\/])+[^:\n\r ]+",
         "<local path>",
