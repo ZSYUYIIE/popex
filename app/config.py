@@ -12,6 +12,17 @@ DEFAULT_ALLOWED_HOSTS = (
     "music.youtube.com",
     "youtu.be",
 )
+SUPPORTED_MEDIA_EXTENSIONS = (
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".m4a",
+    ".aac",
+    ".ogg",
+    ".mp4",
+    ".mov",
+    ".webm",
+)
 
 
 @dataclass(frozen=True)
@@ -20,7 +31,10 @@ class Settings:
     allowed_hosts: tuple[str, ...]
     max_duration_seconds: int
     max_filesize_mb: int
+    max_upload_mb: int
     audio_quality: str
+    ffmpeg_binary: str = "ffmpeg"
+    ffprobe_binary: str = "ffprobe"
 
     @property
     def database_path(self) -> Path:
@@ -34,9 +48,21 @@ class Settings:
     def max_filesize_bytes(self) -> int:
         return self.max_filesize_mb * 1024 * 1024
 
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.exports_dir.mkdir(parents=True, exist_ok=True)
+        probe = self.data_dir / ".popex-write-test"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            raise RuntimeError(
+                f"PopEx data directory is not writable: {self.data_dir}"
+            ) from exc
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -52,7 +78,11 @@ class Settings:
             allowed_hosts=hosts or DEFAULT_ALLOWED_HOSTS,
             max_duration_seconds=_positive_int("POPEX_MAX_DURATION_SECONDS", 1800),
             max_filesize_mb=_positive_int("POPEX_MAX_FILESIZE_MB", 250),
+            max_upload_mb=_positive_int("POPEX_MAX_UPLOAD_MB", 500),
             audio_quality=os.getenv("POPEX_AUDIO_QUALITY", "192").strip() or "192",
+            ffmpeg_binary=os.getenv("POPEX_FFMPEG_BINARY", "ffmpeg").strip() or "ffmpeg",
+            ffprobe_binary=os.getenv("POPEX_FFPROBE_BINARY", "ffprobe").strip()
+            or "ffprobe",
         )
 
 

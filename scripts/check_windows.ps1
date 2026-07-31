@@ -36,11 +36,24 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
     }
 }
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$dataDir = Join-Path $repoRoot "data"
+try {
+    New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    $probe = Join-Path $dataDir ".popex-write-test"
+    Set-Content -Path $probe -Value "ok" -Encoding UTF8
+    Remove-Item $probe -Force
+    Write-Host "[ok]      writable data directory -> $dataDir" -ForegroundColor Green
+} catch {
+    Write-Host "[invalid] PopEx cannot write to $dataDir" -ForegroundColor Red
+    $allPresent = $false
+}
+
 if (-not $allPresent) {
     Write-Host ""
-    Write-Host "Install the missing dependencies, reopen PowerShell, and run this check again." -ForegroundColor Yellow
+    Write-Host "Install or fix the missing dependencies, reopen PowerShell, and run this check again." -ForegroundColor Yellow
     exit 1
 }
 
 Write-Host ""
-Write-Host "All required host dependencies are available." -ForegroundColor Green
+Write-Host "All required host dependencies and local configuration are available." -ForegroundColor Green

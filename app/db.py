@@ -6,6 +6,19 @@ from pathlib import Path
 from typing import Any
 
 
+NEW_COLUMNS: dict[str, str] = {
+    "source_type": "TEXT NOT NULL DEFAULT 'url'",
+    "stage": "TEXT NOT NULL DEFAULT 'queued'",
+    "message": "TEXT",
+    "original_filename": "TEXT",
+    "source_format": "TEXT",
+    "sample_rate": "INTEGER",
+    "channel_count": "INTEGER",
+    "source_file_name": "TEXT",
+    "normalized_file_name": "TEXT",
+}
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -24,7 +37,7 @@ def init_database(database_path: Path) -> None:
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
-                source_url TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 progress REAL NOT NULL DEFAULT 0,
                 title TEXT,
@@ -32,8 +45,39 @@ def init_database(database_path: Path) -> None:
                 duration_seconds REAL,
                 error TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                source_type TEXT NOT NULL DEFAULT 'url',
+                stage TEXT NOT NULL DEFAULT 'queued',
+                message TEXT,
+                original_filename TEXT,
+                source_format TEXT,
+                sample_rate INTEGER,
+                channel_count INTEGER,
+                source_file_name TEXT,
+                normalized_file_name TEXT
             )
+            """
+        )
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        for column, definition in NEW_COLUMNS.items():
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE jobs ADD COLUMN {column} {definition}"
+                )
+        connection.execute(
+            """
+            UPDATE jobs
+            SET source_type = COALESCE(NULLIF(source_type, ''), 'url'),
+                stage = CASE
+                    WHEN status = 'completed' THEN 'completed'
+                    WHEN status = 'failed' THEN 'failed'
+                    WHEN status = 'processing' AND stage = 'queued' THEN 'importing'
+                    WHEN stage IS NULL OR stage = '' THEN 'queued'
+                    ELSE stage
+                END
             """
         )
 
@@ -45,6 +89,8 @@ def fail_incomplete_jobs(database_path: Path) -> None:
             """
             UPDATE jobs
             SET status = 'failed',
+                stage = 'failed',
+                message = 'Processing was interrupted by a server restart.',
                 error = 'The server restarted before this extraction completed.',
                 updated_at = ?
             WHERE status IN ('queued', 'processing')
@@ -53,16 +99,24 @@ def fail_incomplete_jobs(database_path: Path) -> None:
         )
 
 
-def create_job(database_path: Path, job_id: str, source_url: str) -> dict[str, Any]:
+def create_job(
+    database_path: Path,
+    job_id: str,
+    *,
+    source_type: str,
+    source_url: str = "",
+    original_filename: str | None = None,
+) -> dict[str, Any]:
     now = utc_now()
     with connect(database_path) as connection:
         connection.execute(
             """
             INSERT INTO jobs (
-                id, source_url, status, progress, created_at, updated_at
-            ) VALUES (?, ?, 'queued', 0, ?, ?)
+                id, source_url, source_type, original_filename,
+                status, stage, progress, message, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'queued', 'queued', 0, 'Waiting to start.', ?, ?)
             """,
-            (job_id, source_url, now, now),
+            (job_id, source_url, source_type, original_filename, now, now),
         )
     job = get_job(database_path, job_id)
     if job is None:
@@ -72,12 +126,22 @@ def create_job(database_path: Path, job_id: str, source_url: str) -> dict[str, A
 
 def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
     allowed = {
+        "source_url",
+        "source_type",
         "status",
+        "stage",
         "progress",
+        "message",
         "title",
         "uploader",
         "duration_seconds",
         "error",
+        "original_filename",
+        "source_format",
+        "sample_rate",
+        "channel_count",
+        "source_file_name",
+        "normalized_file_name",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
     if not values:
