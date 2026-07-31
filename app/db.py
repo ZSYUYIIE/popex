@@ -16,6 +16,7 @@ NEW_COLUMNS: dict[str, str] = {
     "channel_count": "INTEGER",
     "source_file_name": "TEXT",
     "normalized_file_name": "TEXT",
+    "metadata_file_name": "TEXT",
     "preparation_status": "TEXT NOT NULL DEFAULT 'pending'",
     "analysis_status": "TEXT NOT NULL DEFAULT 'not_started'",
     "analysis_version": "TEXT",
@@ -65,6 +66,7 @@ def init_database(database_path: Path) -> None:
                 channel_count INTEGER,
                 source_file_name TEXT,
                 normalized_file_name TEXT,
+                metadata_file_name TEXT,
                 preparation_status TEXT NOT NULL DEFAULT 'pending',
                 analysis_status TEXT NOT NULL DEFAULT 'not_started',
                 analysis_version TEXT,
@@ -92,6 +94,12 @@ def init_database(database_path: Path) -> None:
             """
             UPDATE jobs
             SET source_type = COALESCE(NULLIF(source_type, ''), 'url'),
+                metadata_file_name = CASE
+                    WHEN normalized_file_name IS NOT NULL
+                         AND normalized_file_name != ''
+                        THEN COALESCE(NULLIF(metadata_file_name, ''), 'metadata.json')
+                    ELSE metadata_file_name
+                END,
                 preparation_status = CASE
                     WHEN normalized_file_name IS NOT NULL
                          AND normalized_file_name != '' THEN 'completed'
