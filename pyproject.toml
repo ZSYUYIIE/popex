@@ -8,8 +8,7 @@ version = "0.3.0"
 description = "Free, local-first, version-specific pop music transcription workspace"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+license = { file = "LICENSE" }
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "License :: OSI Approved :: MIT License",
