@@ -27,6 +27,15 @@ NEW_COLUMNS: dict[str, str] = {
     "analysis_json_file_name": "TEXT",
     "analyzed_at": "TEXT",
     "analysis_error": "TEXT",
+    "separation_status": "TEXT NOT NULL DEFAULT 'not_started'",
+    "separation_stage": "TEXT NOT NULL DEFAULT 'not_started'",
+    "separation_progress": "REAL NOT NULL DEFAULT 0",
+    "separation_message": "TEXT",
+    "separation_version": "TEXT",
+    "separation_model": "TEXT",
+    "stem_manifest_file_name": "TEXT",
+    "separated_at": "TEXT",
+    "separation_error": "TEXT",
 }
 
 
@@ -76,7 +85,16 @@ def init_database(database_path: Path) -> None:
                 key_confidence REAL,
                 analysis_json_file_name TEXT,
                 analyzed_at TEXT,
-                analysis_error TEXT
+                analysis_error TEXT,
+                separation_status TEXT NOT NULL DEFAULT 'not_started',
+                separation_stage TEXT NOT NULL DEFAULT 'not_started',
+                separation_progress REAL NOT NULL DEFAULT 0,
+                separation_message TEXT,
+                separation_version TEXT,
+                separation_model TEXT,
+                stem_manifest_file_name TEXT,
+                separated_at TEXT,
+                separation_error TEXT
             )
             """
         )
@@ -128,6 +146,14 @@ def init_database(database_path: Path) -> None:
                 analysis_status = COALESCE(
                     NULLIF(analysis_status, ''),
                     'not_started'
+                ),
+                separation_status = COALESCE(
+                    NULLIF(separation_status, ''),
+                    'not_started'
+                ),
+                separation_stage = COALESCE(
+                    NULLIF(separation_stage, ''),
+                    'not_started'
                 )
             """
         )
@@ -172,6 +198,35 @@ def fail_incomplete_jobs(database_path: Path) -> None:
                 END,
                 updated_at = ?
             WHERE status IN ('queued', 'processing')
+              AND separation_status != 'processing'
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed' THEN 'completed'
+                    ELSE status
+                END,
+                stage = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed' THEN 'completed'
+                    ELSE stage
+                END,
+                message = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                        THEN 'Prepared source and prior analysis remain available; stem separation can be retried.'
+                    ELSE message
+                END,
+                separation_status = 'failed',
+                separation_stage = 'failed',
+                separation_message = 'Prepared and analyzed audio remains available; stem separation can be retried.',
+                separation_error = 'Stem separation was interrupted by a server restart.',
+                updated_at = ?
+            WHERE separation_status = 'processing'
             """,
             (now,),
         )
