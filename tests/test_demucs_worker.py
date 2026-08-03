@@ -3,11 +3,12 @@ import hashlib, json, os, sys, types
 from pathlib import Path
 import pytest
 ROOT=Path(__file__).resolve().parents[1]; WR=ROOT/'runtimes'/'demucs_worker'; sys.path.insert(0,str(WR/'src'))
-from popex_demucs_worker import cli,commands,constants,probes
-LOCK=dict(constants.LOCKED_PACKAGE_VERSIONS); OPT={'demucs','demucs.api','demucs.apply','demucs.hf','torch','safetensors','huggingface_hub','yaml'}
+from popex_demucs_worker import cli,commands,constants,model_artifacts,probes,separation_command
+LOCK={'demucs':'4.1.0','torch':'test-torch','huggingface_hub':'test-hub','safetensors':'test-safe','PyYAML':'test-yaml'}; PROFILE='test-linux-cpu-v1'; OPT={'demucs','demucs.api','demucs.apply','demucs.hf','torch','safetensors','huggingface_hub','yaml'}
 
 @pytest.fixture(autouse=True)
-def lock(monkeypatch):
+def lock(monkeypatch,tmp_path):
+ f=tmp_path/'runtime-lock.json';f.write_text(json.dumps({'schemaVersion':1,'runtimeProfile':PROFILE,'workerVersion':constants.WORKER_VERSION,'packages':LOCK}));monkeypatch.setenv(constants.RUNTIME_LOCK_ENV,str(f))
  def version(n):
   if n=='popex-demucs-worker': return constants.WORKER_VERSION
   if n in LOCK:return LOCK[n]
@@ -17,7 +18,7 @@ def lock(monkeypatch):
 @pytest.fixture
 def model(monkeypatch):
  data=b'approved'; dig=hashlib.sha256(data).hexdigest()
- for m in(probes,commands):monkeypatch.setattr(m,'CHECKPOINT_SIZE_BYTES',len(data));monkeypatch.setattr(m,'CHECKPOINT_SHA256',dig)
+ for m in(probes,model_artifacts,separation_command):monkeypatch.setattr(m,'CHECKPOINT_SIZE_BYTES',len(data));monkeypatch.setattr(m,'CHECKPOINT_SHA256',dig)
  return data,dig
 
 def run(capsys,*args):
@@ -33,8 +34,8 @@ def assets(root,data):
  c=p/constants.CHECKPOINT_FILE;c.write_bytes(data);return b,c
 
 def manifest(root,data,**over):
- b,c=assets(root,data);v=probes.require_compatible_runtime();d=hashlib.sha256(data).hexdigest()
- p={'schemaVersion':1,'protocolVersion':1,'runtimeProfile':constants.RUNTIME_PROFILE,'workerVersion':constants.WORKER_VERSION,'demucsVersion':'4.1.0','torchVersion':v['torch'],'huggingfaceHubVersion':v['huggingface_hub'],'packageVersions':v,'modelRepository':constants.MODEL_REPOSITORY,'modelRevision':constants.MODEL_REVISION,'bagFile':constants.BAG_FILE,'bagModelSignatures':[constants.BAG_SIGNATURE],'checkpointFile':constants.CHECKPOINT_FILE,'checkpointSizeBytes':len(data),'checkpointSha256':d,'verifiedAt':'2026-08-03T00:00:00Z','cacheAssets':{'bag':b.relative_to(root).as_posix(),'checkpoint':c.relative_to(root).as_posix()},'offlineReady':True,'warnings':[]};p.update(over)
+ b,c=assets(root,data);profile,v,_=probes.require_compatible_runtime();d=hashlib.sha256(data).hexdigest()
+ p={'schemaVersion':1,'protocolVersion':1,'runtimeProfile':profile,'workerVersion':constants.WORKER_VERSION,'demucsVersion':'4.1.0','torchVersion':v['torch'],'huggingfaceHubVersion':v['huggingface_hub'],'packageVersions':v,'modelRepository':constants.MODEL_REPOSITORY,'modelRevision':constants.MODEL_REVISION,'bagFile':constants.BAG_FILE,'bagModelSignatures':[constants.BAG_SIGNATURE],'checkpointFile':constants.CHECKPOINT_FILE,'checkpointSizeBytes':len(data),'checkpointSha256':d,'verifiedAt':'2026-08-03T00:00:00Z','cacheAssets':{'bag':b.relative_to(root).as_posix(),'checkpoint':c.relative_to(root).as_posix()},'offlineReady':True,'warnings':[]};p.update(over)
  f=root/'readiness'/'htdemucs-bf35a81b-v1.json';f.parent.mkdir(parents=True,exist_ok=True);f.write_text(json.dumps(p),encoding='utf-8');return p
 
 def hub(monkeypatch,fn):
@@ -101,7 +102,7 @@ def test_prepare_failures(capsys,monkeypatch,tmp_path,model,kind,exitcode,err):
  elif kind=='yaml':hub(monkeypatch,downloader(data,[],{'models':['wrong']}))
  elif kind=='size':hub(monkeypatch,downloader(data+b'x',[]))
  else:
-  monkeypatch.setattr(commands,'CHECKPOINT_SHA256','0'*64);hub(monkeypatch,downloader(data,[]))
+  monkeypatch.setattr(model_artifacts,'CHECKPOINT_SHA256','0'*64);hub(monkeypatch,downloader(data,[]))
  code,e,_=run(capsys,'--protocol-version','1','prepare-model','--cache-root',str(tmp_path));assert(code,e['error']['code'])==(exitcode,err);assert not (tmp_path/'readiness'/'htdemucs-bf35a81b-v1.json').exists()
 
 def test_verify_offline_local_only_no_http(capsys,monkeypatch,tmp_path,model):
@@ -137,6 +138,17 @@ def test_separation_cancellation_timeout_and_artifact_preservation(capsys,monkey
  class Stop(Sep):
   def separate_audio_file(self,p):raise KeyboardInterrupt()
  demucs(monkeypatch,sep=Stop);code,e,_=run(capsys,*sep_args(c,w,out='stems/runs/new/worker-output'));assert(code,e['error']['code'])==(41,'CANCELLED')
+
+def test_bundled_unprovisioned_lock_fails_closed(capsys,monkeypatch):
+ monkeypatch.delenv(constants.RUNTIME_LOCK_ENV,raising=False)
+ for n in OPT:monkeypatch.delitem(sys.modules,n,raising=False)
+ code,e,_=run(capsys,'--protocol-version','1','runtime-probe');assert(code,e['error']['code'])==(10,'RUNTIME_PROFILE_UNPROVISIONED');assert not OPT&sys.modules.keys()
+
+def test_readiness_parent_symlink_escape_rejected(capsys,tmp_path):
+ outside=tmp_path.parent/(tmp_path.name+'-readiness');outside.mkdir();(outside/'htdemucs-bf35a81b-v1.json').write_text('{}');(tmp_path/'readiness').symlink_to(outside,target_is_directory=True)
+ code,e,_=run(capsys,'--protocol-version','1','model-probe','--cache-root',str(tmp_path));assert(code,e['error']['code'])==(21,'READINESS_MANIFEST_INVALID')
+ for p in outside.iterdir():p.unlink()
+ outside.rmdir()
 
 def test_allow_nan_false_fallback(capsys,monkeypatch):
  monkeypatch.setattr(cli,'runtime_probe',lambda:{'bad':float('nan')});code,e,o=run(capsys,'--protocol-version','1','runtime-probe');assert(code,e['error']['code'])==(50,'INTERNAL_ERROR');assert o.out.count('\n')==1

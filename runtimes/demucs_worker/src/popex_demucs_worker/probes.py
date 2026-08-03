@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -15,13 +16,15 @@ from .constants import (
     CHECKPOINT_SIZE_BYTES,
     DEMUCS_VERSION,
     DISTRIBUTIONS,
-    LOCKED_PACKAGE_VERSIONS,
     MODEL_REPOSITORY,
     MODEL_REVISION,
     PROTOCOL_VERSION,
     READINESS_RELATIVE_PATH,
-    RUNTIME_PROFILE,
+    RUNTIME_LOCK_ENV,
+    UNPROVISIONED_PROFILE,
     WORKER_VERSION,
+    RuntimeLockError,
+    load_runtime_lock,
 )
 from .paths import resolve_contained, trusted_root
 from .protocol import (
@@ -44,30 +47,64 @@ def installed_versions() -> dict[str, str | None]:
     return versions
 
 
-def require_compatible_runtime() -> dict[str, str]:
-    versions = installed_versions()
-    mismatches = {
-        name: (versions.get(name), expected)
-        for name, expected in LOCKED_PACKAGE_VERSIONS.items()
-        if versions.get(name) != expected
-    }
-    if versions.get("demucs") != DEMUCS_VERSION or mismatches:
+def require_compatible_runtime() -> tuple[str, dict[str, str], dict[str, str]]:
+    try:
+        lock = load_runtime_lock()
+    except RuntimeLockError as exc:
         raise WorkerError(
-            "RUNTIME_INCOMPATIBLE",
-            "The installed optional runtime does not match its embedded lock profile.",
+            "RUNTIME_PROFILE_INVALID",
+            "The optional runtime profile lock metadata is invalid.",
+            EXIT_RUNTIME_INCOMPATIBLE,
+        ) from exc
+    profile = lock["runtimeProfile"]
+    locked = lock["packages"]
+    if profile == UNPROVISIONED_PROFILE:
+        raise WorkerError(
+            "RUNTIME_PROFILE_UNPROVISIONED",
+            "The optional runtime profile has not supplied an exact package lock.",
             EXIT_RUNTIME_INCOMPATIBLE,
         )
-    return {key: value for key, value in versions.items() if value is not None}
+    if set(DISTRIBUTIONS) - set(locked) or any(
+        not isinstance(locked.get(name), str) or not locked[name]
+        for name in DISTRIBUTIONS
+    ):
+        raise WorkerError(
+            "RUNTIME_PROFILE_INVALID",
+            "The optional runtime profile lock metadata is incomplete.",
+            EXIT_RUNTIME_INCOMPATIBLE,
+        )
+    if locked["demucs"] != DEMUCS_VERSION:
+        raise WorkerError(
+            "RUNTIME_INCOMPATIBLE",
+            "The optional runtime profile does not approve Demucs 4.1.0.",
+            EXIT_RUNTIME_INCOMPATIBLE,
+        )
+    installed = installed_versions()
+    mismatches = {
+        name: (installed.get(name), locked[name])
+        for name in DISTRIBUTIONS
+        if installed.get(name) != locked[name]
+    }
+    if mismatches:
+        raise WorkerError(
+            "RUNTIME_INCOMPATIBLE",
+            "The installed optional runtime does not match its profile lock.",
+            EXIT_RUNTIME_INCOMPATIBLE,
+        )
+    exact_installed = {name: installed[name] for name in DISTRIBUTIONS}
+    exact_locked = {name: locked[name] for name in DISTRIBUTIONS}
+    return profile, exact_installed, exact_locked  # type: ignore[return-value]
 
 
 def runtime_probe() -> dict:
-    versions = require_compatible_runtime()
+    profile, versions, locked = require_compatible_runtime()
     return {
         "pythonVersion": ".".join(str(part) for part in sys.version_info[:3]),
         "workerVersion": WORKER_VERSION,
-        "runtimeProfile": RUNTIME_PROFILE,
+        "runtimeProfile": profile,
+        "runtimeLockSource": "profile" if RUNTIME_LOCK_ENV in os.environ else "bundled",
         "installedVersions": versions,
-        "lockedVersions": dict(LOCKED_PACKAGE_VERSIONS),
+        "lockedVersions": locked,
         "compatible": True,
     }
 
@@ -97,7 +134,7 @@ def _parse_verified_at(value: object) -> None:
 
 def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
     manifest_path = cache_root.joinpath(*READINESS_RELATIVE_PATH.split("/"))
-    if not manifest_path.is_file() or manifest_path.is_symlink():
+    if not manifest_path.exists():
         raise WorkerError(
             "MODEL_DOWNLOAD_REQUIRED",
             "The verified htdemucs model is not available in this runtime.",
@@ -105,18 +142,36 @@ def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
             retryable=True,
         )
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        resolved_manifest = manifest_path.resolve(strict=True)
+    except OSError as exc:
+        raise WorkerError(
+            "READINESS_MANIFEST_INVALID",
+            "The model readiness manifest is unavailable.",
+            EXIT_MODEL_VERIFICATION_FAILED,
+        ) from exc
+    if (
+        manifest_path.is_symlink()
+        or not resolved_manifest.is_relative_to(cache_root)
+        or not resolved_manifest.is_file()
+    ):
+        raise WorkerError(
+            "READINESS_MANIFEST_INVALID",
+            "The model readiness manifest is not safely contained.",
+            EXIT_MODEL_VERIFICATION_FAILED,
+        )
+    try:
+        payload = json.loads(resolved_manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise WorkerError(
             "READINESS_MANIFEST_INVALID",
             "The model readiness manifest is invalid.",
             EXIT_MODEL_VERIFICATION_FAILED,
         ) from exc
-    versions = require_compatible_runtime()
+    runtime_profile, versions, _ = require_compatible_runtime()
     required_exact = {
         "schemaVersion": 1,
         "protocolVersion": PROTOCOL_VERSION,
-        "runtimeProfile": RUNTIME_PROFILE,
+        "runtimeProfile": runtime_profile,
         "workerVersion": WORKER_VERSION,
         "demucsVersion": DEMUCS_VERSION,
         "torchVersion": versions["torch"],
@@ -191,7 +246,7 @@ def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
             "The cached checkpoint size does not match the approved model.",
             EXIT_MODEL_VERIFICATION_FAILED,
         )
-    return payload, manifest_path, bag_path, checkpoint_path
+    return payload, resolved_manifest, bag_path, checkpoint_path
 
 
 def model_probe(cache_root_text: str) -> dict:
