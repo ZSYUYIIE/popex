@@ -1,5 +1,7 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 from app import db
 
@@ -15,6 +17,26 @@ SEPARATION_COLUMNS = {
     "stem_manifest_file_name",
     "separated_at",
     "separation_error",
+}
+CLAIM_PRESERVED_FIELDS = {
+    "status",
+    "stage",
+    "progress",
+    "message",
+    "error",
+    "preparation_status",
+    "analysis_status",
+    "analysis_version",
+    "tempo_bpm",
+    "tempo_confidence",
+    "key_symbol",
+    "key_confidence",
+    "analysis_json_file_name",
+    "analyzed_at",
+    "analysis_error",
+    "source_file_name",
+    "normalized_file_name",
+    "metadata_file_name",
 }
 
 
@@ -469,3 +491,214 @@ def test_null_and_empty_separation_state_is_normalized(tmp_path: Path):
     assert job is not None
     assert job["separation_status"] == "not_started"
     assert job["separation_stage"] == "not_started"
+
+
+def test_not_started_claim_succeeds_and_persists_exact_attempt_fields(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    create_completed_job(database, "claim-new")
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "claim-new",
+        separation_version="stem-separation-v3",
+        separation_model="htdemucs-exact",
+        message="Preparing exact separation attempt.",
+    )
+    job = db.get_job(database, "claim-new")
+
+    assert claimed is True
+    assert job is not None
+    assert job["separation_status"] == "processing"
+    assert job["separation_stage"] == "preparing_separation"
+    assert 0 <= job["separation_progress"] < 100
+    assert job["separation_message"] == "Preparing exact separation attempt."
+    assert job["separation_version"] == "stem-separation-v3"
+    assert job["separation_model"] == "htdemucs-exact"
+    assert job["separation_error"] is None
+
+
+def test_failed_retry_claim_succeeds_and_preserves_successful_manifest(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    create_completed_job(database, "claim-retry")
+    db.update_job(
+        database,
+        "claim-retry",
+        separation_status="failed",
+        separation_stage="failed",
+        separation_progress=63,
+        separation_message="Previous attempt failed.",
+        separation_version="stem-separation-v1",
+        separation_model="old-model",
+        stem_manifest_file_name=MANIFEST_PATH,
+        separated_at="2026-08-02T00:00:00+00:00",
+        separation_error="Previous failure.",
+    )
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "claim-retry",
+        separation_version="stem-separation-v2",
+        separation_model="htdemucs",
+    )
+    job = db.get_job(database, "claim-retry")
+
+    assert claimed is True
+    assert job is not None
+    assert job["separation_status"] == "processing"
+    assert job["separation_stage"] == "preparing_separation"
+    assert job["separation_progress"] == 1
+    assert job["separation_error"] is None
+    assert job["stem_manifest_file_name"] == MANIFEST_PATH
+    assert job["separated_at"] == "2026-08-02T00:00:00+00:00"
+
+
+def test_processing_claim_is_rejected_without_partial_update(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    create_completed_job(database, "claim-processing")
+    db.update_job(
+        database,
+        "claim-processing",
+        separation_status="processing",
+        separation_stage="separating_stems",
+        separation_progress=42,
+        separation_message="Already running.",
+        separation_version="existing-version",
+        separation_model="existing-model",
+        separation_error="existing error",
+    )
+    before = db.get_job(database, "claim-processing")
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "claim-processing",
+        separation_version="replacement-version",
+        separation_model="replacement-model",
+    )
+    after = db.get_job(database, "claim-processing")
+
+    assert claimed is False
+    assert before == after
+
+
+def test_completed_claim_is_rejected_without_partial_update(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    create_completed_job(database, "claim-completed")
+    db.update_job(
+        database,
+        "claim-completed",
+        separation_status="completed",
+        separation_stage="completed",
+        separation_progress=100,
+        separation_message="Already complete.",
+        separation_version="completed-version",
+        separation_model="completed-model",
+        stem_manifest_file_name=MANIFEST_PATH,
+        separated_at="2026-08-02T00:00:00+00:00",
+    )
+    before = db.get_job(database, "claim-completed")
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "claim-completed",
+        separation_version="replacement-version",
+        separation_model="replacement-model",
+    )
+    after = db.get_job(database, "claim-completed")
+
+    assert claimed is False
+    assert before == after
+
+
+def test_incomplete_preparation_claim_is_rejected_without_partial_update(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    db.init_database(database)
+    before = db.create_job(database, "claim-incomplete", source_type="upload")
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "claim-incomplete",
+        separation_version="stem-separation-v1",
+        separation_model="htdemucs",
+    )
+    after = db.get_job(database, "claim-incomplete")
+
+    assert claimed is False
+    assert before == after
+
+
+def test_missing_job_claim_is_rejected(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    db.init_database(database)
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "missing-job",
+        separation_version="stem-separation-v1",
+        separation_model="htdemucs",
+    )
+
+    assert claimed is False
+    assert db.get_job(database, "missing-job") is None
+
+
+def test_claim_preserves_top_level_and_completed_analysis_fields(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    before = create_completed_job(database, "claim-preserve")
+
+    claimed = db.claim_separation_attempt(
+        database,
+        "claim-preserve",
+        separation_version="stem-separation-v1",
+        separation_model="htdemucs",
+    )
+    after = db.get_job(database, "claim-preserve")
+
+    assert claimed is True
+    assert after is not None
+    assert {field: after[field] for field in CLAIM_PRESERVED_FIELDS} == {
+        field: before[field] for field in CLAIM_PRESERVED_FIELDS
+    }
+
+
+def test_concurrent_claims_allow_exactly_one_winner(tmp_path: Path):
+    database = tmp_path / "popex.sqlite3"
+    create_completed_job(database, "claim-race")
+    db.update_job(
+        database,
+        "claim-race",
+        separation_status="failed",
+        separation_stage="failed",
+        separation_progress=58,
+        stem_manifest_file_name=MANIFEST_PATH,
+        separated_at="2026-08-02T00:00:00+00:00",
+        separation_error="Retryable failure.",
+    )
+    barrier = Barrier(2)
+
+    def attempt(number: int) -> bool:
+        barrier.wait(timeout=5)
+        return db.claim_separation_attempt(
+            database,
+            "claim-race",
+            separation_version=f"race-version-{number}",
+            separation_model=f"race-model-{number}",
+            message=f"Race attempt {number}.",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(attempt, (1, 2)))
+
+    job = db.get_job(database, "claim-race")
+    assert sorted(results) == [False, True]
+    assert job is not None
+    assert job["separation_status"] == "processing"
+    assert job["separation_stage"] == "preparing_separation"
+    assert job["separation_progress"] == 1
+    assert job["separation_version"] in {"race-version-1", "race-version-2"}
+    winner = job["separation_version"].removeprefix("race-version-")
+    assert job["separation_model"] == f"race-model-{winner}"
+    assert job["separation_message"] == f"Race attempt {winner}."
+    assert job["stem_manifest_file_name"] == MANIFEST_PATH
+    assert job["separated_at"] == "2026-08-02T00:00:00+00:00"
+    assert job["analysis_status"] == "completed"
+    assert job["analysis_json_file_name"] == "analysis/audio-analysis.json"
