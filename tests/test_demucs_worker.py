@@ -124,7 +124,7 @@ def test_four_outputs_provenance_and_no_job_manifest(capsys,monkeypatch,tmp_path
 
 def test_stdout_and_credential_redaction(capsys,monkeypatch,tmp_path):
  yamlmod(monkeypatch)
- def leak(**kw):print('https://user:secret@x.test hf_secret /private/cache');raise OSError('https://x hf_secret /private/cache')
+ def leak(**kw):print('https://user:secret@x.test hf_secret /private/cache');print('https://user:secret@x.test hf_secret /private/cache',file=sys.stderr);raise OSError('https://x hf_secret /private/cache')
  hub(monkeypatch,leak);os.environ['HF_TOKEN']='hf_inherited';code,e,o=run(capsys,'--protocol-version','1','prepare-model','--cache-root',str(tmp_path));allout=o.out+o.err;assert code==22 and e['error']['code']=='MODEL_DOWNLOAD_FAILED';assert all(x not in allout for x in ('secret','hf_','/private/cache','user:'));assert 'HF_TOKEN' not in os.environ
 
 @pytest.mark.parametrize('exc,code,err',[(KeyboardInterrupt(),41,'CANCELLED'),(TimeoutError(),42,'WORKER_TIMEOUT'),(RuntimeError('x'),50,'INTERNAL_ERROR')])

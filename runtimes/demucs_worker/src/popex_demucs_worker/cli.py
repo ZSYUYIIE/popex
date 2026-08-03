@@ -109,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(values)
         command = args.command
-        with contextlib.redirect_stdout(diagnostics):
+        with contextlib.redirect_stdout(diagnostics), contextlib.redirect_stderr(diagnostics):
             result = _dispatch(args)
         envelope = success_envelope(command, result)
         exit_code = 0
