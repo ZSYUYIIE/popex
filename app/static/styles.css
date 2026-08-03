@@ -137,7 +137,7 @@ input[type=url] {
   border:1px solid #9ba5b5;
   border-radius:8px
 }
-button,.analysis-actions a,.artifacts a {
+button,.analysis-actions a,.separation-actions a,.artifacts a,.stems a {
   display:inline-flex;
   justify-content:center;
   align-items:center;
@@ -151,7 +151,7 @@ button,.analysis-actions a,.artifacts a {
   font-weight:700;
   cursor:pointer
 }
-button:hover,.analysis-actions a:hover,.artifacts a:hover {
+button:hover,.analysis-actions a:hover,.separation-actions a:hover,.artifacts a:hover,.stems a:hover {
   background:var(--accent-dark)
 }
 button:disabled {
@@ -189,7 +189,7 @@ button:disabled {
 .drop-icon {
   font-size:2rem
 }
-.hint,.form-message,.section-heading p {
+.hint,.form-message,.section-heading p,.detail-note {
   color:var(--muted)
 }
 .form-message {
@@ -220,14 +220,14 @@ button:disabled {
   display:grid;
   gap:1rem
 }
-.job-topline,.analysis-heading,.progress-heading,.job-progress>div,.badges {
+.job-topline,.analysis-heading,.separation-heading,.progress-heading,.job-progress>div,.separation-progress>div,.badges {
   display:flex;
   justify-content:space-between;
   align-items:center;
   gap:.75rem;
   flex-wrap:wrap
 }
-.status,.source-badge,.analysis-status {
+.status,.source-badge,.analysis-status,.separation-status {
   display:inline-flex;
   gap:.4rem;
   align-items:center;
@@ -263,25 +263,26 @@ button:disabled {
   padding-left:1.2rem;
   color:var(--muted)
 }
-.status-grid,.analysis-summary {
+.status-grid,.analysis-summary,.separation-summary {
   display:grid;
   grid-template-columns:repeat(2,minmax(0,1fr));
   gap:.75rem;
   margin:1rem 0
 }
-.status-grid>div,.analysis-summary>div {
+.status-grid>div,.analysis-summary>div,.separation-summary>div {
   padding:.8rem;
   border:1px solid var(--line);
   border-radius:9px;
   display:grid
 }
-.status-grid small,.analysis-summary dt {
+.status-grid small,.analysis-summary dt,.separation-summary dt {
   color:var(--muted);
   font-size:.8rem
 }
-.analysis-summary dd {
+.analysis-summary dd,.separation-summary dd {
   margin:0;
-  font-weight:700
+  font-weight:700;
+  overflow-wrap:anywhere
 }
 .analysis-summary dd small {
   display:block;
@@ -293,7 +294,10 @@ progress {
   height:1rem;
   accent-color:var(--accent)
 }
-.analysis-panel,.artifacts,.error-panel,.warning-panel {
+.separation-progress {
+  margin:1rem 0
+}
+.analysis-panel,.separation-panel,.artifacts,.stems,.error-panel,.warning-panel {
   margin-top:1rem;
   padding:1rem;
   border:1px solid var(--line);
@@ -307,7 +311,7 @@ progress {
   border-color:#e1c274;
   background:#fffaf0
 }
-.analysis-actions {
+.analysis-actions,.separation-actions {
   display:flex;
   flex-wrap:wrap;
   gap:.75rem;
@@ -322,13 +326,13 @@ progress {
   justify-content:space-between;
   gap:1rem
 }
-.artifacts ul {
+.artifacts ul,.stem-list {
   list-style:none;
   padding:0;
   display:grid;
   gap:.75rem
 }
-.artifacts li {
+.artifacts li,.stem-list li {
   display:grid;
   grid-template-columns:minmax(0,1fr) auto;
   gap:1rem;
@@ -336,12 +340,12 @@ progress {
   padding-top:.75rem;
   border-top:1px solid var(--line)
 }
-.artifacts small {
+.artifacts small,.stem-list small {
   display:block;
   color:var(--muted);
   overflow-wrap:anywhere
 }
-.artifacts li>div:last-child {
+.artifacts li>div:last-child,.stem-list li>div:last-child {
   display:flex;
   align-items:center;
   gap:.75rem;
@@ -366,7 +370,7 @@ details {
   color:var(--muted)
 }
 @media(max-width:760px) {
-  .source-grid,.process-panel ol,.status-grid,.analysis-summary {
+  .source-grid,.process-panel ol,.status-grid,.analysis-summary,.separation-summary {
     grid-template-columns:1fr
   }
   .section-heading,.header-inner {
@@ -378,10 +382,10 @@ details {
   .workspace-state {
     display:none
   }
-  .artifacts li {
+  .artifacts li,.stem-list li {
     grid-template-columns:1fr
   }
-  .artifacts li>div:last-child {
+  .artifacts li>div:last-child,.stem-list li>div:last-child {
     align-items:stretch;
     flex-direction:column
   }
@@ -403,7 +407,7 @@ details {
   }
 }
 @media(forced-colors:active) {
-  button,.analysis-actions a,.artifacts a,.status,.source-badge,.analysis-status {
+  button,.analysis-actions a,.separation-actions a,.artifacts a,.stems a,.status,.source-badge,.analysis-status,.separation-status {
     border:1px solid ButtonText
   }
   .drop-zone {
