@@ -271,6 +271,42 @@ def create_job(
     return job
 
 
+def claim_separation_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    separation_version: str,
+    separation_model: str,
+    message: str = "Preparing stem separation.",
+) -> bool:
+    now = utc_now()
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET separation_status = 'processing',
+                separation_stage = 'preparing_separation',
+                separation_progress = 1,
+                separation_message = ?,
+                separation_version = ?,
+                separation_model = ?,
+                separation_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+              AND preparation_status = 'completed'
+              AND separation_status IN ('not_started', 'failed')
+            """,
+            (
+                message,
+                separation_version,
+                separation_model,
+                now,
+                job_id,
+            ),
+        )
+        return cursor.rowcount == 1
+
+
 def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
     allowed = set(NEW_COLUMNS) | {
         "source_url",
