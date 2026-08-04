@@ -1,7 +1,6 @@
-# Direct runtime inputs to evaluate for Windows x86-64 / CPython 3.13.
+# Direct runtime inputs for windows-x86_64-cpu-cpython313.
 # Resolve ordinary packages only from https://pypi.org/simple.
-# Resolve torch separately from https://download.pytorch.org/whl/cpu.
-# This file is an investigation input until the Windows workflow validates the full lock.
+# Install torch separately from https://download.pytorch.org/whl/cpu.
 
 demucs==4.1.0
 numpy==2.5.1
@@ -14,11 +13,11 @@ lameenc==1.8.4
 einops==0.8.2
 tqdm==4.70.0
 
-# Evaluated separately from the official CPU index:
+# Installed separately from the official CPU index:
 # torch==2.13.0+cpu
 
-# Installed last from the checked-out local source tree after the wheel lock is complete:
+# Installed last from the local checked-out source tree with --no-deps:
 # popex-demucs-worker==1.0.0 from runtimes/demucs_worker
 
-# Deliberately excluded: torchaudio, openunmix, dora-search,
-# demucs[train], CUDA, and NVIDIA packages.
+# Deliberately excluded: torchaudio, openunmix==1.3.0,
+# dora-search==0.1.12, demucs[train], CUDA, and NVIDIA packages.
