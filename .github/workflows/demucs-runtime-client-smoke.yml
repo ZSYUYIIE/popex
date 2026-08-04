@@ -156,9 +156,9 @@ jobs:
           Set-StrictMode -Version Latest
           $Python = (Get-Command python).Source
           $WorkerSource = Join-Path $env:GITHUB_WORKSPACE "runtimes\demucs_worker"
-          & pwsh -NoProfile -File scripts/install_demucs_windows_cpu.ps1 \
-            -Destination $env:POPEX_SMOKE_RUNTIME \
-            -PythonExecutable $Python \
+          & pwsh -NoProfile -File scripts/install_demucs_windows_cpu.ps1 `
+            -Destination $env:POPEX_SMOKE_RUNTIME `
+            -PythonExecutable $Python `
             -WorkerSource $WorkerSource
           if ($LASTEXITCODE -ne 0) {
             throw "The exact Windows CPU profile installation failed."
@@ -171,11 +171,11 @@ jobs:
           Set-StrictMode -Version Latest
           $Worker = Join-Path $env:POPEX_SMOKE_RUNTIME "venv\Scripts\popex-demucs-worker.exe"
           $Lock = Join-Path $env:POPEX_SMOKE_RUNTIME "runtime-lock.json"
-          & python scripts/validate_separation_runtime_profile.py \
-            --worker $Worker \
-            --runtime-lock $Lock \
-            --cache-root $env:POPEX_SMOKE_CACHE \
-            --expected-profile windows-x86_64-cpu-cpython313 \
+          & python scripts/validate_separation_runtime_profile.py `
+            --worker $Worker `
+            --runtime-lock $Lock `
+            --cache-root $env:POPEX_SMOKE_CACHE `
+            --expected-profile windows-x86_64-cpu-cpython313 `
             | Tee-Object -FilePath $env:POPEX_SMOKE_SUMMARY
           if ($LASTEXITCODE -ne 0) {
             throw "The Windows base-client runtime validation failed."
