@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from copy import deepcopy
+import importlib.util
+from pathlib import Path
 
-from scripts.check_agent_handoff import MARKER, validate_event
 
+_SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "check_agent_handoff.py"
+_SPEC = importlib.util.spec_from_file_location("popex_check_agent_handoff", _SCRIPT_PATH)
+assert _SPEC is not None and _SPEC.loader is not None
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+
+MARKER = _MODULE.MARKER
+validate_event = _MODULE.validate_event
 
 BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
