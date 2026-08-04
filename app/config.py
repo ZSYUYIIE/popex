@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 DEFAULT_ALLOWED_HOSTS = (
@@ -22,6 +23,9 @@ SUPPORTED_MEDIA_EXTENSIONS = (
     ".mp4",
     ".mov",
     ".webm",
+)
+_STEM_CONFIGURATION_ERROR = (
+    "Trusted stem-separation configuration is invalid."
 )
 
 
@@ -47,6 +51,7 @@ class Settings:
     stem_separation_runtime_profile: str | None = None
     stem_separation_device: str = "cpu"
     stem_separation_timeout_seconds: int = 3600
+    stem_separation_configuration_error: str | None = None
 
     @property
     def database_path(self) -> Path:
@@ -87,9 +92,10 @@ class Settings:
         )
         data_dir = Path(os.getenv("POPEX_DATA_DIR", "data")).expanduser().resolve()
         stem_separation_enabled = _boolean("STEM_SEPARATION_ENABLED", False)
-        stem_separation_cache_dir = _optional_path("STEM_SEPARATION_CACHE_DIR")
-        if stem_separation_enabled and stem_separation_cache_dir is None:
-            stem_separation_cache_dir = data_dir / "runtime-cache" / "demucs"
+        stem_settings = _stem_separation_env(
+            data_dir,
+            enabled=stem_separation_enabled,
+        )
         return cls(
             data_dir=data_dir,
             allowed_hosts=hosts or DEFAULT_ALLOWED_HOSTS,
@@ -113,25 +119,59 @@ class Settings:
                 "AUDIO_SILENCE_RMS_THRESHOLD", 0.0001
             ),
             stem_separation_enabled=stem_separation_enabled,
-            stem_separation_version=os.getenv(
+            **stem_settings,
+        )
+
+
+def _stem_separation_env(data_dir: Path, *, enabled: bool) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
+        "stem_separation_version": "demucs-worker-v3",
+        "stem_separation_worker_executable": None,
+        "stem_separation_runtime_lock": None,
+        "stem_separation_cache_dir": None,
+        "stem_separation_runtime_profile": None,
+        "stem_separation_device": "cpu",
+        "stem_separation_timeout_seconds": 3600,
+        "stem_separation_configuration_error": None,
+    }
+    if enabled is not True:
+        # Runtime-only values are deliberately ignored while the optional stage is
+        # disabled. Stale machine-local paths must not break ingestion or analysis.
+        return defaults
+
+    try:
+        cache_dir = _optional_path("STEM_SEPARATION_CACHE_DIR")
+        if cache_dir is None:
+            cache_dir = data_dir / "runtime-cache" / "demucs"
+        return {
+            "stem_separation_version": os.getenv(
                 "STEM_SEPARATION_VERSION", "demucs-worker-v3"
             ).strip()
             or "demucs-worker-v3",
-            stem_separation_worker_executable=_optional_path(
+            "stem_separation_worker_executable": _optional_path(
                 "STEM_SEPARATION_WORKER_EXECUTABLE"
             ),
-            stem_separation_runtime_lock=_optional_path(
+            "stem_separation_runtime_lock": _optional_path(
                 "STEM_SEPARATION_RUNTIME_LOCK"
             ),
-            stem_separation_cache_dir=stem_separation_cache_dir,
-            stem_separation_runtime_profile=_optional_string(
+            "stem_separation_cache_dir": cache_dir,
+            "stem_separation_runtime_profile": _optional_string(
                 "STEM_SEPARATION_RUNTIME_PROFILE"
             ),
-            stem_separation_device=_device("STEM_SEPARATION_DEVICE", "cpu"),
-            stem_separation_timeout_seconds=_positive_int(
+            "stem_separation_device": _device("STEM_SEPARATION_DEVICE", "cpu"),
+            "stem_separation_timeout_seconds": _positive_int(
                 "STEM_SEPARATION_TIMEOUT_SECONDS", 3600
             ),
-        )
+            "stem_separation_configuration_error": None,
+        }
+    except (OSError, RuntimeError, ValueError):
+        # The optional runtime must never prevent the required application from
+        # starting. SeparationService maps this marker to a safe unavailable state.
+        return {
+            **defaults,
+            "stem_separation_cache_dir": data_dir / "runtime-cache" / "demucs",
+            "stem_separation_configuration_error": _STEM_CONFIGURATION_ERROR,
+        }
 
 
 def _positive_int(name: str, default: int) -> int:
@@ -184,6 +224,8 @@ def _optional_path(name: str) -> Path | None:
     value = _optional_string(name)
     if value is None:
         return None
+    if "\x00" in value:
+        raise RuntimeError(f"{name} must be a valid local path")
     return Path(value).expanduser().resolve(strict=False)
 
 
