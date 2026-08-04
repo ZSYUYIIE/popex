@@ -15,9 +15,9 @@ permissions:
   contents: read
 
 jobs:
-  resolve-windows-wheels:
+  validate-windows-cpu-runtime:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     env:
       HF_HUB_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
@@ -30,152 +30,113 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Record Windows runner
+      - name: Install focused test runner
+        shell: pwsh
+        run: python -m pip install "pytest>=8.4,<10"
+
+      - name: Parse PowerShell installer
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           Set-StrictMode -Version Latest
-          python -c "import json, platform, sys; print(json.dumps({'platform': platform.platform(), 'python': sys.version, 'machine': platform.machine()}, sort_keys=True))"
-
-      - name: Resolve exact Windows wheels
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          Set-StrictMode -Version Latest
-
-          $Evidence = Join-Path $env:RUNNER_TEMP "popex-windows-cpu-evidence"
-          $Wheelhouse = Join-Path $Evidence "wheelhouse"
-          $Resolver = Join-Path $env:RUNNER_TEMP "popex-windows-cpu-resolver"
-          New-Item -ItemType Directory -Force -Path $Evidence, $Wheelhouse | Out-Null
-          python -m venv $Resolver
-          $Python = Join-Path $Resolver "Scripts\python.exe"
-
-          @'
-          anyio==4.14.2
-          certifi==2026.7.22
-          click==8.4.2
-          demucs==4.1.0
-          einops==0.8.2
-          filelock==3.29.0
-          fsspec==2026.4.0
-          h11==0.16.0
-          hf-xet==1.6.0
-          httpcore==1.0.9
-          httpx==0.28.1
-          huggingface-hub==1.26.0
-          idna==3.18
-          Jinja2==3.1.6
-          julius==0.2.8
-          lameenc==1.8.4
-          MarkupSafe==3.0.3
-          mpmath==1.3.0
-          networkx==3.6.1
-          numpy==2.5.1
-          packaging==26.2
-          PyYAML==6.0.3
-          safetensors==0.8.0
-          setuptools==78.1.0
-          sphn==0.2.1
-          sympy==1.14.0
-          tqdm==4.70.0
-          typing-extensions==4.15.0
-          '@ | Set-Content -Encoding utf8 (Join-Path $Evidence "constraints.txt")
-
-          & $Python -m pip download `
-            --no-deps `
-            --only-binary=:all: `
-            --dest $Wheelhouse `
-            --index-url https://download.pytorch.org/whl/cpu `
-            "torch==2.13.0+cpu"
-          if ($LASTEXITCODE -ne 0) { throw "Official Windows CPU Torch wheel resolution failed." }
-
-          $TorchWheel = Get-ChildItem $Wheelhouse -Filter "torch-2.13.0+cpu-cp313-cp313-win_amd64.whl" | Select-Object -First 1
-          if (-not $TorchWheel) { throw "The exact CPython 3.13 Windows x86-64 Torch CPU wheel was not selected." }
-          & $Python -m pip install --no-deps $TorchWheel.FullName
-          if ($LASTEXITCODE -ne 0) { throw "Installing the resolver Torch wheel failed." }
-
-          & $Python -m pip install `
-            --dry-run `
-            --report (Join-Path $Evidence "ordinary-report.json") `
-            --only-binary=:all: `
-            --index-url https://pypi.org/simple `
-            --constraint (Join-Path $Evidence "constraints.txt") `
-            -r runtimes/profiles/windows-cpu/requirements.in
-          if ($LASTEXITCODE -ne 0) { throw "The constrained Windows runtime set could not be resolved as wheels." }
-
-          @'
-          import hashlib
-          import json
-          import pathlib
-          import subprocess
-          import sys
-          from urllib.parse import unquote, urlparse
-
-          evidence = pathlib.Path(sys.argv[1])
-          wheelhouse = pathlib.Path(sys.argv[2])
-          python = sys.argv[3]
-          report = json.loads((evidence / "ordinary-report.json").read_text(encoding="utf-8"))
-          selected = []
-          requirement_lines = []
-          for item in report["install"]:
-              metadata = item["metadata"]
-              name = metadata["name"]
-              version = metadata["version"]
-              url = item["download_info"]["url"]
-              filename = pathlib.PurePosixPath(unquote(urlparse(url).path)).name
-              hashes = item["download_info"].get("archive_info", {}).get("hashes", {})
-              sha256 = hashes.get("sha256")
-              if not filename.endswith(".whl") or not sha256:
-                  raise SystemExit(f"Non-wheel or unhashed artifact selected: {name} {filename}")
-              selected.append({"name": name, "version": version, "url": url, "filename": filename, "sha256": sha256})
-              requirement_lines.append(f"{name}=={version}")
-          (evidence / "resolved-requirements.txt").write_text("\n".join(requirement_lines) + "\n", encoding="utf-8")
-          (evidence / "ordinary-artifacts.json").write_text(json.dumps(selected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          subprocess.run([
-              python, "-m", "pip", "download", "--no-deps", "--only-binary=:all:",
-              "--dest", str(wheelhouse), "--index-url", "https://pypi.org/simple",
-              "-r", str(evidence / "resolved-requirements.txt")
-          ], check=True)
-          actual = {}
-          for path in wheelhouse.glob("*.whl"):
-              digest = hashlib.sha256(path.read_bytes()).hexdigest()
-              actual[path.name] = digest
-          for artifact in selected:
-              if actual.get(artifact["filename"]) != artifact["sha256"]:
-                  raise SystemExit(f"Downloaded hash mismatch: {artifact['filename']}")
-          torch_files = [path for path in wheelhouse.glob("torch-2.13.0+cpu-cp313-cp313-win_amd64.whl")]
-          if len(torch_files) != 1:
-              raise SystemExit("Expected exactly one Windows Torch CPU wheel")
-          torch = torch_files[0]
-          torch_record = {
-              "name": "torch",
-              "version": "2.13.0+cpu",
-              "url": "https://download.pytorch.org/whl/cpu/" + torch.name,
-              "filename": torch.name,
-              "sha256": hashlib.sha256(torch.read_bytes()).hexdigest(),
+          $Tokens = $null
+          $Errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/install_demucs_windows_cpu.ps1"),
+            [ref]$Tokens,
+            [ref]$Errors
+          ) | Out-Null
+          if ($Errors.Count -ne 0) {
+            $Errors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell parser reported errors."
           }
-          (evidence / "torch-artifact.json").write_text(json.dumps(torch_record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          (evidence / "downloaded-hashes.json").write_text(json.dumps(actual, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-          print(json.dumps({"ordinaryArtifacts": len(selected), "torch": torch_record}, sort_keys=True))
-          '@ | & $Python - $Evidence $Wheelhouse $Python
-          if ($LASTEXITCODE -ne 0) { throw "Artifact evidence generation failed." }
 
-      - name: Upload resolver evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-cpu-wheel-evidence
-          path: |
-            ${{ runner.temp }}/popex-windows-cpu-evidence/ordinary-report.json
-            ${{ runner.temp }}/popex-windows-cpu-evidence/ordinary-artifacts.json
-            ${{ runner.temp }}/popex-windows-cpu-evidence/torch-artifact.json
-            ${{ runner.temp }}/popex-windows-cpu-evidence/downloaded-hashes.json
-            ${{ runner.temp }}/popex-windows-cpu-evidence/resolved-requirements.txt
-          if-no-files-found: error
-          retention-days: 7
+      - name: Run permanent Windows profile tests
+        shell: pwsh
+        run: pytest tests/test_demucs_windows_cpu_profile.py
 
-      - name: Remove temporary wheels
+      - name: Clean installer smoke and runtime probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Runtime = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-cpu-runtime"
+          $Output = & pwsh -NoProfile -File scripts/install_demucs_windows_cpu.ps1 -Destination $Runtime 2>&1
+          $Output | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "The clean Windows CPU installer failed." }
+          $JsonLine = $Output | Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith("{") } | Select-Object -Last 1
+          if (-not $JsonLine) { throw "The installer did not emit the runtime-probe JSON envelope." }
+          Set-Content -Encoding utf8 -Path (Join-Path $env:RUNNER_TEMP "windows-runtime-probe.json") -Value $JsonLine
+          "POPEX_WINDOWS_RUNTIME=$Runtime" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Validate probe, package inventory, CPU-only state, and no model assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Runtime = $env:POPEX_WINDOWS_RUNTIME
+          $Python = Join-Path $Runtime "venv\Scripts\python.exe"
+          @'
+          import importlib.metadata as metadata
+          import json
+          from pathlib import Path
+          import sys
+
+          runtime = Path(sys.argv[1])
+          probe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8-sig"))
+          profile = json.loads(Path("runtimes/profiles/windows-cpu/profile.json").read_text(encoding="utf-8"))
+          worker_lock = json.loads(Path("runtimes/profiles/windows-cpu/worker-runtime-lock.json").read_text(encoding="utf-8"))
+          result = probe["result"]
+          if probe["status"] != "ok" or not result["compatible"]:
+              raise SystemExit("runtime-probe did not report a compatible runtime")
+          if result["runtimeProfile"] != profile["runtimeProfile"]:
+              raise SystemExit("runtime profile identifier mismatch")
+          if result["installedVersions"] != result["lockedVersions"] or result["lockedVersions"] != worker_lock["packages"]:
+              raise SystemExit("installed and locked worker versions differ")
+          installed = {
+              dist.metadata["Name"].lower().replace("_", "-"): dist.version
+              for dist in metadata.distributions()
+              if dist.metadata["Name"].lower().replace("_", "-") != "pip"
+          }
+          expected = {name.lower().replace("_", "-"): version for name, version in profile["exactDependencyVersions"].items()}
+          if installed != expected:
+              missing = sorted(set(expected) - set(installed))
+              extra = sorted(set(installed) - set(expected))
+              wrong = sorted(name for name in set(expected) & set(installed) if expected[name] != installed[name])
+              raise SystemExit(f"complete package inventory mismatch: missing={missing} extra={extra} wrong={wrong}")
+          import torch
+          if torch.__version__ != "2.13.0+cpu" or torch.version.cuda is not None or torch.cuda.is_available():
+              raise SystemExit("Torch is not the exact CPU-only build")
+          if any(name in installed for name in ("torchaudio", "openunmix", "dora-search")):
+              raise SystemExit("a forbidden package is installed")
+          if any(name.startswith("nvidia-") or "cuda" in name for name in installed):
+              raise SystemExit("a CUDA or NVIDIA package is installed")
+          forbidden_assets = []
+          for path in runtime.rglob("*"):
+              lower = path.name.lower()
+              if lower.endswith((".safetensors", ".th", ".ckpt")) or lower == "htdemucs-bf35a81b-v1.json":
+                  forbidden_assets.append(str(path.relative_to(runtime)))
+          if forbidden_assets:
+              raise SystemExit(f"model or readiness assets were created: {forbidden_assets}")
+          if (runtime / "model-cache").exists():
+              raise SystemExit("a Hugging Face model cache was created")
+          print(json.dumps({
+              "probe": probe,
+              "torchVersionCuda": torch.version.cuda,
+              "torchCudaAvailable": torch.cuda.is_available(),
+              "forbiddenPackagesPresent": [],
+              "checkpointAssetsPresent": [],
+              "huggingFaceModelCacheCreated": False,
+              "packageCount": len(installed),
+          }, sort_keys=True))
+          '@ | & $Python - $Runtime (Join-Path $env:RUNNER_TEMP "windows-runtime-probe.json")
+          if ($LASTEXITCODE -ne 0) { throw "Windows CPU runtime validation failed." }
+
+      - name: Clean temporary runtime
         if: always()
         shell: pwsh
         run: |
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP "popex-windows-cpu-evidence")
-          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP "popex-windows-cpu-resolver")
+          if ($env:POPEX_WINDOWS_RUNTIME) {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $env:POPEX_WINDOWS_RUNTIME
+          }
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP "windows-runtime-probe.json")
