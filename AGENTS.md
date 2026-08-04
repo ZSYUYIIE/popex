@@ -123,6 +123,25 @@ For media and analysis changes, perform at least one end-to-end local smoke test
 - Do not bypass failing required checks.
 - After merge, update the next agent's base and scope.
 
+## GitHub-first orchestration and handoffs
+
+GitHub is the canonical coordination layer. The user must not be used as a message bus between agents and the orchestrator.
+
+The full workflow is documented in [docs/agent-orchestration.md](docs/agent-orchestration.md).
+
+- The orchestrator creates one GitHub issue per agent with the full task, branch, ownership, acceptance criteria, and validation.
+- An agent may be started with only the issue number and an instruction to use GitHub as canonical state.
+- Open a draft pull request as the first remote checkpoint, before long-running installs, downloads, or experiments.
+- Use the repository pull-request template and keep the `popex-agent-handoff:v1` JSON block current.
+- Put the full progress and final handoff in the PR body rather than returning a long chat report.
+- Push verified partial work and mark the handoff `blocked` when an experiment stalls or fails.
+- Record exact base and head SHAs, every changed file, validation commands and counts, CI run, integration notes, risks, and merge recommendation.
+- Change status to `ready_for_review` only after required checks pass on the recorded head.
+- Keep the PR unmerged unless the orchestrator explicitly assigns merge ownership.
+- A chat response should normally contain only the issue or PR number, final head SHA, and one-line status.
+
+The orchestrator reads the issue, PR body, diff, reviews, and CI directly from GitHub, then patches, merges, or creates the next cycle without asking the user to copy reports.
+
 ## Documentation ownership
 
 The Product source of truth in `README.md` is canonical and should remain stable.

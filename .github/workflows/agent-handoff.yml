@@ -1,0 +1,22 @@
+name: Agent handoff
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  validate-agent-handoff:
+    if: startsWith(github.head_ref, 'agent/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Validate canonical PR handoff
+        run: >-
+          python scripts/check_agent_handoff.py
+          --event "$GITHUB_EVENT_PATH"
+          --legacy-through 13
