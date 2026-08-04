@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "runtimeProfile": "unprovisioned",
+  "workerVersion": "1.0.0",
+  "packages": {
+    "demucs": "4.1.0"
+  }
+}
