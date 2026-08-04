@@ -94,25 +94,53 @@
       "status": "passed"
     },
     "validationWorkflow": {
-      "runNumber": null,
-      "runId": null,
-      "status": "pending"
+      "runNumber": 14,
+      "runId": 30884730743,
+      "status": "passed"
     },
-    "runtimeProbe": null,
+    "runtimeProbe": {
+      "protocolVersion": 1,
+      "command": "runtime-probe",
+      "status": "ok",
+      "result": {
+        "pythonVersion": "3.13.14",
+        "workerVersion": "1.0.0",
+        "runtimeProfile": "windows-x86_64-cpu-cpython313",
+        "runtimeLockSource": "profile",
+        "installedVersions": {
+          "demucs": "4.1.0",
+          "torch": "2.13.0+cpu",
+          "huggingface_hub": "1.26.0",
+          "safetensors": "0.8.0",
+          "PyYAML": "6.0.3"
+        },
+        "lockedVersions": {
+          "demucs": "4.1.0",
+          "torch": "2.13.0+cpu",
+          "huggingface_hub": "1.26.0",
+          "safetensors": "0.8.0",
+          "PyYAML": "6.0.3"
+        },
+        "compatible": true
+      },
+      "warnings": []
+    },
+    "completePackageCount": 31,
     "torchVersionCuda": null,
     "torchCudaAvailable": false,
     "forbiddenPackagesPresent": [],
     "checkpointAssetsPresent": [],
-    "huggingFaceModelCacheCreated": false
+    "huggingFaceModelCacheCreated": false,
+    "cleanInstallerSmokeTest": "passed"
   },
   "modelBundled": false,
   "startupDownload": false,
   "modelDownloadDuringInstallation": false,
-  "validationStatus": "candidate-awaiting-clean-installer-smoke",
+  "validationStatus": "validated-ready-for-worker-integration",
   "knownLimitations": [
     "Validation is limited to Windows x86-64 on the recorded windows-latest image with CPython 3.13.",
-    "The final clean installer and runtime-probe workflow is pending for this candidate lock.",
     "No model is included or downloaded; model preparation remains a separate explicit user-authorized action.",
-    "The installer requires network access to the official PyPI and PyTorch CPU indexes for package installation only."
+    "The installer requires network access to the official PyPI and PyTorch CPU indexes for package installation only.",
+    "The validation proves installation and runtime compatibility, not Demucs inference quality or performance on end-user Windows hardware."
   ]
 }
