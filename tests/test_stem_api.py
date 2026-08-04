@@ -517,9 +517,18 @@ def test_disabled_invalid_runtime_environment_is_ignored(
     monkeypatch.setenv("STEM_SEPARATION_ENABLED", "false")
     monkeypatch.setenv("STEM_SEPARATION_DEVICE", "not-a-device")
     monkeypatch.setenv("STEM_SEPARATION_TIMEOUT_SECONDS", "not-an-int")
-    monkeypatch.setenv("STEM_SEPARATION_WORKER_EXECUTABLE", "bad\x00path")
-    monkeypatch.setenv("STEM_SEPARATION_RUNTIME_LOCK", "bad\x00lock")
-    monkeypatch.setenv("STEM_SEPARATION_CACHE_DIR", "bad\x00cache")
+    monkeypatch.setenv(
+        "STEM_SEPARATION_WORKER_EXECUTABLE",
+        str(tmp_path / "stale" / "missing-worker"),
+    )
+    monkeypatch.setenv(
+        "STEM_SEPARATION_RUNTIME_LOCK",
+        str(tmp_path / "stale" / "missing-runtime-lock.json"),
+    )
+    monkeypatch.setenv(
+        "STEM_SEPARATION_CACHE_DIR",
+        str(tmp_path / "stale" / "missing-cache"),
+    )
 
     settings = Settings.from_env()
     app = create_app(settings=settings)
@@ -532,6 +541,7 @@ def test_disabled_invalid_runtime_environment_is_ignored(
     assert settings.stem_separation_worker_executable is None
     assert settings.stem_separation_cache_dir is None
     assert not (tmp_path / "runtime-cache").exists()
+    assert not (tmp_path / "stale").exists()
 
 
 def test_enabled_invalid_runtime_environment_is_safe_unavailable(
