@@ -1,13 +1,38 @@
-# Windows CPU runtime lock provenance
+# Windows CPU lock provenance
 
-- Issue: `#18`
-- Cycle: `cycle-3a-stem-integration-closure`
-- Branch: `agent/demucs-windows-cpu-profile`
-- Base SHA: `f824e2188487c904c7e6dfab89b4923bf704c60b`
-- Status: investigation in progress
+## Scope
 
-This checkpoint was created before dependency resolution or large wheel downloads.
+This profile is limited to Windows x86-64, CPython 3.13, and CPU-only PyTorch. It is not a universal Windows, CUDA, ARM64, or other-Python lock.
 
-The assigned target is Windows x86-64 with CPython 3.13, CPU-only PyTorch, `demucs==4.1.0`, and `popex-demucs-worker==1.0.0`. No compatibility claim is made yet. The exact official Windows wheels, hashes, transitive runtime set, installer behavior, and clean Windows runtime probe remain to be verified.
+## Official indexes
 
-No model, checkpoint, cache, private audio, optional runtime dependency, or source distribution has been downloaded or committed by this checkpoint.
+- PyTorch CPU wheels: `https://download.pytorch.org/whl/cpu`
+- Python packages: `https://pypi.org/simple`
+
+Only `torch==2.13.0+cpu` is selected from the PyTorch CPU index. Every other artifact is selected from PyPI and recorded with its exact Windows-compatible filename and SHA-256.
+
+## Resolver evidence
+
+GitHub Actions workflow **Demucs Windows CPU profile validation**, run 1 (`30883764913`), used:
+
+- Microsoft Windows Server 2025 Datacenter, build `10.0.26100`;
+- runner image `windows-2025-vs2026`, version `20260728.188.1`;
+- AMD64;
+- CPython `3.13.14`;
+- wheel-only resolution from official indexes.
+
+The run downloaded every selected wheel and recomputed its SHA-256. Evidence artifact `8882280475` contained the pip report, exact URLs, filenames, reported digests, and downloaded digests.
+
+## Platform-specific findings
+
+- Official Torch artifact: `torch-2.13.0+cpu-cp313-cp313-win_amd64.whl`, SHA-256 `a17ff48608634db245e17e8bb00a9558554a49aeb1e4f5fe6cd039af2a10515b`.
+- Windows adds `colorama==0.4.6` through tqdm.
+- Windows-specific wheels and hashes were selected for NumPy, PyYAML, safetensors, sphn, lameenc, hf-xet, and MarkupSafe.
+- Linux binary-wheel hashes were not reused for Windows artifacts.
+- All selected artifacts were wheels; no source distribution was accepted.
+
+## Remaining validation
+
+The candidate lock still requires the committed PowerShell installer, static suite, clean Windows installation, CPU and forbidden-package checks, model/cache absence checks, and an actual protocol-v1 `runtime-probe`. Until those pass, `profile.json` reports `candidate-awaiting-clean-installer-smoke`.
+
+No model command was invoked during resolver run 1, and no model checkpoint or cache was included in the evidence artifact.
