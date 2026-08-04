@@ -1,0 +1,4 @@
+# Official Windows x86-64 CPython 3.13 CPU wheel from the PyTorch CPU index.
+# Install with --no-deps --require-hashes --only-binary=:all:.
+torch==2.13.0+cpu \
+    --hash=sha256:a17ff48608634db245e17e8bb00a9558554a49aeb1e4f5fe6cd039af2a10515b

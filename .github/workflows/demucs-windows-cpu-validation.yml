@@ -1,0 +1,142 @@
+name: Demucs Windows CPU profile validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "runtimes/profiles/windows-cpu/**"
+      - "scripts/install_demucs_windows_cpu.ps1"
+      - "tests/test_demucs_windows_cpu_profile.py"
+      - "docs/runtime/demucs-windows-cpu.md"
+      - ".github/workflows/demucs-windows-cpu-validation.yml"
+      - "runtimes/demucs_worker/**"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-windows-cpu-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install focused test runner
+        shell: pwsh
+        run: python -m pip install "pytest>=8.4,<10"
+
+      - name: Parse PowerShell installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Tokens = $null
+          $Errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/install_demucs_windows_cpu.ps1"),
+            [ref]$Tokens,
+            [ref]$Errors
+          ) | Out-Null
+          if ($Errors.Count -ne 0) {
+            $Errors | ForEach-Object { Write-Error $_.Message }
+            throw "PowerShell parser reported errors."
+          }
+
+      - name: Run permanent Windows profile tests
+        shell: pwsh
+        run: pytest tests/test_demucs_windows_cpu_profile.py
+
+      - name: Clean installer smoke and runtime probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Runtime = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-cpu-runtime"
+          $Output = & pwsh -NoProfile -File scripts/install_demucs_windows_cpu.ps1 -Destination $Runtime 2>&1
+          $Output | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) { throw "The clean Windows CPU installer failed." }
+          $JsonLine = $Output | Where-Object { $_ -is [string] -and $_.TrimStart().StartsWith("{") } | Select-Object -Last 1
+          if (-not $JsonLine) { throw "The installer did not emit the runtime-probe JSON envelope." }
+          Set-Content -Encoding utf8 -Path (Join-Path $env:RUNNER_TEMP "windows-runtime-probe.json") -Value $JsonLine
+          "POPEX_WINDOWS_RUNTIME=$Runtime" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Validate probe, package inventory, CPU-only state, and no model assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Runtime = $env:POPEX_WINDOWS_RUNTIME
+          $Python = Join-Path $Runtime "venv\Scripts\python.exe"
+          @'
+          import importlib.metadata as metadata
+          import json
+          from pathlib import Path
+          import sys
+
+          runtime = Path(sys.argv[1])
+          probe = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8-sig"))
+          profile = json.loads(Path("runtimes/profiles/windows-cpu/profile.json").read_text(encoding="utf-8"))
+          worker_lock = json.loads(Path("runtimes/profiles/windows-cpu/worker-runtime-lock.json").read_text(encoding="utf-8"))
+          result = probe["result"]
+          if probe["status"] != "ok" or not result["compatible"]:
+              raise SystemExit("runtime-probe did not report a compatible runtime")
+          if result["runtimeProfile"] != profile["runtimeProfile"]:
+              raise SystemExit("runtime profile identifier mismatch")
+          if result["installedVersions"] != result["lockedVersions"] or result["lockedVersions"] != worker_lock["packages"]:
+              raise SystemExit("installed and locked worker versions differ")
+          installed = {
+              dist.metadata["Name"].lower().replace("_", "-"): dist.version
+              for dist in metadata.distributions()
+              if dist.metadata["Name"].lower().replace("_", "-") != "pip"
+          }
+          expected = {name.lower().replace("_", "-"): version for name, version in profile["exactDependencyVersions"].items()}
+          if installed != expected:
+              missing = sorted(set(expected) - set(installed))
+              extra = sorted(set(installed) - set(expected))
+              wrong = sorted(name for name in set(expected) & set(installed) if expected[name] != installed[name])
+              raise SystemExit(f"complete package inventory mismatch: missing={missing} extra={extra} wrong={wrong}")
+          import torch
+          if torch.__version__ != "2.13.0+cpu" or torch.version.cuda is not None or torch.cuda.is_available():
+              raise SystemExit("Torch is not the exact CPU-only build")
+          if any(name in installed for name in ("torchaudio", "openunmix", "dora-search")):
+              raise SystemExit("a forbidden package is installed")
+          if any(name.startswith("nvidia-") or "cuda" in name for name in installed):
+              raise SystemExit("a CUDA or NVIDIA package is installed")
+          forbidden_assets = []
+          for path in runtime.rglob("*"):
+              lower = path.name.lower()
+              if lower.endswith((".safetensors", ".th", ".ckpt")) or lower == "htdemucs-bf35a81b-v1.json":
+                  forbidden_assets.append(str(path.relative_to(runtime)))
+          if forbidden_assets:
+              raise SystemExit(f"model or readiness assets were created: {forbidden_assets}")
+          if (runtime / "model-cache").exists():
+              raise SystemExit("a Hugging Face model cache was created")
+          print(json.dumps({
+              "probe": probe,
+              "torchVersionCuda": torch.version.cuda,
+              "torchCudaAvailable": torch.cuda.is_available(),
+              "forbiddenPackagesPresent": [],
+              "checkpointAssetsPresent": [],
+              "huggingFaceModelCacheCreated": False,
+              "packageCount": len(installed),
+          }, sort_keys=True))
+          '@ | & $Python - $Runtime (Join-Path $env:RUNNER_TEMP "windows-runtime-probe.json")
+          if ($LASTEXITCODE -ne 0) { throw "Windows CPU runtime validation failed." }
+
+      - name: Clean temporary runtime
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:POPEX_WINDOWS_RUNTIME) {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $env:POPEX_WINDOWS_RUNTIME
+          }
+          Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP "windows-runtime-probe.json")

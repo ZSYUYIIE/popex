@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "runtimeProfile": "windows-x86_64-cpu-cpython313",
+  "supportedOS": [
+    "Windows"
+  ],
+  "validatedWindows": {
+    "edition": "Microsoft Windows Server 2025 Datacenter",
+    "build": "10.0.26100",
+    "runnerImage": "windows-2025-vs2026",
+    "runnerImageVersion": "20260728.188.1"
+  },
+  "architecture": "x86_64",
+  "pythonImplementation": "CPython",
+  "pythonVersionRange": ">=3.13.0,<3.14.0",
+  "device": "cpu",
+  "workerProtocolVersion": 1,
+  "workerPackageVersionExpectation": "1.0.0",
+  "demucsVersion": "4.1.0",
+  "pytorchVersionBuild": "2.13.0+cpu",
+  "packageIndexUrls": {
+    "pypi": "https://pypi.org/simple",
+    "pytorchCpu": "https://download.pytorch.org/whl/cpu"
+  },
+  "exactDependencyVersions": {
+    "anyio": "4.14.2",
+    "certifi": "2026.7.22",
+    "click": "8.4.2",
+    "colorama": "0.4.6",
+    "demucs": "4.1.0",
+    "einops": "0.8.2",
+    "filelock": "3.29.0",
+    "fsspec": "2026.4.0",
+    "h11": "0.16.0",
+    "hf-xet": "1.6.0",
+    "httpcore": "1.0.9",
+    "httpx": "0.28.1",
+    "huggingface_hub": "1.26.0",
+    "idna": "3.18",
+    "Jinja2": "3.1.6",
+    "julius": "0.2.8",
+    "lameenc": "1.8.4",
+    "MarkupSafe": "3.0.3",
+    "mpmath": "1.3.0",
+    "networkx": "3.6.1",
+    "numpy": "2.5.1",
+    "packaging": "26.2",
+    "PyYAML": "6.0.3",
+    "safetensors": "0.8.0",
+    "setuptools": "78.1.0",
+    "sphn": "0.2.1",
+    "sympy": "1.14.0",
+    "torch": "2.13.0+cpu",
+    "tqdm": "4.70.0",
+    "typing_extensions": "4.15.0",
+    "popex-demucs-worker": "1.0.0"
+  },
+  "excludedPackages": {
+    "torchaudio": {
+      "installed": false,
+      "reason": "Not required for Demucs 4.1.0 pretrained separation."
+    },
+    "nvidia-*": {
+      "installed": false,
+      "reason": "CPU-only PyTorch profile."
+    },
+    "openunmix": {
+      "versionEvaluated": "1.3.0",
+      "installed": false,
+      "reason": "Not a Demucs 4.1.0 runtime dependency and would introduce torchaudio."
+    },
+    "dora-search": {
+      "versionEvaluated": "0.1.12",
+      "installed": false,
+      "reason": "Demucs training-only dependency."
+    },
+    "demucs[train]": {
+      "installed": false,
+      "reason": "Training extras are excluded."
+    }
+  },
+  "hashesEnforced": true,
+  "hashScope": "All index-fetched Windows wheels; the local PopEx worker is installed from the checked-out source tree with no dependencies, no index, and no build isolation.",
+  "generationDate": "2026-08-04",
+  "validationEnvironment": {
+    "os": "Microsoft Windows Server 2025 Datacenter 10.0.26100",
+    "runnerImage": "windows-2025-vs2026 20260728.188.1",
+    "architecture": "AMD64",
+    "python": "CPython 3.13.14",
+    "resolverWorkflow": {
+      "runNumber": 1,
+      "runId": 30883764913,
+      "artifactId": 8882280475,
+      "status": "passed"
+    },
+    "validationWorkflow": {
+      "runNumber": 14,
+      "runId": 30884730743,
+      "status": "passed"
+    },
+    "runtimeProbe": {
+      "protocolVersion": 1,
+      "command": "runtime-probe",
+      "status": "ok",
+      "result": {
+        "pythonVersion": "3.13.14",
+        "workerVersion": "1.0.0",
+        "runtimeProfile": "windows-x86_64-cpu-cpython313",
+        "runtimeLockSource": "profile",
+        "installedVersions": {
+          "demucs": "4.1.0",
+          "torch": "2.13.0+cpu",
+          "huggingface_hub": "1.26.0",
+          "safetensors": "0.8.0",
+          "PyYAML": "6.0.3"
+        },
+        "lockedVersions": {
+          "demucs": "4.1.0",
+          "torch": "2.13.0+cpu",
+          "huggingface_hub": "1.26.0",
+          "safetensors": "0.8.0",
+          "PyYAML": "6.0.3"
+        },
+        "compatible": true
+      },
+      "warnings": []
+    },
+    "completePackageCount": 31,
+    "torchVersionCuda": null,
+    "torchCudaAvailable": false,
+    "forbiddenPackagesPresent": [],
+    "checkpointAssetsPresent": [],
+    "huggingFaceModelCacheCreated": false,
+    "cleanInstallerSmokeTest": "passed"
+  },
+  "modelBundled": false,
+  "startupDownload": false,
+  "modelDownloadDuringInstallation": false,
+  "validationStatus": "validated-ready-for-worker-integration",
+  "knownLimitations": [
+    "Validation is limited to Windows x86-64 on the recorded windows-latest image with CPython 3.13.",
+    "No model is included or downloaded; model preparation remains a separate explicit user-authorized action.",
+    "The installer requires network access to the official PyPI and PyTorch CPU indexes for package installation only.",
+    "The validation proves installation and runtime compatibility, not Demucs inference quality or performance on end-user Windows hardware."
+  ]
+}
