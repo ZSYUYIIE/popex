@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "runtimeProfile": "linux-x86_64-cpu-cpython313",
+  "workerVersion": "1.0.0",
+  "packages": {
+    "demucs": "4.1.0",
+    "torch": "2.13.0+cpu",
+    "huggingface_hub": "1.26.0",
+    "safetensors": "0.8.0",
+    "PyYAML": "6.0.3"
+  }
+}
