@@ -86,6 +86,19 @@ ANALYSIS_STAGES = {
 }
 PREPARATION_PROGRESS_LIMIT = 64.0
 ANALYSIS_FAILURE_PROGRESS = 95.0
+_INTERNAL_SEPARATION_FIELDS = frozenset(
+    {
+        "separation_status",
+        "separation_stage",
+        "separation_progress",
+        "separation_message",
+        "separation_version",
+        "separation_model",
+        "stem_manifest_file_name",
+        "separated_at",
+        "separation_error",
+    }
+)
 
 
 class JobCreate(BaseModel):
@@ -792,7 +805,11 @@ def _serialize_job(
     settings: Settings,
     separation_service: SeparationService | None = None,
 ) -> dict:
-    payload = dict(job)
+    payload = {
+        key: value
+        for key, value in job.items()
+        if key not in _INTERNAL_SEPARATION_FIELDS
+    }
     payload["files"] = []
     job_dir = settings.exports_dir / job["id"]
     allowed_names = _persisted_artifact_names(job)
