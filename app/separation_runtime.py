@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -108,6 +109,10 @@ class SeparationRuntimeError(RuntimeError):
 
 class RuntimeMissingError(SeparationRuntimeError):
     """The configured optional-runtime executable could not be started."""
+
+
+class RuntimeConfigurationError(SeparationRuntimeError):
+    """Trusted local runtime configuration became unavailable or unsafe."""
 
 
 class WorkerProtocolError(SeparationRuntimeError):
@@ -238,6 +243,7 @@ class SeparationRuntimeClient:
         worker_executable: Path | str,
         cache_root: Path | str,
         *,
+        runtime_lock_path: Path | str | None = None,
         expected_protocol_version: int = PROTOCOL_VERSION,
         command_timeouts: Mapping[str, float] | None = None,
         expected_runtime_profile: str | None = None,
@@ -251,6 +257,7 @@ class SeparationRuntimeClient:
             raise ValueError("expected_protocol_version must be a positive integer")
         self._worker_executable = _normalize_executable(worker_executable)
         self._cache_root = _normalize_trusted_root(cache_root, "cache_root")
+        self._runtime_lock_path = _normalize_runtime_lock_path(runtime_lock_path)
         self._expected_protocol_version = expected_protocol_version
         self._expected_runtime_profile = _optional_nonempty_string(
             expected_runtime_profile, "expected_runtime_profile"
@@ -284,6 +291,11 @@ class SeparationRuntimeClient:
     @property
     def cache_root(self) -> Path:
         return self._cache_root
+
+    @property
+    def runtime_lock_path(self) -> Path | None:
+        """Return the validated trusted path for local integration code only."""
+        return self._runtime_lock_path
 
     def runtime_probe(self) -> RuntimeProbeResult:
         envelope = self._invoke("runtime-probe", (), self._timeouts["runtime-probe"])
@@ -395,6 +407,16 @@ class SeparationRuntimeClient:
     def _invoke(self, command: str, command_args: Sequence[str], timeout: float) -> dict[str, Any]:
         if command not in _COMMANDS:
             raise ValueError(f"unsupported command: {command}")
+        runtime_lock_path = self._revalidate_runtime_lock()
+        known_paths = tuple(
+            path
+            for path in (
+                self._worker_executable,
+                self._cache_root,
+                runtime_lock_path,
+            )
+            if path is not None
+        )
         argv = [
             str(self._worker_executable),
             "--protocol-version",
@@ -409,12 +431,12 @@ class SeparationRuntimeClient:
                 capture_output=True,
                 text=False,
                 timeout=timeout,
-                env=self._build_environment(command),
+                env=self._build_environment(command, runtime_lock_path),
                 check=False,
             )
         except (FileNotFoundError, PermissionError, NotADirectoryError, OSError) as exc:
             diagnostic = _sanitize_diagnostic(
-                str(exc), (self._worker_executable, self._cache_root), self._diagnostic_limit
+                str(exc), known_paths, self._diagnostic_limit
             )
             raise RuntimeMissingError(
                 WorkerErrorDetail(
@@ -456,7 +478,6 @@ class SeparationRuntimeClient:
         except UnicodeDecodeError:
             raise _protocol_error("Worker output was not valid UTF-8.") from None
 
-        known_paths = (self._worker_executable, self._cache_root)
         diagnostic = _sanitize_diagnostic(stderr_text, known_paths, self._diagnostic_limit)
         envelope = _parse_envelope(stdout_text, command, self._expected_protocol_version)
         envelope["warnings"] = tuple(
@@ -487,12 +508,40 @@ class SeparationRuntimeClient:
             )
         )
 
-    def _build_environment(self, command: str) -> dict[str, str]:
+    def _revalidate_runtime_lock(self) -> Path | None:
+        if self._runtime_lock_path is None:
+            return None
+        try:
+            current = _normalize_runtime_lock_path(self._runtime_lock_path)
+        except (OSError, ValueError):
+            raise RuntimeConfigurationError(
+                WorkerErrorDetail(
+                    code="RUNTIME_CONFIGURATION_INVALID",
+                    message="The configured separation runtime lock is unavailable or unsafe.",
+                    retryable=False,
+                )
+            ) from None
+        if current != self._runtime_lock_path:
+            raise RuntimeConfigurationError(
+                WorkerErrorDetail(
+                    code="RUNTIME_CONFIGURATION_INVALID",
+                    message="The configured separation runtime lock is unavailable or unsafe.",
+                    retryable=False,
+                )
+            )
+        return current
+
+    def _build_environment(
+        self, command: str, runtime_lock_path: Path | None = None
+    ) -> dict[str, str]:
         environment = {
             name: value
             for name in _ENV_ALLOWLIST
             if (value := os.environ.get(name)) is not None
         }
+        # This variable is never inherited from the parent process. It is added
+        # only from trusted constructor configuration after per-spawn validation.
+        environment.pop("POPEX_DEMUCS_RUNTIME_LOCK", None)
         environment.update(
             {
                 "HF_HOME": str(self._cache_root),
@@ -507,6 +556,8 @@ class SeparationRuntimeClient:
                 "PYTHONUTF8": "1",
             }
         )
+        if runtime_lock_path is not None:
+            environment["POPEX_DEMUCS_RUNTIME_LOCK"] = str(runtime_lock_path)
         if command in {"verify-model", "separate"}:
             environment["HF_HUB_OFFLINE"] = "1"
         return environment
@@ -572,6 +623,36 @@ def _normalize_trusted_root(value: Path | str, name: str) -> Path:
     if path.exists() and path.is_symlink():
         raise ValueError(f"{name} must not be a symlink")
     return path.resolve(strict=False)
+
+
+def _normalize_runtime_lock_path(value: Path | str | None) -> Path | None:
+    if value is None:
+        return None
+    text = os.fspath(value)
+    if not isinstance(text, str) or not text or "\x00" in text:
+        raise ValueError("runtime_lock_path must be a non-empty local path")
+    normalized_text = os.path.normpath(text)
+    if text != normalized_text:
+        raise ValueError("runtime_lock_path must be normalized")
+    path = Path(text)
+    if not path.is_absolute():
+        raise ValueError("runtime_lock_path must be absolute")
+    try:
+        lexical_stat = path.lstat()
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        raise ValueError("runtime_lock_path must be an existing regular file") from exc
+    if stat.S_ISLNK(lexical_stat.st_mode) or not stat.S_ISREG(lexical_stat.st_mode):
+        raise ValueError("runtime_lock_path must be an existing regular non-symlink file")
+    try:
+        resolved = path.resolve(strict=True)
+        target_stat = resolved.lstat()
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        raise ValueError("runtime_lock_path must be an existing regular file") from exc
+    if stat.S_ISLNK(target_stat.st_mode) or not stat.S_ISREG(target_stat.st_mode):
+        raise ValueError("runtime_lock_path must resolve to a regular non-symlink file")
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(path)):
+        raise ValueError("runtime_lock_path must not contain symbolic-link components")
+    return resolved
 
 
 def _validate_separation_paths(
@@ -974,6 +1055,7 @@ __all__ = [
     "ModelProbeResult",
     "ModelVerificationResult",
     "PROTOCOL_VERSION",
+    "RuntimeConfigurationError",
     "RuntimeMissingError",
     "RuntimeProbeResult",
     "SEPARATION_OUTPUTS",
