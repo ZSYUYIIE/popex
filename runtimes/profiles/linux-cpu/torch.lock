@@ -1,0 +1,4 @@
+# Official Linux x86-64 CPython 3.13 CPU wheel from the PyTorch CPU index.
+# Install with --no-deps --require-hashes --only-binary=:all:.
+torch==2.13.0+cpu \
+    --hash=sha256:3fbf9c9d1f3c10c2d59d04aca426dee9ccc6ceb32d255c61e93acc3b4f75fae6
