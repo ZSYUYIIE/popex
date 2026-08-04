@@ -80,23 +80,64 @@
     "architecture": "x86_64",
     "python": "CPython 3.13.14",
     "pip": "26.1.2",
+    "shellcheck": "0.9.0",
     "githubActionsRuns": [
+      62,
       63,
       64,
-      65
+      65,
+      66,
+      72
     ],
     "dependencyImportProbe": "passed on run 63",
-    "finalLockedInstallerSmokeTest": "pending concurrent worker package merge"
+    "integrationEvidenceRun": 72,
+    "testedWorkerPullRequest": 12,
+    "testedWorkerHead": "ef5d0e41a60f44372e14c4685b51a20cc9acd862",
+    "finalLockedInstallerSmokeTest": "passed",
+    "runtimeProbe": {
+      "compatible": true,
+      "runtimeProfile": "linux-x86_64-cpu-cpython313",
+      "pythonVersion": "3.13.14",
+      "workerVersion": "1.0.0",
+      "runtimeLockSource": "profile",
+      "installedVersions": {
+        "PyYAML": "6.0.3",
+        "demucs": "4.1.0",
+        "huggingface_hub": "1.26.0",
+        "safetensors": "0.8.0",
+        "torch": "2.13.0+cpu"
+      },
+      "lockedVersions": {
+        "PyYAML": "6.0.3",
+        "demucs": "4.1.0",
+        "huggingface_hub": "1.26.0",
+        "safetensors": "0.8.0",
+        "torch": "2.13.0+cpu"
+      }
+    },
+    "refusalTests": {
+      "unsupportedOS": 2,
+      "unsupportedArchitecture": 2,
+      "wrongPython": 2,
+      "root": 2,
+      "existingDestination": 3,
+      "missingWorker": 3
+    },
+    "torchVersionCuda": null,
+    "torchCudaAvailable": false,
+    "forbiddenPackagesPresent": [],
+    "checkpointAssetsPresent": [],
+    "huggingFaceModelCacheCreated": false
   },
   "modelBundled": false,
   "startupDownload": false,
   "modelDownloadDuringInstallation": false,
-  "validationStatus": "dependency-set-validated-worker-probe-pending",
+  "validationStatus": "validated-ready-for-worker-integration",
   "knownLimitations": [
-    "The popex-demucs-worker source directory is expected at runtimes/demucs_worker and was not present on the validated base main SHA.",
-    "The dependency set and Demucs worker-facing imports were validated, but the final runtime-probe awaits the concurrent worker package landing.",
+    "Validation applies to popex-demucs-worker PR #12 head ef5d0e41a60f44372e14c4685b51a20cc9acd862; a later untested worker head requires revalidation.",
     "The profile is limited to Linux x86-64 with CPython 3.13 and manylinux_2_28-compatible systems.",
     "No model is included or downloaded; prepare-model remains a separate explicit user-authorized action.",
-    "The installer requires network access to the official PyPI and PyTorch CPU indexes for package installation only."
+    "The installer requires network access to the official PyPI and PyTorch CPU indexes for package installation only.",
+    "Demucs includes remote/htdemucs.yaml as package metadata; validation confirmed that no model checkpoint, readiness manifest, or Hugging Face model cache was created."
   ]
 }
