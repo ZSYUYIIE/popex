@@ -31,8 +31,35 @@ The run downloaded every selected wheel and recomputed its SHA-256. Evidence art
 - Linux binary-wheel hashes were not reused for Windows artifacts.
 - All selected artifacts were wheels; no source distribution was accepted.
 
-## Remaining validation
+## Clean installer and worker validation
 
-The candidate lock still requires the committed PowerShell installer, static suite, clean Windows installation, CPU and forbidden-package checks, model/cache absence checks, and an actual protocol-v1 `runtime-probe`. Until those pass, `profile.json` reports `candidate-awaiting-clean-installer-smoke`.
+GitHub Actions workflow run 14 (`30884730743`) exercised the committed installer from a new destination on the same Windows image and Python minor.
 
-No model command was invoked during resolver run 1, and no model checkpoint or cache was included in the evidence artifact.
+Verified results:
+
+- PowerShell parser reported no errors.
+- `22` permanent profile tests passed.
+- Both index installation phases enforced exact hashes, wheel-only selection, and `--no-deps`.
+- The complete installed inventory contained exactly `31` distributions excluding pip and matched `profile.json`.
+- `torch.__version__` was `2.13.0+cpu`.
+- `torch.version.cuda` was `None` and `torch.cuda.is_available()` was false.
+- No torchaudio, Open-Unmix, Dora Search, CUDA, or NVIDIA distribution was installed.
+- No `.safetensors`, `.th`, `.ckpt`, readiness manifest, or Hugging Face model cache was created.
+- The local `popex-demucs-worker==1.0.0` source installed last with no index, dependencies, or build isolation.
+- The worker returned a successful protocol-v1 `runtime-probe` with profile `windows-x86_64-cpu-cpython313` and identical installed and locked versions:
+
+```json
+{
+  "demucs": "4.1.0",
+  "torch": "2.13.0+cpu",
+  "huggingface_hub": "1.26.0",
+  "safetensors": "0.8.0",
+  "PyYAML": "6.0.3"
+}
+```
+
+The workflow deleted the temporary runtime after validation. No model command was invoked during resolution or installation.
+
+## Revalidation boundary
+
+Any package version, artifact hash, Python minor, Torch build, Demucs version, worker package/protocol, Windows runner image, installer behavior, or package-index origin change requires a new clean Windows installation and worker probe.
