@@ -2,13 +2,13 @@
 
 ## Status
 
-The draft pull request was opened before any hosted Linux or Windows runtime installation. The base-client validator is implemented; hosted profile installation evidence remains pending.
+Validated on hosted Linux and Windows runners. The draft pull request was opened before either runtime installation, and no audited model asset was downloaded, prepared, verified, or used.
 
 ## Scope
 
 This work validates the merged base `SeparationRuntimeClient` against the separately installed Linux and Windows CPU profiles without downloading or preparing the audited model.
 
-The validation chain is:
+The validated chain is:
 
 ```text
 install exact CPU profile
@@ -38,35 +38,84 @@ The validator imports only Python's standard library and `app.separation_runtime
 - worker version is `1.0.0`;
 - Demucs version is `4.1.0`;
 - the client accepts the installed-versus-locked version set;
-- `model_probe()` raises structured broad code `MODEL_DOWNLOAD_REQUIRED` with exit code `20`;
+- `model_probe()` raises structured broad and worker code `MODEL_DOWNLOAD_REQUIRED` with exit code `20`;
 - the cache root remains empty and contains no readiness manifest or checkpoint file.
 
 The script never calls `prepare_model`, `verify_model`, `separate`, or the client callable. Its only stdout is one compact JSON object containing safe version/profile state and no local paths.
 
-## Expected success JSON
+## Hosted evidence
+
+Dedicated workflow `Demucs runtime client profile smoke` run 2, ID `30888687504`, validated both jobs from checkpoint `ba17463b8e9718e23ff2af29cd8273013375af06`.
+
+### Linux
+
+- Job ID: `91925512985`
+- Runner: Ubuntu 24.04.4 LTS
+- Python: CPython 3.13.14
+- Profile: `linux-x86_64-cpu-cpython313`
+- Installer: `scripts/install_demucs_linux_cpu.sh`
+- Installer runtime probe: compatible; lock source `profile`; installed versions equal locked versions
+- Worker: `1.0.0`
+- Demucs: `4.1.0`
+- PyTorch: `2.13.0+cpu`
+- Hugging Face Hub: `1.26.0`
+- safetensors: `0.8.0`
+- PyYAML: `6.0.3`
+
+Base-client result:
 
 ```json
-{
-  "demucsVersion": "4.1.0",
-  "modelAssetsCreated": false,
-  "modelState": "download_required",
-  "runtimeProfile": "linux-x86_64-cpu-cpython313",
-  "schemaVersion": 1,
-  "torchVersion": "2.13.0+cpu",
-  "workerVersion": "1.0.0"
-}
+{"demucsVersion":"4.1.0","modelAssetsCreated":false,"modelState":"download_required","runtimeProfile":"linux-x86_64-cpu-cpython313","schemaVersion":1,"torchVersion":"2.13.0+cpu","workerVersion":"1.0.0"}
 ```
 
-The Windows job reports the corresponding `windows-x86_64-cpu-cpython313` profile.
+Independent runtime/cache scanning passed, the private cache remained empty, and the `always()` cleanup completed.
 
-## Privacy and cleanup
+### Windows
 
-All workflow steps will set Hugging Face offline/privacy variables before installation and probing. The dedicated workflow will scan both the temporary runtime and cache independently and remove both in an `always()` cleanup step. It will not upload the runtime or any cache as an artifact.
+- Job ID: `91925512948`
+- Runner: Microsoft Windows Server 2025 Datacenter 10.0.26100
+- Runner image: `windows-2025-vs2026` version `20260728.188.1`
+- Python: CPython 3.13.14
+- Profile: `windows-x86_64-cpu-cpython313`
+- Installer: `scripts/install_demucs_windows_cpu.ps1`
+- Installer runtime probe: compatible; lock source `profile`; installed versions equal locked versions
+- Worker: `1.0.0`
+- Demucs: `4.1.0`
+- PyTorch: `2.13.0+cpu`
+- Hugging Face Hub: `1.26.0`
+- safetensors: `0.8.0`
+- PyYAML: `6.0.3`
 
-## Current evidence
+Base-client result:
 
-- Draft PR opened before runtime installation: yes.
-- Validator implementation pushed: yes.
-- Linux hosted installation: not started.
-- Windows hosted installation: not started.
-- Model preparation or download: not started and not permitted.
+```json
+{"demucsVersion":"4.1.0","modelAssetsCreated":false,"modelState":"download_required","runtimeProfile":"windows-x86_64-cpu-cpython313","schemaVersion":1,"torchVersion":"2.13.0+cpu","workerVersion":"1.0.0"}
+```
+
+Independent runtime/cache scanning passed, the private cache remained empty, and the `always()` cleanup completed.
+
+## Repository validation
+
+Repository CI run 129, ID `30888687516`, passed on the same implementation checkpoint:
+
+- `pytest`: `388 passed, 1 warning in 26.60s`
+- `python -m compileall -q app tests`: passed
+- `node --check app/static/app.js`: passed
+
+The warning is the existing Starlette/FastAPI test-client deprecation concerning a future `httpx2` migration.
+
+The 15 permanent cases in `tests/test_separation_runtime_profile_smoke.py` are included in the full passing test count. The validator module is imported by those tests and compiled successfully.
+
+## Privacy and cleanup conclusions
+
+- Hugging Face offline and privacy variables were set before all installation and probe commands.
+- `prepare-model`, `verify-model`, and `separate` were not invoked.
+- No `955717e8.safetensors`, other `.safetensors`, `.th`, `.ckpt`, or `htdemucs-bf35a81b-v1.json` was created.
+- No model cache content was created.
+- The temporary runtime, cache, and safe summary were removed on both platforms.
+- No runtime or cache artifact was uploaded.
+- No base PopEx dependency, profile lock, hash, worker source, client source, or installer protection was changed.
+
+## Integration conclusion
+
+The merged base client can launch both validated external CPU runtimes, accept each exact profile lock, and safely identify the missing audited model as a user-actionable download requirement. The base application remains Demucs/PyTorch-free, and model preparation remains a separate explicit-consent operation.
