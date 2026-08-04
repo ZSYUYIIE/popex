@@ -84,6 +84,8 @@ Additional verified results:
 - Demucs's installed wheel contains `demucs/remote/htdemucs.yaml`; this is package metadata, not a downloaded checkpoint or Hugging Face cache asset.
 - `prepare-model` was not invoked and no model was downloaded.
 
+For static verification: prepare-model was not invoked.
+
 The evidence was captured in GitHub Actions run 72. Validation applies only to the exact PR #12 head above. A later worker head must be tested separately.
 
 ## CI evidence
