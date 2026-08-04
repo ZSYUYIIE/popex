@@ -38,10 +38,8 @@ from app.separation_runtime import (
     CHECKPOINT_SIZE_BYTES,
     MODEL_REPOSITORY,
     MODEL_REVISION,
-    RuntimeMissingError,
     SeparationRuntimeClient,
     WorkerCommandError,
-    WorkerErrorDetail,
 )
 
 JOB_ID = "a" * 32
@@ -541,3 +539,397 @@ def test_ready_pipeline_composes_through_artifact_resolution(tmp_path: Path) -> 
     _assert_no_private_paths(capability.runtime_payload(), runtime, workspace)
     _assert_no_private_paths(result.payload, runtime, workspace)
     _assert_no_private_paths(details.payload(), runtime, workspace)
+
+
+def test_first_use_download_state_requires_explicit_consent_before_success(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    runtime = _runtime(
+        tmp_path,
+        _ok("runtime-probe", _runtime_result()),
+        _failure(
+            20,
+            "model-probe",
+            "MODEL_NOT_READY",
+            message="The verified htdemucs model is not available in this runtime.",
+        ),
+        _ok("prepare-model", _model_result()),
+        _ok("runtime-probe", _runtime_result()),
+        _ok("model-probe", _model_result()),
+        _successful_separation(),
+    )
+
+    capability = probe_separation_capability(
+        runtime.client,
+        enabled=True,
+        device="cpu",
+    )
+    assert capability is not None
+    assert capability.state == STATE_DOWNLOAD_REQUIRED
+    assert capability.actionable is True
+    assert capability.network_required is True
+    job = db.get_job(settings.database_path, JOB_ID)
+    assert job is not None
+    assert job["separation_status"] == "not_started"
+    assert [call["command"] for call in runtime.runner.calls] == [
+        "runtime-probe",
+        "model-probe",
+    ]
+
+    prepared = runtime.client.prepare_model(allow_model_download=True)
+    assert prepared.offline_ready is True
+    assert prepared.model_repository == MODEL_REPOSITORY
+    assert prepared.model_revision == MODEL_REVISION
+    assert not any(runtime.cache.rglob("*.safetensors"))
+    assert not any(runtime.cache.rglob("htdemucs.yaml"))
+
+    ready = probe_separation_capability(
+        runtime.client,
+        enabled=True,
+        device="cpu",
+    )
+    assert ready is not None and ready.state == STATE_READY
+    assert _claim(settings) is True
+    result, job, _ = _run_and_persist(settings, runtime)
+    assert job["separation_status"] == "completed"
+    assert result.manifest_file_name == STEM_MANIFEST_RELATIVE_PATH
+    assert [call["command"] for call in runtime.runner.calls] == [
+        "runtime-probe",
+        "model-probe",
+        "prepare-model",
+        "runtime-probe",
+        "model-probe",
+        "separate",
+    ]
+    _assert_runtime_lock_boundary(runtime)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_state"),
+    [
+        (FileNotFoundError("missing worker"), STATE_RUNTIME_MISSING),
+        (
+            _failure(
+                10,
+                "runtime-probe",
+                "RUNTIME_INCOMPATIBLE",
+                message="Runtime lock at /private/runtime.lock is incompatible.",
+                stderr="worker /private/bin failed",
+            ),
+            STATE_UNAVAILABLE,
+        ),
+    ],
+)
+def test_runtime_failures_do_not_claim_or_mutate_job(
+    tmp_path: Path,
+    outcome,
+    expected_state: str,
+) -> None:
+    settings = _settings(tmp_path)
+    job = _prepare_job(settings)
+    workspace = settings.exports_dir / JOB_ID
+    before = _tree_bytes(workspace)
+    runtime = _runtime(tmp_path, outcome)
+
+    capability = probe_separation_capability(
+        runtime.client,
+        enabled=True,
+        device="cpu",
+    )
+
+    assert capability is not None and capability.state == expected_state
+    assert capability.actionable is False
+    assert db.get_job(settings.database_path, JOB_ID) == job
+    assert _tree_bytes(workspace) == before
+    assert len(runtime.runner.calls) == 1
+    _assert_no_private_paths(capability.runtime_payload(), runtime, workspace)
+    _assert_no_private_paths(capability.message, runtime, workspace)
+
+
+def test_readiness_failure_is_unavailable_and_model_probe_stops_pipeline(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    runtime = _runtime(
+        tmp_path,
+        _ok("runtime-probe", _runtime_result()),
+        _failure(
+            21,
+            "model-probe",
+            "CHECKPOINT_HASH_MISMATCH",
+            message="Checksum failed at /private/cache/readiness/manifest.json.",
+        ),
+    )
+
+    capability = probe_separation_capability(
+        runtime.client,
+        enabled=True,
+        device="cpu",
+    )
+
+    assert capability is not None and capability.state == STATE_UNAVAILABLE
+    assert capability.actionable is False
+    assert [call["command"] for call in runtime.runner.calls] == [
+        "runtime-probe",
+        "model-probe",
+    ]
+    assert db.get_job(settings.database_path, JOB_ID)["separation_status"] == "not_started"
+    _assert_no_private_paths(capability.runtime_payload(), runtime, settings.exports_dir / JOB_ID)
+
+
+def test_protocol_violation_after_claim_is_separation_specific_and_preserves_analysis(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    before = _prepare_job(settings)
+    runtime = _runtime(tmp_path, Completed(0, b"not-json"))
+    assert _claim(settings) is True
+
+    with pytest.raises(StemSeparationError, match="trusted stem-separation worker failed") as caught:
+        separate_stems(JOB_ID, settings, _options(runtime))
+    job = _persist_failure(settings, caught.value)
+
+    assert job["separation_status"] == "failed"
+    assert job["separation_error"] == "The trusted stem-separation worker failed."
+    for key in (
+        "preparation_status",
+        "analysis_status",
+        "analysis_version",
+        "tempo_bpm",
+        "tempo_confidence",
+        "key_symbol",
+        "key_confidence",
+        "analysis_json_file_name",
+        "analysis_error",
+        "source_file_name",
+        "normalized_file_name",
+        "metadata_file_name",
+    ):
+        assert job[key] == before[key]
+    assert not (settings.exports_dir / JOB_ID / "stems" / "stem-separation.json").exists()
+    _assert_no_private_paths(str(caught.value), runtime, settings.exports_dir / JOB_ID)
+
+
+def test_failed_retry_preserves_previous_manifest_and_stems(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    successful = _runtime(tmp_path / "first", _successful_separation())
+    assert _claim(settings) is True
+    result, job, _ = _run_and_persist(settings, successful)
+    workspace = settings.exports_dir / JOB_ID
+    manifest = workspace / STEM_MANIFEST_RELATIVE_PATH
+    previous_files = {
+        manifest: manifest.read_bytes(),
+        **{
+            workspace / stem.file_name: (workspace / stem.file_name).read_bytes()
+            for stem in result.stems
+        },
+    }
+    previous_pointer = job["stem_manifest_file_name"]
+    previous_time = job["separated_at"]
+
+    db.update_job(settings.database_path, JOB_ID, separation_status="failed")
+    failed = _runtime(
+        tmp_path / "retry",
+        _failure(40, "separate", "SEPARATION_FAILED", message="new attempt failed"),
+    )
+    assert _claim(settings) is True
+    with pytest.raises(StemSeparationError) as caught:
+        separate_stems(JOB_ID, settings, _options(failed))
+    job = _persist_failure(settings, caught.value)
+
+    assert job["stem_manifest_file_name"] == previous_pointer
+    assert job["separated_at"] == previous_time
+    assert {path: path.read_bytes() for path in previous_files} == previous_files
+    assert load_stem_details(JOB_ID, settings, job).available is True
+
+
+def test_callback_failure_removes_unpublished_run_and_preserves_previous_result(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    first = _runtime(tmp_path / "first", _successful_separation())
+    assert _claim(settings) is True
+    result, _, _ = _run_and_persist(settings, first)
+    workspace = settings.exports_dir / JOB_ID
+    previous = _tree_bytes(workspace / "stems")
+
+    db.update_job(settings.database_path, JOB_ID, separation_status="failed")
+    retry = _runtime(tmp_path / "retry", _successful_separation())
+    assert _claim(settings) is True
+
+    def fail_callback(stage: str, message: str, progress: float) -> None:
+        if stage == "validating_stems":
+            raise RuntimeError("callback failed")
+
+    with pytest.raises(StemSeparationError, match="progress reporting failed") as caught:
+        _run_and_persist(settings, retry, callback=fail_callback)
+    _persist_failure(settings, caught.value)
+
+    assert _tree_bytes(workspace / "stems") == previous
+    assert (workspace / result.manifest_file_name).read_bytes() == previous[
+        "stem-separation.json"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_code"),
+    [
+        (subprocess.TimeoutExpired(["worker"], 1), "TIMEOUT"),
+        (KeyboardInterrupt(), "CANCELLED"),
+    ],
+)
+def test_timeout_and_cancellation_broad_categories_remain_stable(
+    tmp_path: Path,
+    outcome: BaseException,
+    expected_code: str,
+) -> None:
+    runtime = _runtime(tmp_path, outcome)
+    with pytest.raises(WorkerCommandError) as caught:
+        runtime.client.runtime_probe()
+    assert caught.value.code == expected_code
+    assert caught.value.detail.worker_code is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("modelRepository", "other/HTDemucs"),
+        ("modelRevision", "0" * 40),
+        ("checkpointFile", "other.safetensors"),
+        ("checkpointSha256", "0" * 64),
+        ("demucsVersion", "4.0.0"),
+        ("device", "cuda"),
+        ("outputs", ["bass.wav", "vocals.wav", "drums.wav", "other.wav"]),
+    ],
+)
+def test_wrong_worker_provenance_is_rejected_without_publication(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    runtime = _runtime(
+        tmp_path,
+        _successful_separation(_separation_result(**{field: value})),
+    )
+    assert _claim(settings) is True
+
+    with pytest.raises(StemSeparationError):
+        separate_stems(JOB_ID, settings, _options(runtime))
+
+    assert not (settings.exports_dir / JOB_ID / STEM_MANIFEST_RELATIVE_PATH).exists()
+
+
+def test_private_paths_never_escape_capability_manifest_details_or_errors(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    runtime = _runtime(
+        tmp_path,
+        _ok(
+            "runtime-probe",
+            _runtime_result(),
+            warnings=[f"lock={tmp_path}/private/runtime.lock token=secret"],
+        ),
+        _ok(
+            "model-probe",
+            _model_result(),
+            warnings=["readiness/htdemucs-bf35a81b-v1.json"],
+        ),
+        _successful_separation(),
+    )
+    capability = probe_separation_capability(runtime.client, enabled=True, device="cpu")
+    assert capability is not None and capability.state == STATE_READY
+    assert _claim(settings) is True
+    result, job, _ = _run_and_persist(settings, runtime)
+    details = load_stem_details(JOB_ID, settings, job)
+    workspace = settings.exports_dir / JOB_ID
+
+    _assert_no_private_paths(capability.runtime_payload(), runtime, workspace)
+    _assert_no_private_paths(result.payload, runtime, workspace)
+    _assert_no_private_paths(details.payload(), runtime, workspace)
+    _assert_no_private_paths(capability.message, runtime, workspace)
+    _assert_no_private_paths(capability.warnings, runtime, workspace)
+
+
+def test_two_synchronized_claims_have_one_winner_and_one_runtime_call(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    runtime = _runtime(
+        tmp_path / "runtime",
+        _ok("runtime-probe", _runtime_result()),
+    )
+    barrier = threading.Barrier(2)
+    results: list[bool] = []
+    errors: list[BaseException] = []
+    guard = threading.Lock()
+
+    def attempt() -> None:
+        try:
+            barrier.wait(timeout=5)
+            won = _claim(settings)
+            if won:
+                runtime.client.runtime_probe()
+            with guard:
+                results.append(won)
+        except BaseException as exc:
+            with guard:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert sorted(results) == [False, True]
+    assert [call["command"] for call in runtime.runner.calls] == ["runtime-probe"]
+    assert db.get_job(settings.database_path, JOB_ID)["separation_status"] == "processing"
+
+
+def test_retry_completed_and_restart_recovery_contracts(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _prepare_job(settings)
+    prior_time = "2026-08-04T00:00:01+00:00"
+    db.update_job(
+        settings.database_path,
+        JOB_ID,
+        separation_status="failed",
+        stem_manifest_file_name=STEM_MANIFEST_RELATIVE_PATH,
+        separated_at=prior_time,
+    )
+    assert _claim(settings) is True
+    claimed = db.get_job(settings.database_path, JOB_ID)
+    assert claimed is not None
+    assert claimed["stem_manifest_file_name"] == STEM_MANIFEST_RELATIVE_PATH
+    assert claimed["separated_at"] == prior_time
+
+    db.update_job(settings.database_path, JOB_ID, separation_status="completed")
+    assert _claim(settings) is False
+
+    db.update_job(
+        settings.database_path,
+        JOB_ID,
+        separation_status="processing",
+        separation_stage="separating_stems",
+        separation_progress=42,
+    )
+    db.fail_incomplete_jobs(settings.database_path)
+    recovered = db.get_job(settings.database_path, JOB_ID)
+    assert recovered is not None
+    assert recovered["separation_status"] == "failed"
+    assert recovered["separation_stage"] == "failed"
+    assert recovered["separation_progress"] == 42
+    assert recovered["stem_manifest_file_name"] == STEM_MANIFEST_RELATIVE_PATH
+    assert recovered["separated_at"] == prior_time
+    assert _claim(settings) is True
