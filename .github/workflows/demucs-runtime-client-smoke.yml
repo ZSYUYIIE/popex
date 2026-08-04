@@ -1,0 +1,228 @@
+name: Demucs runtime client profile smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/demucs-runtime-client-smoke.yml"
+      - "scripts/validate_separation_runtime_profile.py"
+      - "tests/test_separation_runtime_profile_smoke.py"
+      - "docs/runtime/demucs-runtime-client-smoke.md"
+      - "app/separation_runtime.py"
+      - "runtimes/demucs_worker/**"
+      - "runtimes/profiles/linux-cpu/**"
+      - "runtimes/profiles/windows-cpu/**"
+      - "scripts/install_demucs_linux_cpu.sh"
+      - "scripts/install_demucs_windows_cpu.ps1"
+
+permissions:
+  contents: read
+
+jobs:
+  linux-runtime-client-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      HF_HUB_DISABLE_UPDATE_CHECK: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Define temporary Linux paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="$RUNNER_TEMP/popex-demucs-linux-client-runtime"
+          cache="$RUNNER_TEMP/popex-demucs-linux-client-cache"
+          rm -rf -- "$runtime" "$cache"
+          mkdir -p -- "$cache"
+          {
+            echo "POPEX_SMOKE_RUNTIME=$runtime"
+            echo "POPEX_SMOKE_CACHE=$cache"
+            echo "POPEX_SMOKE_SUMMARY=$RUNNER_TEMP/linux-runtime-client-summary.json"
+          } >> "$GITHUB_ENV"
+
+      - name: Install exact Linux CPU profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          export POPEX_DEMUCS_LINUX_CPU_DIR="$POPEX_SMOKE_RUNTIME"
+          export POPEX_DEMUCS_PYTHON="$(command -v python)"
+          export POPEX_DEMUCS_WORKER_DIR="$GITHUB_WORKSPACE/runtimes/demucs_worker"
+          bash scripts/install_demucs_linux_cpu.sh
+
+      - name: Validate base client against Linux runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/validate_separation_runtime_profile.py \
+            --worker "$POPEX_SMOKE_RUNTIME/venv/bin/popex-demucs-worker" \
+            --runtime-lock "$POPEX_SMOKE_RUNTIME/runtime-lock.json" \
+            --cache-root "$POPEX_SMOKE_CACHE" \
+            --expected-profile linux-x86_64-cpu-cpython313 \
+            | tee "$POPEX_SMOKE_SUMMARY"
+          python - "$POPEX_SMOKE_SUMMARY" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected = {
+              "schemaVersion": 1,
+              "runtimeProfile": "linux-x86_64-cpu-cpython313",
+              "workerVersion": "1.0.0",
+              "demucsVersion": "4.1.0",
+              "torchVersion": "2.13.0+cpu",
+              "modelState": "download_required",
+              "modelAssetsCreated": False,
+          }
+          if result != expected:
+              raise SystemExit("Linux safe summary does not match the smoke contract")
+          PY
+
+      - name: Independently scan Linux runtime and cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden="$(find "$POPEX_SMOKE_RUNTIME" "$POPEX_SMOKE_CACHE" -type f \( \
+            -name '955717e8.safetensors' -o \
+            -name '*.safetensors' -o \
+            -name '*.th' -o \
+            -name '*.ckpt' -o \
+            -name 'htdemucs-bf35a81b-v1.json' \
+          \) -print)"
+          if [[ -n "$forbidden" ]]; then
+            echo "A prohibited model or readiness asset was created." >&2
+            exit 1
+          fi
+          if find "$POPEX_SMOKE_CACHE" -mindepth 1 -print -quit | grep -q .; then
+            echo "Model cache is not empty." >&2
+            exit 1
+          fi
+
+      - name: Clean temporary Linux runtime and cache
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- \
+            "${POPEX_SMOKE_RUNTIME:-}" \
+            "${POPEX_SMOKE_CACHE:-}" \
+            "${POPEX_SMOKE_SUMMARY:-}"
+
+  windows-runtime-client-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      HF_HUB_DISABLE_UPDATE_CHECK: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Define temporary Windows paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Runtime = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-client-runtime"
+          $Cache = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-client-cache"
+          Remove-Item -LiteralPath $Runtime, $Cache -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $Cache | Out-Null
+          "POPEX_SMOKE_RUNTIME=$Runtime" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POPEX_SMOKE_CACHE=$Cache" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POPEX_SMOKE_SUMMARY=$(Join-Path $env:RUNNER_TEMP 'windows-runtime-client-summary.json')" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install exact Windows CPU profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Python = (Get-Command python).Source
+          $WorkerSource = Join-Path $env:GITHUB_WORKSPACE "runtimes\demucs_worker"
+          & pwsh -NoProfile -File scripts/install_demucs_windows_cpu.ps1 \
+            -Destination $env:POPEX_SMOKE_RUNTIME \
+            -PythonExecutable $Python \
+            -WorkerSource $WorkerSource
+          if ($LASTEXITCODE -ne 0) {
+            throw "The exact Windows CPU profile installation failed."
+          }
+
+      - name: Validate base client against Windows runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Worker = Join-Path $env:POPEX_SMOKE_RUNTIME "venv\Scripts\popex-demucs-worker.exe"
+          $Lock = Join-Path $env:POPEX_SMOKE_RUNTIME "runtime-lock.json"
+          & python scripts/validate_separation_runtime_profile.py \
+            --worker $Worker \
+            --runtime-lock $Lock \
+            --cache-root $env:POPEX_SMOKE_CACHE \
+            --expected-profile windows-x86_64-cpu-cpython313 \
+            | Tee-Object -FilePath $env:POPEX_SMOKE_SUMMARY
+          if ($LASTEXITCODE -ne 0) {
+            throw "The Windows base-client runtime validation failed."
+          }
+          $Result = Get-Content -Raw -LiteralPath $env:POPEX_SMOKE_SUMMARY | ConvertFrom-Json
+          if (
+            $Result.schemaVersion -ne 1 -or
+            $Result.runtimeProfile -ne "windows-x86_64-cpu-cpython313" -or
+            $Result.workerVersion -ne "1.0.0" -or
+            $Result.demucsVersion -ne "4.1.0" -or
+            $Result.torchVersion -ne "2.13.0+cpu" -or
+            $Result.modelState -ne "download_required" -or
+            $Result.modelAssetsCreated -ne $false
+          ) {
+            throw "Windows safe summary does not match the smoke contract."
+          }
+
+      - name: Independently scan Windows runtime and cache
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Forbidden = Get-ChildItem -LiteralPath $env:POPEX_SMOKE_RUNTIME, $env:POPEX_SMOKE_CACHE -Recurse -Force -File |
+            Where-Object {
+              $_.Name -eq "955717e8.safetensors" -or
+              $_.Name -like "*.safetensors" -or
+              $_.Name -like "*.th" -or
+              $_.Name -like "*.ckpt" -or
+              $_.Name -eq "htdemucs-bf35a81b-v1.json"
+            }
+          if ($Forbidden) {
+            throw "A prohibited model or readiness asset was created."
+          }
+          if (Get-ChildItem -LiteralPath $env:POPEX_SMOKE_CACHE -Force) {
+            throw "Model cache is not empty."
+          }
+
+      - name: Clean temporary Windows runtime and cache
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($Path in @(
+            $env:POPEX_SMOKE_RUNTIME,
+            $env:POPEX_SMOKE_CACHE,
+            $env:POPEX_SMOKE_SUMMARY
+          )) {
+            if (-not [string]::IsNullOrWhiteSpace($Path)) {
+              Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
