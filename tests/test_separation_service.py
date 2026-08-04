@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Lock
 
 import numpy as np
 import pytest
@@ -33,6 +35,7 @@ from app.separation_service import (
 )
 
 JOB_ID = "a" * 32
+SECOND_JOB_ID = "b" * 32
 SAMPLE_RATE = 8_000
 
 
@@ -94,16 +97,39 @@ def create_ready_job(settings: Settings, job_id: str = JOB_ID) -> dict:
 
 
 class FakeRuntimeClient:
-    def __init__(self, *, ready: bool = True, fail_separation: bool = False):
+    def __init__(
+        self,
+        *,
+        ready: bool = True,
+        fail_separation: bool = False,
+        operation_delay: float = 0,
+    ):
         self.ready = ready
         self.fail_separation = fail_separation
+        self.operation_delay = operation_delay
         self.runtime_probe_calls = 0
         self.model_probe_calls = 0
         self.prepare_calls = 0
         self.separate_calls = 0
+        self.active_operations = 0
+        self.max_active_operations = 0
+        self._counter_lock = Lock()
+
+    def _enter_operation(self) -> None:
+        with self._counter_lock:
+            self.active_operations += 1
+            self.max_active_operations = max(
+                self.max_active_operations,
+                self.active_operations,
+            )
+
+    def _leave_operation(self) -> None:
+        with self._counter_lock:
+            self.active_operations -= 1
 
     def runtime_probe(self) -> RuntimeProbeResult:
-        self.runtime_probe_calls += 1
+        with self._counter_lock:
+            self.runtime_probe_calls += 1
         return RuntimeProbeResult(
             runtime_profile="linux-cpu-v1",
             worker_version="1.0.0",
@@ -117,8 +143,10 @@ class FakeRuntimeClient:
         )
 
     def model_probe(self) -> ModelProbeResult:
-        self.model_probe_calls += 1
-        if not self.ready:
+        with self._counter_lock:
+            self.model_probe_calls += 1
+            ready = self.ready
+        if not ready:
             raise WorkerCommandError(
                 WorkerErrorDetail(
                     code="MODEL_DOWNLOAD_REQUIRED",
@@ -132,9 +160,17 @@ class FakeRuntimeClient:
 
     def prepare_model(self, *, allow_model_download: bool) -> ModelPreparationResult:
         assert allow_model_download is True
-        self.prepare_calls += 1
-        self.ready = True
-        return self._model_result(ModelPreparationResult)
+        self._enter_operation()
+        try:
+            with self._counter_lock:
+                self.prepare_calls += 1
+            if self.operation_delay:
+                time.sleep(self.operation_delay)
+            with self._counter_lock:
+                self.ready = True
+            return self._model_result(ModelPreparationResult)
+        finally:
+            self._leave_operation()
 
     def __call__(
         self,
@@ -146,35 +182,46 @@ class FakeRuntimeClient:
         device: str,
         timeout_seconds: float,
     ):
-        self.separate_calls += 1
-        assert input_relative == "analysis.wav"
-        assert cache_root.name == "runtime-cache"
-        assert device == "cpu"
-        assert timeout_seconds == 30
-        if self.fail_separation:
-            raise RuntimeError(f"worker failed at {cache_root}")
-        output = workspace_root / output_relative
-        output.mkdir(parents=True, exist_ok=True)
-        for index, kind in enumerate(("vocals", "bass", "drums", "other"), 1):
-            sf.write(
-                output / f"{kind}.wav",
-                np.full((SAMPLE_RATE // 20, 2), index / 10, dtype=np.float32),
-                SAMPLE_RATE,
-                subtype="PCM_16",
-            )
-        return {
-            "runtimeProfile": "linux-cpu-v1",
-            "workerVersion": "1.0.0",
-            "demucsVersion": AUDITED_DEMUCS_VERSION,
-            "torchVersion": "2.13.0+cpu",
-            "huggingfaceHubVersion": "1.16.1",
-            "modelRepository": AUDITED_MODEL_REPOSITORY,
-            "modelRevision": AUDITED_MODEL_REVISION,
-            "checkpointFile": AUDITED_CHECKPOINT_FILE,
-            "checkpointSha256": AUDITED_CHECKPOINT_SHA256,
-            "device": "cpu",
-            "outputs": ["vocals.wav", "bass.wav", "drums.wav", "other.wav"],
-        }
+        self._enter_operation()
+        try:
+            with self._counter_lock:
+                self.separate_calls += 1
+            assert input_relative == "analysis.wav"
+            assert cache_root.is_dir()
+            assert device == "cpu"
+            assert timeout_seconds == 30
+            if self.operation_delay:
+                time.sleep(self.operation_delay)
+            if self.fail_separation:
+                raise RuntimeError(f"worker failed at {cache_root}")
+            output = workspace_root / output_relative
+            output.mkdir(parents=True, exist_ok=True)
+            for index, kind in enumerate(("vocals", "bass", "drums", "other"), 1):
+                sf.write(
+                    output / f"{kind}.wav",
+                    np.full(
+                        (SAMPLE_RATE // 20, 2),
+                        index / 10,
+                        dtype=np.float32,
+                    ),
+                    SAMPLE_RATE,
+                    subtype="PCM_16",
+                )
+            return {
+                "runtimeProfile": "linux-cpu-v1",
+                "workerVersion": "1.0.0",
+                "demucsVersion": AUDITED_DEMUCS_VERSION,
+                "torchVersion": "2.13.0+cpu",
+                "huggingfaceHubVersion": "1.16.1",
+                "modelRepository": AUDITED_MODEL_REPOSITORY,
+                "modelRevision": AUDITED_MODEL_REVISION,
+                "checkpointFile": AUDITED_CHECKPOINT_FILE,
+                "checkpointSha256": AUDITED_CHECKPOINT_SHA256,
+                "device": "cpu",
+                "outputs": ["vocals.wav", "bass.wav", "drums.wav", "other.wav"],
+            }
+        finally:
+            self._leave_operation()
 
     @staticmethod
     def _model_result(result_type):
@@ -192,6 +239,11 @@ class FakeRuntimeClient:
             verified_at="2026-08-04T00:00:00+00:00",
             offline_ready=True,
         )
+
+
+def run_scheduled(scheduled: list[tuple]) -> None:
+    function, *arguments = scheduled[0]
+    function(*arguments)
 
 
 def test_disabled_service_omits_summary_and_performs_zero_runtime_calls(tmp_path: Path):
@@ -274,8 +326,7 @@ def test_consented_first_use_claims_prepares_and_separates_once(tmp_path: Path):
     assert claimed["separation_status"] == "processing"
     assert len(scheduled) == 1
 
-    function, *arguments = scheduled[0]
-    function(*arguments)
+    run_scheduled(scheduled)
 
     record = db.get_job(settings.database_path, JOB_ID)
     assert runtime.prepare_calls == 1
@@ -298,7 +349,7 @@ def test_ready_request_does_not_prepare_even_with_redundant_true(tmp_path: Path)
         allow_model_download=True,
         schedule=lambda *args: scheduled.append(args),
     )
-    scheduled[0][0](*scheduled[0][1:])
+    run_scheduled(scheduled)
 
     assert runtime.prepare_calls == 0
     assert runtime.separate_calls == 1
@@ -351,7 +402,7 @@ def test_callback_progress_never_persists_100_before_success(tmp_path: Path):
         allow_model_download=False,
         schedule=lambda *args: scheduled.append(args),
     )
-    scheduled[0][0](*scheduled[0][1:])
+    run_scheduled(scheduled)
 
     record = db.get_job(settings.database_path, JOB_ID)
     assert record["separation_status"] == "failed"
@@ -369,7 +420,7 @@ def test_failed_retry_preserves_previous_manifest_stems_and_analysis(tmp_path: P
         allow_model_download=False,
         schedule=lambda *args: scheduled.append(args),
     )
-    scheduled[0][0](*scheduled[0][1:])
+    run_scheduled(scheduled)
     success = db.get_job(settings.database_path, JOB_ID)
     job_dir = settings.exports_dir / JOB_ID
     manifest = job_dir / STEM_MANIFEST_RELATIVE_PATH
@@ -393,7 +444,7 @@ def test_failed_retry_preserves_previous_manifest_stems_and_analysis(tmp_path: P
         allow_model_download=False,
         schedule=lambda *args: scheduled.append(args),
     )
-    scheduled[0][0](*scheduled[0][1:])
+    run_scheduled(scheduled)
 
     failed = db.get_job(settings.database_path, JOB_ID)
     assert failed["separation_status"] == "failed"
@@ -404,3 +455,280 @@ def test_failed_retry_preserves_previous_manifest_stems_and_analysis(tmp_path: P
     assert failed["analysis_json_file_name"] == original["analysis_json_file_name"]
     assert manifest.read_bytes() == manifest_bytes
     assert {path: path.read_bytes() for path in stem_paths} == stem_bytes
+
+
+def test_disabled_service_does_not_create_default_cache(tmp_path: Path):
+    settings = replace(
+        make_settings(tmp_path, enabled=False),
+        stem_separation_cache_dir=None,
+    )
+    service = SeparationService(settings, runtime_client=FakeRuntimeClient())
+
+    assert service.initialize() is None
+    assert not (tmp_path / "runtime-cache" / "demucs").exists()
+
+
+def test_fresh_default_cache_reaches_download_consent_and_prepares_once(tmp_path: Path):
+    settings = replace(
+        make_settings(tmp_path),
+        stem_separation_cache_dir=None,
+    )
+    runtime = FakeRuntimeClient(ready=False)
+    service = SeparationService(settings, runtime_client=runtime)
+    create_ready_job(settings)
+    cache_root = tmp_path / "runtime-cache" / "demucs"
+
+    capability = service.initialize()
+    assert cache_root.is_dir()
+    assert capability.state == "download_required"
+
+    scheduled = []
+    service.request_start(
+        JOB_ID,
+        allow_model_download=True,
+        schedule=lambda *args: scheduled.append(args),
+    )
+    run_scheduled(scheduled)
+
+    assert runtime.prepare_calls == 1
+    assert runtime.separate_calls == 1
+    assert db.get_job(settings.database_path, JOB_ID)["separation_status"] == "completed"
+
+
+def test_unsafe_cache_path_becomes_unavailable_without_startup_failure(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    unsafe_cache = tmp_path / "runtime-cache"
+    unsafe_cache.write_text("not a directory", encoding="utf-8")
+    service = SeparationService(settings, runtime_client=FakeRuntimeClient())
+
+    capability = service.initialize()
+
+    assert capability.state == "unavailable"
+
+
+def test_worker_slot_serializes_two_different_ready_jobs(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient(operation_delay=0.05)
+    service = SeparationService(settings, runtime_client=runtime)
+    create_ready_job(settings, JOB_ID)
+    create_ready_job(settings, SECOND_JOB_ID)
+    scheduled: list[tuple] = []
+
+    for job_id in (JOB_ID, SECOND_JOB_ID):
+        service.request_start(
+            job_id,
+            allow_model_download=False,
+            schedule=lambda *args: scheduled.append(args),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda call: call[0](*call[1:]), scheduled))
+
+    assert runtime.separate_calls == 2
+    assert runtime.max_active_operations == 1
+    assert db.get_job(settings.database_path, JOB_ID)["separation_status"] == "completed"
+    assert db.get_job(settings.database_path, SECOND_JOB_ID)["separation_status"] == "completed"
+
+
+def test_two_first_use_jobs_prepare_model_only_once(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient(ready=False, operation_delay=0.05)
+    service = SeparationService(settings, runtime_client=runtime)
+    create_ready_job(settings, JOB_ID)
+    create_ready_job(settings, SECOND_JOB_ID)
+    scheduled: list[tuple] = []
+
+    for job_id in (JOB_ID, SECOND_JOB_ID):
+        service.request_start(
+            job_id,
+            allow_model_download=True,
+            schedule=lambda *args: scheduled.append(args),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(lambda call: call[0](*call[1:]), scheduled))
+
+    assert runtime.prepare_calls == 1
+    assert runtime.separate_calls == 2
+    assert runtime.max_active_operations == 1
+
+
+def test_invalid_enabled_settings_are_safe_unavailable(tmp_path: Path):
+    settings = replace(
+        make_settings(tmp_path),
+        stem_separation_device="invalid-device",
+    )
+    runtime = FakeRuntimeClient()
+    service = SeparationService(settings, runtime_client=runtime)
+
+    capability = service.initialize()
+
+    assert capability.state == "unavailable"
+    assert runtime.runtime_probe_calls == 0
+    assert runtime.model_probe_calls == 0
+
+
+def test_unknown_persisted_status_is_non_actionable_and_not_claimed(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient()
+    service = SeparationService(settings, runtime_client=runtime)
+    create_ready_job(settings)
+    db.update_job(
+        settings.database_path,
+        JOB_ID,
+        separation_status="paused_future_state",
+        separation_stage="paused",
+        separation_message="Future state",
+    )
+    record = db.get_job(settings.database_path, JOB_ID)
+
+    summary = service.serialize_job(record)
+    assert summary["status"] == "failed"
+    assert summary["stage"] == "failed"
+    assert summary["canStart"] is False
+    assert summary["startUrl"] is None
+    assert "state is unavailable" in summary["message"]
+
+    scheduled = []
+    with pytest.raises(SeparationStartConflict, match="state is unavailable"):
+        service.request_start(
+            JOB_ID,
+            allow_model_download=False,
+            schedule=lambda *args: scheduled.append(args),
+        )
+    assert scheduled == []
+    assert db.get_job(settings.database_path, JOB_ID)["separation_status"] == "paused_future_state"
+
+
+def test_one_shot_callback_persistence_failure_becomes_retryable(
+    tmp_path: Path,
+    monkeypatch,
+):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient()
+    service = SeparationService(settings, runtime_client=runtime)
+    original = create_ready_job(settings)
+    scheduled = []
+    service.request_start(
+        JOB_ID,
+        allow_model_download=False,
+        schedule=lambda *args: scheduled.append(args),
+    )
+    real_update = db.update_job
+    failed_once = False
+
+    def flaky_update(database_path, job_id, **fields):
+        nonlocal failed_once
+        if not failed_once and fields.get("separation_stage") == "separating_stems":
+            failed_once = True
+            raise OSError("one-shot callback persistence failure")
+        return real_update(database_path, job_id, **fields)
+
+    monkeypatch.setattr(db, "update_job", flaky_update)
+    run_scheduled(scheduled)
+
+    record = db.get_job(settings.database_path, JOB_ID)
+    assert failed_once
+    assert record["separation_status"] == "failed"
+    assert record["preparation_status"] == original["preparation_status"]
+    assert record["analysis_status"] == original["analysis_status"]
+
+
+def test_one_shot_failure_recording_is_retried(
+    tmp_path: Path,
+    monkeypatch,
+):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient(fail_separation=True)
+    service = SeparationService(settings, runtime_client=runtime)
+    original = create_ready_job(settings)
+    scheduled = []
+    service.request_start(
+        JOB_ID,
+        allow_model_download=False,
+        schedule=lambda *args: scheduled.append(args),
+    )
+    real_update = db.update_job
+    failed_once = False
+
+    def flaky_update(database_path, job_id, **fields):
+        nonlocal failed_once
+        if not failed_once and fields.get("separation_status") == "failed":
+            failed_once = True
+            raise OSError("one-shot failure persistence error")
+        return real_update(database_path, job_id, **fields)
+
+    monkeypatch.setattr(db, "update_job", flaky_update)
+    run_scheduled(scheduled)
+
+    record = db.get_job(settings.database_path, JOB_ID)
+    assert failed_once
+    assert record["separation_status"] == "failed"
+    assert record["preparation_status"] == original["preparation_status"]
+    assert record["analysis_status"] == original["analysis_status"]
+
+
+def test_completion_persistence_failure_restores_prior_manifest_and_retry_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    settings = make_settings(tmp_path)
+    first_runtime = FakeRuntimeClient()
+    first_service = SeparationService(settings, runtime_client=first_runtime)
+    original = create_ready_job(settings)
+    first_scheduled = []
+    first_service.request_start(
+        JOB_ID,
+        allow_model_download=False,
+        schedule=lambda *args: first_scheduled.append(args),
+    )
+    run_scheduled(first_scheduled)
+    prior = db.get_job(settings.database_path, JOB_ID)
+    job_dir = settings.exports_dir / JOB_ID
+    manifest = job_dir / STEM_MANIFEST_RELATIVE_PATH
+    prior_manifest = manifest.read_bytes()
+    prior_stems = {
+        path: path.read_bytes()
+        for path in sorted((job_dir / "stems" / "runs").glob("*/*.wav"))
+    }
+
+    db.update_job(
+        settings.database_path,
+        JOB_ID,
+        separation_status="failed",
+        separation_stage="failed",
+        separation_progress=40,
+        separation_error="Retry requested.",
+    )
+    retry_service = SeparationService(
+        settings,
+        runtime_client=FakeRuntimeClient(),
+    )
+    scheduled = []
+    retry_service.request_start(
+        JOB_ID,
+        allow_model_download=False,
+        schedule=lambda *args: scheduled.append(args),
+    )
+    real_update = db.update_job
+    failed_once = False
+
+    def flaky_update(database_path, job_id, **fields):
+        nonlocal failed_once
+        if not failed_once and fields.get("separation_status") == "completed":
+            failed_once = True
+            raise OSError("one-shot completion persistence error")
+        return real_update(database_path, job_id, **fields)
+
+    monkeypatch.setattr(db, "update_job", flaky_update)
+    run_scheduled(scheduled)
+
+    record = db.get_job(settings.database_path, JOB_ID)
+    assert failed_once
+    assert record["separation_status"] == "failed"
+    assert record["stem_manifest_file_name"] == STEM_MANIFEST_RELATIVE_PATH
+    assert record["separated_at"] == prior["separated_at"]
+    assert record["preparation_status"] == original["preparation_status"]
+    assert record["analysis_status"] == original["analysis_status"]
+    assert manifest.read_bytes() == prior_manifest
+    assert {path: path.read_bytes() for path in prior_stems} == prior_stems
