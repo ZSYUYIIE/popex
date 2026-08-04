@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -146,6 +148,7 @@ class FakeRuntimeClient:
         timeout_seconds: float,
     ):
         self.separate_calls += 1
+        assert cache_root.is_dir()
         if self.fail_separation:
             raise RuntimeError(f"worker failure in {cache_root}")
         output = workspace_root / output_relative
@@ -504,3 +507,129 @@ def test_restart_marks_processing_retryable_and_preserves_manifest_pointer(tmp_p
     assert payload["separation"]["status"] == "failed"
     assert payload["separation"]["detailsUrl"] == f"/api/jobs/{job_id}/stems"
     assert details.status_code == 200
+
+
+def test_disabled_invalid_runtime_environment_is_ignored(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("POPEX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("STEM_SEPARATION_ENABLED", "false")
+    monkeypatch.setenv("STEM_SEPARATION_DEVICE", "not-a-device")
+    monkeypatch.setenv("STEM_SEPARATION_TIMEOUT_SECONDS", "not-an-int")
+    monkeypatch.setenv("STEM_SEPARATION_WORKER_EXECUTABLE", "bad\x00path")
+    monkeypatch.setenv("STEM_SEPARATION_RUNTIME_LOCK", "bad\x00lock")
+    monkeypatch.setenv("STEM_SEPARATION_CACHE_DIR", "bad\x00cache")
+
+    settings = Settings.from_env()
+    app = create_app(settings=settings)
+
+    with TestClient(app) as client:
+        health = client.get("/api/health")
+
+    assert health.status_code == 200
+    assert settings.stem_separation_enabled is False
+    assert settings.stem_separation_worker_executable is None
+    assert settings.stem_separation_cache_dir is None
+    assert not (tmp_path / "runtime-cache").exists()
+
+
+def test_enabled_invalid_runtime_environment_is_safe_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setenv("POPEX_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("STEM_SEPARATION_ENABLED", "true")
+    monkeypatch.setenv("STEM_SEPARATION_DEVICE", "not-a-device")
+    monkeypatch.setenv("STEM_SEPARATION_TIMEOUT_SECONDS", "-1")
+
+    settings = Settings.from_env()
+    app = create_app(settings=settings)
+    job_id = "1a" * 16
+
+    with TestClient(app) as client:
+        create_ready_job(settings, job_id)
+        payload = client.get(f"/api/jobs/{job_id}").json()
+        health = client.get("/api/health").json()
+
+    assert payload["separation"]["runtime"]["state"] == "unavailable"
+    assert payload["separation"]["canStart"] is False
+    assert health["status"] in {"ok", "degraded"}
+
+
+def test_unknown_future_status_fails_closed_in_summary_and_post(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient()
+    app = create_app(settings=settings, separation_runtime_client=runtime)
+    job_id = "2a" * 16
+
+    with TestClient(app) as client:
+        create_ready_job(settings, job_id)
+        db.update_job(
+            settings.database_path,
+            job_id,
+            separation_status="paused_future_state",
+            separation_stage="paused",
+            separation_message="Future migration state",
+        )
+        payload = client.get(f"/api/jobs/{job_id}").json()
+        response = client.post(f"/api/jobs/{job_id}/separate", json={})
+
+    assert payload["separation"]["status"] == "failed"
+    assert payload["separation"]["stage"] == "failed"
+    assert payload["separation"]["canStart"] is False
+    assert payload["separation"]["startUrl"] is None
+    assert response.status_code == 409
+    assert "state is unavailable" in response.json()["detail"]
+    assert db.get_job(settings.database_path, job_id)["separation_status"] == "paused_future_state"
+
+
+def test_internal_separation_fields_and_secrets_never_leak_in_job_json(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    runtime = FakeRuntimeClient()
+    app = create_app(settings=settings, separation_runtime_client=runtime)
+    job_id = "3a" * 16
+    posix_path = str(tmp_path / "private" / "cache" / "runtime-lock.json")
+    windows_path = r"C:\Users\Private\PopEx\runtime-lock.json"
+    secret = "super-secret-token"
+
+    with TestClient(app) as client:
+        create_ready_job(settings, job_id)
+        db.update_job(
+            settings.database_path,
+            job_id,
+            separation_status="failed",
+            separation_stage="failed",
+            separation_progress=40,
+            separation_message=(
+                f"Traceback (most recent call last): cache_root={posix_path} "
+                f"runtime_lock={windows_path} token={secret}"
+            ),
+            separation_error=(
+                f"authorization=Bearer-{secret} at {posix_path} and {windows_path}"
+            ),
+        )
+        single = client.get(f"/api/jobs/{job_id}").json()
+        listed = client.get("/api/jobs").json()
+
+    internal_fields = {
+        "separation_status",
+        "separation_stage",
+        "separation_progress",
+        "separation_message",
+        "separation_version",
+        "separation_model",
+        "stem_manifest_file_name",
+        "separated_at",
+        "separation_error",
+    }
+    assert internal_fields.isdisjoint(single)
+    assert internal_fields.isdisjoint(listed[0])
+    for payload in (single, listed):
+        encoded = json.dumps(payload)
+        assert posix_path not in encoded
+        assert windows_path not in encoded
+        assert secret not in encoded
+        assert "Traceback (most recent call last)" not in encoded
+        assert "runtime-lock.json" not in encoded
+        assert "cache_root" not in encoded
