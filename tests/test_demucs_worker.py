@@ -5,6 +5,7 @@ import pytest
 ROOT=Path(__file__).resolve().parents[1]; WR=ROOT/'runtimes'/'demucs_worker'; sys.path.insert(0,str(WR/'src'))
 from popex_demucs_worker import cli,commands,constants,model_artifacts,probes,separation_command
 LOCK={'demucs':'4.1.0','torch':'test-torch','huggingface_hub':'test-hub','safetensors':'test-safe','PyYAML':'test-yaml'}; PROFILE='test-linux-cpu-v1'; OPT={'demucs','demucs.api','demucs.apply','demucs.hf','torch','safetensors','huggingface_hub','yaml'}
+RUN_ID='0123456789abcdef0123456789abcdef'; OTHER_RUN_ID='fedcba9876543210fedcba9876543210'
 
 @pytest.fixture(autouse=True)
 def lock(monkeypatch,tmp_path):
@@ -65,7 +66,7 @@ def demucs(monkeypatch,mdl=None,sep=Sep):
  api.save_audio=lambda audio,path,**kw:Path(path).write_bytes(audio)
  for n,m in {'demucs':root,'demucs.hf':hf,'demucs.apply':ap,'demucs.api':api}.items():monkeypatch.setitem(sys.modules,n,m)
 
-def sep_args(cache,work,inp='analysis.wav',out='stems/runs/r1/worker-output',device='cpu'):
+def sep_args(cache,work,inp='analysis.wav',out=f'stems/runs/{RUN_ID}/worker-output',device='cpu'):
  return ('--protocol-version','1','separate','--cache-root',str(cache),'--workspace-root',str(work),'--input-relative',inp,'--output-relative',out,'--device',device)
 
 def test_package_metadata_and_entry_point():
@@ -81,6 +82,21 @@ def test_model_probe_lazy_and_readiness(capsys,monkeypatch,tmp_path,model):
  manifest(tmp_path,model[0])
  for n in OPT:monkeypatch.delitem(sys.modules,n,raising=False)
  code,e,_=run(capsys,'--protocol-version','1','model-probe','--cache-root',str(tmp_path));assert code==0 and e['result']['offlineReady'];assert not OPT&sys.modules.keys()
+ assert e['result']=={
+  'runtimeProfile':PROFILE,
+  'workerVersion':constants.WORKER_VERSION,
+  'demucsVersion':LOCK['demucs'],
+  'torchVersion':LOCK['torch'],
+  'huggingfaceHubVersion':LOCK['huggingface_hub'],
+  'modelRepository':constants.MODEL_REPOSITORY,
+  'modelRevision':constants.MODEL_REVISION,
+  'checkpointFile':constants.CHECKPOINT_FILE,
+  'checkpointSizeBytes':len(model[0]),
+  'checkpointSha256':model[1],
+  'verifiedAt':'2026-08-03T00:00:00Z',
+  'offlineReady':True,
+  'readinessManifest':constants.READINESS_RELATIVE_PATH,
+ }
 
 @pytest.mark.parametrize('args,exitcode,err',[(('--protocol-version','2','runtime-probe'),30,'UNSUPPORTED_PROTOCOL'),(('--protocol-version','1','model-probe','--cache-root','relative'),30,'INVALID_PATH')])
 def test_invalid_protocol_and_root(capsys,args,exitcode,err):
@@ -112,16 +128,27 @@ def test_manifest_schema_containment_and_symlink_rejection(capsys,tmp_path,model
  p=manifest(tmp_path,model[0]);outside=tmp_path.parent/'outside.bin';outside.write_bytes(model[0]);link=tmp_path/'hub'/'escape';link.symlink_to(outside);p['cacheAssets']['checkpoint']=link.relative_to(tmp_path).as_posix();(tmp_path/'readiness'/'htdemucs-bf35a81b-v1.json').write_text(json.dumps(p))
  code,e,_=run(capsys,'--protocol-version','1','model-probe','--cache-root',str(tmp_path));assert(code,e['error']['code'])==(21,'MODEL_ASSET_INVALID');outside.unlink()
 
-@pytest.mark.parametrize('inp,out,device,err',[('source.wav','stems/runs/r1/worker-output','cpu','INVALID_INPUT'),('analysis.wav','../old','cpu','INVALID_OUTPUT'),('analysis.wav','stems/runs/r1/worker-output','tpu','INVALID_DEVICE')])
+@pytest.mark.parametrize('inp,out,device,err',[('source.wav',f'stems/runs/{RUN_ID}/worker-output','cpu','INVALID_INPUT'),('analysis.wav','../old','cpu','INVALID_OUTPUT'),('analysis.wav',f'stems/runs/{RUN_ID}/worker-output','tpu','INVALID_DEVICE')])
 def test_separate_path_and_device_guards(capsys,monkeypatch,tmp_path,model,inp,out,device,err):
  c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();(w/'analysis.wav').write_bytes(b'a');ready(monkeypatch,c,model[0]);code,e,_=run(capsys,*sep_args(c,w,inp,out,device));assert(code,e['error']['code'])==(30,err)
+
+def test_exact_lowercase_hex_run_id_is_accepted(capsys,monkeypatch,tmp_path,model):
+ c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();(w/'analysis.wav').write_bytes(b'a');ready(monkeypatch,c,model[0]);demucs(monkeypatch)
+ code,e,_=run(capsys,*sep_args(c,w,out=f'stems/runs/{RUN_ID}/worker-output'))
+ assert code==0 and e['result']['outputs']==['vocals.wav','bass.wav','drums.wav','other.wav']
+
+@pytest.mark.parametrize('run_id',['abc','a'*33,'A'*32,'g'*32,''])
+def test_invalid_run_ids_are_rejected(capsys,monkeypatch,tmp_path,model,run_id):
+ c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();(w/'analysis.wav').write_bytes(b'a');ready(monkeypatch,c,model[0])
+ code,e,_=run(capsys,*sep_args(c,w,out=f'stems/runs/{run_id}/worker-output'))
+ assert(code,e['error']['code'])==(30,'INVALID_OUTPUT')
 
 @pytest.mark.parametrize('mdl,err',[(type('Wrong',(),{'audio_channels':2,'samplerate':44100,'sources':list(constants.EXPECTED_SOURCES)})(),'MODEL_FAMILY_MISMATCH'),(type('HTDemucs',(),{'__module__':'demucs.htdemucs','audio_channels':1,'samplerate':44100,'sources':list(constants.EXPECTED_SOURCES)})(),'MODEL_CHANNEL_MISMATCH'),(type('HTDemucs',(),{'__module__':'demucs.htdemucs','audio_channels':2,'samplerate':48000,'sources':list(constants.EXPECTED_SOURCES)})(),'MODEL_SAMPLE_RATE_MISMATCH'),(type('HTDemucs',(),{'__module__':'demucs.htdemucs','audio_channels':2,'samplerate':44100,'sources':['vocals','bass','drums','other']})(),'MODEL_SOURCE_MISMATCH')])
 def test_model_contract_validation(capsys,monkeypatch,tmp_path,model,mdl,err):
  c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();(w/'analysis.wav').write_bytes(b'a');ready(monkeypatch,c,model[0]);demucs(monkeypatch,mdl);code,e,_=run(capsys,*sep_args(c,w));assert(code,e['error']['code'])==(40,err)
 
 def test_four_outputs_provenance_and_no_job_manifest(capsys,monkeypatch,tmp_path,model):
- c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();(w/'analysis.wav').write_bytes(b'a');ready(monkeypatch,c,model[0]);demucs(monkeypatch);code,e,_=run(capsys,*sep_args(c,w));r=e['result'];assert code==0 and r['outputs']==['vocals.wav','bass.wav','drums.wav','other.wav'];assert r['modelRevision']==constants.MODEL_REVISION and r['checkpointSha256']==model[1];o=w/'stems/runs/r1/worker-output';assert sorted(x.name for x in o.iterdir())==sorted(r['outputs']);assert not (w/'stems/stem-separation.json').exists()
+ c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();(w/'analysis.wav').write_bytes(b'a');ready(monkeypatch,c,model[0]);demucs(monkeypatch);code,e,_=run(capsys,*sep_args(c,w));r=e['result'];assert code==0 and r['outputs']==['vocals.wav','bass.wav','drums.wav','other.wav'];assert r['modelRevision']==constants.MODEL_REVISION and r['checkpointSha256']==model[1];o=w/'stems'/'runs'/RUN_ID/'worker-output';assert sorted(x.name for x in o.iterdir())==sorted(r['outputs']);assert not (w/'stems/stem-separation.json').exists()
 
 def test_stdout_and_credential_redaction(capsys,monkeypatch,tmp_path):
  yamlmod(monkeypatch)
@@ -133,11 +160,11 @@ def test_stable_exception_mapping(capsys,monkeypatch,tmp_path,exc,code,err):
  monkeypatch.setattr(commands,'prepare_model',lambda root:(_ for _ in()).throw(exc));got,e,_=run(capsys,'--protocol-version','1','prepare-model','--cache-root',str(tmp_path));assert(got,e['error']['code'])==(code,err)
 
 def test_separation_cancellation_timeout_and_artifact_preservation(capsys,monkeypatch,tmp_path,model):
- c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();a=w/'analysis.wav';m=w/'metadata.json';old=w/'stems/runs/old/worker-output';old.mkdir(parents=True);s=old/'vocals.wav';a.write_bytes(b'a');m.write_text('{}');s.write_bytes(b'old');ready(monkeypatch,c,model[0]);before={p:p.read_bytes() for p in(a,m,s)}
- code,e,_=run(capsys,*sep_args(c,w,out='stems/runs/old/worker-output'));assert(code,e['error']['code'])==(30,'INVALID_OUTPUT');assert {p:p.read_bytes() for p in before}==before
+ c=tmp_path/'c';w=tmp_path/'w';c.mkdir();w.mkdir();a=w/'analysis.wav';m=w/'metadata.json';old=w/'stems'/'runs'/OTHER_RUN_ID/'worker-output';old.mkdir(parents=True);s=old/'vocals.wav';a.write_bytes(b'a');m.write_text('{}');s.write_bytes(b'old');ready(monkeypatch,c,model[0]);before={p:p.read_bytes() for p in(a,m,s)}
+ code,e,_=run(capsys,*sep_args(c,w,out=f'stems/runs/{OTHER_RUN_ID}/worker-output'));assert(code,e['error']['code'])==(30,'INVALID_OUTPUT');assert {p:p.read_bytes() for p in before}==before
  class Stop(Sep):
   def separate_audio_file(self,p):raise KeyboardInterrupt()
- demucs(monkeypatch,sep=Stop);code,e,_=run(capsys,*sep_args(c,w,out='stems/runs/new/worker-output'));assert(code,e['error']['code'])==(41,'CANCELLED')
+ demucs(monkeypatch,sep=Stop);code,e,_=run(capsys,*sep_args(c,w,out=f'stems/runs/{RUN_ID}/worker-output'));assert(code,e['error']['code'])==(41,'CANCELLED')
 
 def test_bundled_unprovisioned_lock_fails_closed(capsys,monkeypatch):
  monkeypatch.delenv(constants.RUNTIME_LOCK_ENV,raising=False)

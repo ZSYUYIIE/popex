@@ -255,12 +255,15 @@ def model_probe(cache_root_text: str) -> dict:
     return {
         "runtimeProfile": payload["runtimeProfile"],
         "workerVersion": payload["workerVersion"],
-        "offlineReady": True,
+        "demucsVersion": payload["demucsVersion"],
+        "torchVersion": payload["torchVersion"],
+        "huggingfaceHubVersion": payload["huggingfaceHubVersion"],
         "modelRepository": payload["modelRepository"],
         "modelRevision": payload["modelRevision"],
         "checkpointFile": payload["checkpointFile"],
         "checkpointSizeBytes": checkpoint_path.stat().st_size,
         "checkpointSha256": payload["checkpointSha256"],
         "verifiedAt": payload["verifiedAt"],
+        "offlineReady": True,
         "readinessManifest": READINESS_RELATIVE_PATH,
     }

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path, PurePosixPath
 
 from .protocol import EXIT_INVALID_REQUEST, EXIT_MODEL_VERIFICATION_FAILED, WorkerError
+
+_RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 
 def trusted_root(raw: str, *, create: bool = False, code: str = "INVALID_PATH") -> Path:
@@ -126,7 +129,7 @@ def validate_output_directory(workspace_root: Path, output_relative: str) -> Pat
     if (
         len(rel.parts) != 4
         or rel.parts[0:2] != ("stems", "runs")
-        or rel.parts[2] in {"", ".", ".."}
+        or not _RUN_ID_PATTERN.fullmatch(rel.parts[2])
         or rel.parts[3] != "worker-output"
     ):
         raise WorkerError(
