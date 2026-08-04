@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import FrozenInstanceError, dataclass
@@ -16,6 +17,7 @@ from app.separation_runtime import (
     MODEL_REPOSITORY,
     MODEL_REVISION,
     ModelDownloadConsentRequiredError,
+    RuntimeConfigurationError,
     RuntimeMissingError,
     RuntimeProbeResult,
     SeparationRuntimeClient,
@@ -766,3 +768,204 @@ def test_separation_result_contract_locked(roots):
     ):
         with pytest.raises(WorkerProtocolError):
             invoke_separate(client(roots, Runner(ok("separate", invalid))), workspace)
+
+
+def make_runtime_lock(tmp_path: Path) -> Path:
+    lock = tmp_path / "runtime-lock.json"
+    lock.write_text('{"schemaVersion": 1}\n', encoding="utf-8")
+    return lock
+
+
+def test_valid_runtime_lock_is_passed_to_all_five_commands(roots, tmp_path):
+    runtime_lock = make_runtime_lock(tmp_path)
+    runner = Runner(
+        ok("runtime-probe", runtime_result()),
+        ok("model-probe", model_result()),
+        ok("prepare-model", model_result()),
+        ok("verify-model", model_result()),
+        ok("separate", separation_result()),
+    )
+    instance = client(roots, runner, runtime_lock_path=runtime_lock)
+    _, _, workspace = roots
+
+    runtime = instance.runtime_probe()
+    model = instance.model_probe()
+    prepared = instance.prepare_model(allow_model_download=True)
+    verified = instance.verify_model()
+    separated = invoke_separate(instance, workspace)
+
+    assert instance.runtime_lock_path == runtime_lock.resolve()
+    assert [call[0][3] for call in runner.calls] == [
+        "runtime-probe",
+        "model-probe",
+        "prepare-model",
+        "verify-model",
+        "separate",
+    ]
+    for _, kwargs in runner.calls:
+        assert kwargs["env"]["POPEX_DEMUCS_RUNTIME_LOCK"] == str(runtime_lock.resolve())
+    for result in (runtime, model, prepared, verified, separated):
+        assert str(runtime_lock) not in repr(result)
+        assert not hasattr(result, "runtime_lock_path")
+    mapping = separated.normalized_mapping()
+    assert str(runtime_lock) not in json.dumps(mapping)
+    assert "runtimeLockPath" not in mapping
+
+
+def test_no_configured_runtime_lock_ignores_hostile_parent_value(
+    roots, monkeypatch, tmp_path
+):
+    hostile = tmp_path / "hostile-lock.json"
+    hostile.write_text("hostile", encoding="utf-8")
+    monkeypatch.setenv("POPEX_DEMUCS_RUNTIME_LOCK", str(hostile))
+    runner = Runner(ok("runtime-probe", runtime_result(runtimeLockSource="bundled")))
+
+    result = client(roots, runner).runtime_probe()
+
+    assert result.runtime_lock_source == "bundled"
+    assert "POPEX_DEMUCS_RUNTIME_LOCK" not in runner.calls[0][1]["env"]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["relative", "missing", "directory", "normalized_alias"],
+)
+def test_invalid_runtime_lock_paths_rejected_before_spawn(roots, tmp_path, kind):
+    runner = Runner()
+    if kind == "relative":
+        value = "runtime-lock.json"
+    elif kind == "missing":
+        value = tmp_path / "missing-runtime-lock.json"
+    elif kind == "directory":
+        value = tmp_path / "lock-directory"
+        value.mkdir()
+    else:
+        actual = make_runtime_lock(tmp_path)
+        value = f"{tmp_path}/sub/../{actual.name}"
+
+    with pytest.raises(ValueError, match="runtime_lock_path"):
+        client(roots, runner, runtime_lock_path=value)
+    assert not runner.calls
+
+
+def test_direct_runtime_lock_symlink_rejected_before_spawn(roots, tmp_path):
+    target = make_runtime_lock(tmp_path)
+    link = tmp_path / "runtime-lock-link.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    runner = Runner()
+    with pytest.raises(ValueError, match="runtime_lock_path"):
+        client(roots, runner, runtime_lock_path=link)
+    assert not runner.calls
+
+
+def test_runtime_lock_with_symlinked_parent_rejected_before_spawn(roots, tmp_path):
+    real_parent = tmp_path / "real-locks"
+    real_parent.mkdir()
+    target = real_parent / "runtime-lock.json"
+    target.write_text("{}", encoding="utf-8")
+    parent_link = tmp_path / "lock-parent"
+    try:
+        parent_link.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    runner = Runner()
+    with pytest.raises(ValueError, match="symbolic-link"):
+        client(roots, runner, runtime_lock_path=parent_link / target.name)
+    assert not runner.calls
+
+
+def test_runtime_lock_removed_after_construction_is_rejected_before_spawn(
+    roots, tmp_path
+):
+    runtime_lock = make_runtime_lock(tmp_path)
+    runner = Runner(ok("runtime-probe", runtime_result()))
+    instance = client(roots, runner, runtime_lock_path=runtime_lock)
+    runtime_lock.unlink()
+
+    with pytest.raises(RuntimeConfigurationError) as caught:
+        instance.runtime_probe()
+
+    assert caught.value.code == "RUNTIME_CONFIGURATION_INVALID"
+    assert str(runtime_lock) not in str(caught.value)
+    assert caught.value.detail.diagnostic is None
+    assert not runner.calls
+
+
+def test_runtime_lock_replaced_by_symlink_is_rejected_before_spawn(
+    roots, tmp_path
+):
+    runtime_lock = make_runtime_lock(tmp_path)
+    outside = tmp_path / "replacement.json"
+    outside.write_text("{}", encoding="utf-8")
+    runner = Runner(ok("runtime-probe", runtime_result()))
+    instance = client(roots, runner, runtime_lock_path=runtime_lock)
+    runtime_lock.unlink()
+    try:
+        runtime_lock.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(RuntimeConfigurationError) as caught:
+        instance.runtime_probe()
+
+    assert caught.value.code == "RUNTIME_CONFIGURATION_INVALID"
+    assert str(runtime_lock) not in str(caught.value)
+    assert not runner.calls
+
+
+def test_runtime_lock_path_is_redacted_from_startup_errors(roots, tmp_path):
+    runtime_lock = make_runtime_lock(tmp_path)
+    runner = Runner(FileNotFoundError(f"worker failed with {runtime_lock}"))
+
+    with pytest.raises(RuntimeMissingError) as caught:
+        client(roots, runner, runtime_lock_path=runtime_lock).runtime_probe()
+
+    assert str(runtime_lock) not in (caught.value.detail.diagnostic or "")
+    assert "<path>" in (caught.value.detail.diagnostic or "")
+
+
+def test_runtime_lock_path_is_redacted_from_worker_stderr_message_and_warnings(
+    roots, tmp_path
+):
+    runtime_lock = make_runtime_lock(tmp_path)
+    completed = failure(
+        21,
+        "model-probe",
+        "READINESS_MANIFEST_INVALID",
+        stderr=f"worker could not read {runtime_lock}".encode(),
+        error_overrides={"message": f"invalid runtime lock at {runtime_lock}"},
+    )
+    runner = Runner(completed)
+
+    with pytest.raises(WorkerCommandError) as caught:
+        client(roots, runner, runtime_lock_path=runtime_lock).model_probe()
+
+    assert str(runtime_lock) not in caught.value.detail.message
+    assert str(runtime_lock) not in (caught.value.detail.diagnostic or "")
+    assert "<path>" in caught.value.detail.message
+    assert "<path>" in (caught.value.detail.diagnostic or "")
+
+    warning_runner = Runner(
+        ok(
+            "runtime-probe",
+            runtime_result(),
+            warnings=[f"runtime lock loaded from {runtime_lock}"],
+        )
+    )
+    result = client(
+        roots, warning_runner, runtime_lock_path=runtime_lock
+    ).runtime_probe()
+    assert str(runtime_lock) not in result.warnings[0]
+    assert "<path>" in result.warnings[0]
+
+
+def test_runtime_lock_property_is_read_only(roots, tmp_path):
+    runtime_lock = make_runtime_lock(tmp_path)
+    instance = client(roots, Runner(), runtime_lock_path=runtime_lock)
+    with pytest.raises(AttributeError):
+        instance.runtime_lock_path = tmp_path / "other.json"
