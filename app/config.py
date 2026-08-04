@@ -39,6 +39,14 @@ class Settings:
     audio_analysis_version: str = "baseline-librosa-v1"
     audio_analysis_timeout_seconds: int = 300
     audio_silence_rms_threshold: float = 0.0001
+    stem_separation_enabled: bool = False
+    stem_separation_version: str = "demucs-worker-v3"
+    stem_separation_worker_executable: Path | None = None
+    stem_separation_runtime_lock: Path | None = None
+    stem_separation_cache_dir: Path | None = None
+    stem_separation_runtime_profile: str | None = None
+    stem_separation_device: str = "cpu"
+    stem_separation_timeout_seconds: int = 3600
 
     @property
     def database_path(self) -> Path:
@@ -77,8 +85,13 @@ class Settings:
             ).split(",")
             if host.strip()
         )
+        data_dir = Path(os.getenv("POPEX_DATA_DIR", "data")).expanduser().resolve()
+        stem_separation_enabled = _boolean("STEM_SEPARATION_ENABLED", False)
+        stem_separation_cache_dir = _optional_path("STEM_SEPARATION_CACHE_DIR")
+        if stem_separation_enabled and stem_separation_cache_dir is None:
+            stem_separation_cache_dir = data_dir / "runtime-cache" / "demucs"
         return cls(
-            data_dir=Path(os.getenv("POPEX_DATA_DIR", "data")).expanduser().resolve(),
+            data_dir=data_dir,
             allowed_hosts=hosts or DEFAULT_ALLOWED_HOSTS,
             max_duration_seconds=_positive_int("POPEX_MAX_DURATION_SECONDS", 1800),
             max_filesize_mb=_positive_int("POPEX_MAX_FILESIZE_MB", 250),
@@ -98,6 +111,25 @@ class Settings:
             ),
             audio_silence_rms_threshold=_positive_float(
                 "AUDIO_SILENCE_RMS_THRESHOLD", 0.0001
+            ),
+            stem_separation_enabled=stem_separation_enabled,
+            stem_separation_version=os.getenv(
+                "STEM_SEPARATION_VERSION", "demucs-worker-v3"
+            ).strip()
+            or "demucs-worker-v3",
+            stem_separation_worker_executable=_optional_path(
+                "STEM_SEPARATION_WORKER_EXECUTABLE"
+            ),
+            stem_separation_runtime_lock=_optional_path(
+                "STEM_SEPARATION_RUNTIME_LOCK"
+            ),
+            stem_separation_cache_dir=stem_separation_cache_dir,
+            stem_separation_runtime_profile=_optional_string(
+                "STEM_SEPARATION_RUNTIME_PROFILE"
+            ),
+            stem_separation_device=_device("STEM_SEPARATION_DEVICE", "cpu"),
+            stem_separation_timeout_seconds=_positive_int(
+                "STEM_SEPARATION_TIMEOUT_SECONDS", 3600
             ),
         )
 
@@ -138,3 +170,25 @@ def _boolean(name: str, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise RuntimeError(f"{name} must be true or false")
+
+
+def _optional_string(name: str) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
+
+
+def _optional_path(name: str) -> Path | None:
+    value = _optional_string(name)
+    if value is None:
+        return None
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def _device(name: str, default: str) -> str:
+    value = os.getenv(name, default).strip().lower() or default
+    if value not in {"cpu", "cuda", "mps"}:
+        raise RuntimeError(f"{name} must be cpu, cuda, or mps")
+    return value
