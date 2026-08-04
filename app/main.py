@@ -4,12 +4,13 @@ import logging
 import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
 from fastapi import (
     BackgroundTasks,
+    Body,
     FastAPI,
     File,
     HTTPException,
@@ -19,7 +20,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, ConfigDict, HttpUrl, StrictBool
 
 from app import db
 from app.analysis import (
@@ -41,6 +42,19 @@ from app.media import (
     process_url,
     secure_job_dir,
 )
+from app.separation import StemSeparationResult, separate_stems
+from app.separation_artifacts import (
+    StemArtifactError,
+    StemKindNotFoundError,
+    StemManifestUnavailableError,
+    load_stem_details,
+    resolve_stem_artifact,
+)
+from app.separation_service import (
+    SeparationJobNotFound,
+    SeparationService,
+    SeparationStartConflict,
+)
 
 
 UrlProcessor = Callable[
@@ -55,6 +69,7 @@ AnalysisProcessor = Callable[
     [str, Settings, Callable[[str, str, float], None]],
     AudioAnalysisResult,
 ]
+SeparationProcessor = Callable[..., StemSeparationResult]
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 ALLOWED_GENERIC_MIME_TYPES = {
@@ -71,10 +86,29 @@ ANALYSIS_STAGES = {
 }
 PREPARATION_PROGRESS_LIMIT = 64.0
 ANALYSIS_FAILURE_PROGRESS = 95.0
+_INTERNAL_SEPARATION_FIELDS = frozenset(
+    {
+        "separation_status",
+        "separation_stage",
+        "separation_progress",
+        "separation_message",
+        "separation_version",
+        "separation_model",
+        "stem_manifest_file_name",
+        "separated_at",
+        "separation_error",
+    }
+)
 
 
 class JobCreate(BaseModel):
     url: HttpUrl
+
+
+class SeparationStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allowModelDownload: StrictBool = False
 
 
 def create_app(
@@ -82,8 +116,15 @@ def create_app(
     url_processor: UrlProcessor = process_url,
     upload_processor: UploadProcessor = process_upload,
     analysis_processor: AnalysisProcessor = analyze_audio,
+    separation_runtime_client: Any | None = None,
+    separation_processor: SeparationProcessor = separate_stems,
 ) -> FastAPI:
     app_settings = settings or Settings.from_env()
+    separation_service = SeparationService(
+        app_settings,
+        runtime_client=separation_runtime_client,
+        processor=separation_processor,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -91,6 +132,8 @@ def create_app(
         db.init_database(app_settings.database_path)
         db.fail_incomplete_jobs(app_settings.database_path)
         app.state.dependencies = dependency_report(app_settings)
+        app.state.separation_service = separation_service
+        separation_service.initialize()
         if (
             not app.state.dependencies["ffmpeg"]
             or not app.state.dependencies["ffprobe"]
@@ -108,7 +151,11 @@ def create_app(
         docs_url="/api/docs",
         redoc_url=None,
     )
+    app.state.separation_service = separation_service
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+    def serialize_job(record: dict) -> dict:
+        return _serialize_job(record, app_settings, separation_service)
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
@@ -148,7 +195,7 @@ def create_app(
             url_processor,
             analysis_processor,
         )
-        return _serialize_job(job, app_settings)
+        return serialize_job(job)
 
     @app.post("/api/uploads", status_code=status.HTTP_202_ACCEPTED)
     async def submit_upload_job(
@@ -272,12 +319,12 @@ def create_app(
             analysis_processor,
         )
         current = db.get_job(app_settings.database_path, job_id)
-        return _serialize_job(current or job, app_settings)
+        return serialize_job(current or job)
 
     @app.get("/api/jobs")
     def jobs() -> list[dict]:
         return [
-            _serialize_job(job, app_settings)
+            serialize_job(job)
             for job in db.list_jobs(app_settings.database_path)
         ]
 
@@ -286,7 +333,7 @@ def create_app(
         record = db.get_job(app_settings.database_path, job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        return _serialize_job(record, app_settings)
+        return serialize_job(record)
 
     @app.post(
         "/api/jobs/{job_id}/analyze",
@@ -329,7 +376,7 @@ def create_app(
             == app_settings.audio_analysis_version
             and not force
         ):
-            return _serialize_job(record, app_settings)
+            return serialize_job(record)
 
         db.update_job(
             app_settings.database_path,
@@ -351,7 +398,30 @@ def create_app(
             analysis_processor,
         )
         current = db.get_job(app_settings.database_path, job_id)
-        return _serialize_job(current or record, app_settings)
+        return serialize_job(current or record)
+
+    @app.post(
+        "/api/jobs/{job_id}/separate",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def separate_existing_job(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        payload: SeparationStartRequest = Body(
+            default_factory=SeparationStartRequest
+        ),
+    ) -> dict:
+        try:
+            record = separation_service.request_start(
+                job_id,
+                allow_model_download=payload.allowModelDownload,
+                schedule=background_tasks.add_task,
+            )
+        except SeparationJobNotFound:
+            raise HTTPException(status_code=404, detail="Job not found") from None
+        except SeparationStartConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return serialize_job(record)
 
     @app.get("/api/jobs/{job_id}/analysis")
     def get_analysis(job_id: str) -> dict:
@@ -398,6 +468,56 @@ def create_app(
             path,
             filename="audio-analysis.json",
             media_type="application/json",
+        )
+
+    @app.get("/api/jobs/{job_id}/stems")
+    def get_stems(job_id: str) -> dict:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            details = load_stem_details(job_id, app_settings, record)
+        except StemArtifactError:
+            logging.exception("Published stem details failed validation for job %s", job_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Published stem artifacts could not be validated.",
+            ) from None
+        if not details.available:
+            raise HTTPException(
+                status_code=404,
+                detail="Published stem artifacts are unavailable.",
+            )
+        return details.payload()
+
+    @app.get("/api/jobs/{job_id}/stems/{kind}/preview")
+    def preview_stem(job_id: str, kind: str) -> FileResponse:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        artifact = _stem_artifact_or_http_error(
+            job_id,
+            kind,
+            app_settings,
+            record,
+        )
+        return FileResponse(artifact.path, media_type=artifact.media_type)
+
+    @app.get("/api/jobs/{job_id}/stems/{kind}/download")
+    def download_stem(job_id: str, kind: str) -> FileResponse:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        artifact = _stem_artifact_or_http_error(
+            job_id,
+            kind,
+            app_settings,
+            record,
+        )
+        return FileResponse(
+            artifact.path,
+            filename=artifact.download_name,
+            media_type=artifact.media_type,
         )
 
     @app.get("/api/jobs/{job_id}/files/{file_name}")
@@ -680,8 +800,16 @@ def _validate_source_url(
         )
 
 
-def _serialize_job(job: dict, settings: Settings) -> dict:
-    payload = dict(job)
+def _serialize_job(
+    job: dict,
+    settings: Settings,
+    separation_service: SeparationService | None = None,
+) -> dict:
+    payload = {
+        key: value
+        for key, value in job.items()
+        if key not in _INTERNAL_SEPARATION_FIELDS
+    }
     payload["files"] = []
     job_dir = settings.exports_dir / job["id"]
     allowed_names = _persisted_artifact_names(job)
@@ -715,6 +843,10 @@ def _serialize_job(job: dict, settings: Settings) -> dict:
         ),
         "error": job.get("analysis_error"),
     }
+    if separation_service is not None:
+        separation = separation_service.serialize_job(job)
+        if separation is not None:
+            payload["separation"] = separation
     return payload
 
 
@@ -764,6 +896,27 @@ def _serialize_file(job: dict, path: Path) -> dict:
             else None
         ),
     }
+
+
+def _stem_artifact_or_http_error(
+    job_id: str,
+    kind: str,
+    settings: Settings,
+    record: dict,
+):
+    try:
+        return resolve_stem_artifact(job_id, kind, settings, record)
+    except (StemManifestUnavailableError, StemKindNotFoundError):
+        raise HTTPException(
+            status_code=404,
+            detail="The requested stem artifact is unavailable.",
+        ) from None
+    except StemArtifactError:
+        logging.exception("Published stem artifact failed validation for job %s", job_id)
+        raise HTTPException(
+            status_code=500,
+            detail="Published stem artifacts could not be validated.",
+        ) from None
 
 
 def _resolve_job_file(

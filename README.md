@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-Current `main` is an ingestion and baseline audio-analysis foundation. It does **not** yet generate sheet music, stems, notes, drum parts, tabs, or chord symbols.
+The current implementation provides local ingestion, baseline audio analysis, and an optional local four-stem separation workflow. It does **not** yet generate note events, drum events, chord symbols, tablature, sheet music, MIDI, or MusicXML.
 
 Implemented capabilities:
 
@@ -404,13 +404,18 @@ Implemented capabilities:
 - safe source retention;
 - 44.1 kHz PCM `analysis.wav` normalization;
 - persistent SQLite job history;
-- separate source-preparation and analysis states;
+- separate source-preparation, audio-analysis, and stem-separation states;
 - deterministic tempo, beat, tonal-centre, chroma, and tuning estimates with librosa;
 - versioned analysis JSON;
-- retryable analysis;
-- source, WAV, metadata, and analysis downloads;
-- local Windows, Linux/macOS, and Docker workflows;
-- synthetic, offline automated tests.
+- optional worker-isolated Demucs `4.1.0` separation into vocals, bass, drums, and other/accompaniment;
+- explicit first-use consent before any model preparation or download;
+- revision- and SHA-256-backed schema-3 stem manifests;
+- safe stem details, preview, and download endpoints;
+- retry and restart recovery that preserve completed source, analysis, and previously published stems;
+- source, WAV, metadata, analysis, and stem downloads;
+- local Windows, Linux/macOS, and Docker workflows for the base application;
+- optional validated Linux and Windows CPU runtime profiles;
+- synthetic, offline automated tests for ordinary repository CI.
 
 ### Current processing workflow
 
@@ -421,10 +426,16 @@ local upload or supported URL
 → signal validation
 → tempo and beat estimation
 → tonal-centre, chroma, and tuning estimation
-→ persisted JSON and SQLite summary
+→ persisted analysis JSON and SQLite summary
+→ optional explicit stem-separation action
+→ optional first-use model preparation after consent
+→ local worker separation into vocals, bass, drums, and other
+→ atomic schema-3 stem manifest publication
 ```
 
 Supported upload formats: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, and WebM.
+
+Stem separation is disabled by default. The base application remains usable without the worker runtime, Demucs, PyTorch, model weights, a GPU, or network access to a model host.
 
 ## Analysis output
 
@@ -467,17 +478,39 @@ It does not claim to detect Dorian, Phrygian, Lydian, Mixolydian, modal mixture,
 
 `localRegions` is reserved for later modulation and modal-mixture analysis. Compatibility fields `key`, `mode`, and `symbol` remain available while clients migrate to the extensible candidate structure.
 
+## Stem-separation output
+
+A successful separation atomically publishes:
+
+```text
+data/exports/{job_id}/stems/stem-separation.json
+```
+
+The schema-3 manifest records the worker profile and version, Demucs/PyTorch/Hugging Face Hub versions, audited model repository and full revision, checkpoint filename and SHA-256, selected device, warnings, and job-relative paths for the four raw WAV stems.
+
+The current profile exposes approximately separated:
+
+- vocals;
+- bass;
+- drums;
+- other/accompaniment.
+
+These stems are model outputs, not guaranteed isolated studio tracks. Musicians should review them against the source recording. Private source audio remains local; model preparation downloads only the approved public model assets after explicit consent.
+
 ## Processing status semantics
 
-Source preparation and audio analysis are tracked separately:
+Source preparation, audio analysis, and stem separation are tracked independently:
 
 - `preparation_status` reports whether the source and `analysis.wav` were created;
 - `analysis_status` reports whether timing and tonal analysis is not started, processing, completed, or failed;
-- overall progress remains below 100 while analysis is running;
-- progress reaches 100 only after analysis succeeds;
-- analysis failure does not convert successful ingestion into failed source preparation;
-- source, WAV, and metadata artifacts remain available after analysis failure;
-- analysis can be retried without re-uploading the source.
+- `separation_status` reports whether stem separation is not started, processing, completed, or failed;
+- ordinary job serialization performs no runtime probe or network-capable operation;
+- separation progress remains below 100 during worker execution and reaches 100 only after successful manifest publication and persistence;
+- one atomic SQLite claim prevents concurrent duplicate separation attempts;
+- analysis failure does not convert successful source preparation into failure;
+- separation failure does not downgrade source preparation or audio analysis;
+- a failed retry does not replace the last successful stem manifest or delete its stem files;
+- interrupted separation is marked retryable at restart while earlier artifacts remain readable.
 
 ## API
 
@@ -490,17 +523,21 @@ Source preparation and audio analysis are tracked separately:
 - `POST /api/jobs/{job_id}/analyze?force=true`
 - `GET /api/jobs/{job_id}/analysis`
 - `GET /api/jobs/{job_id}/analysis/download`
+- `POST /api/jobs/{job_id}/separate` with optional strict JSON `{ "allowModelDownload": true | false }`
+- `GET /api/jobs/{job_id}/stems`
+- `GET /api/jobs/{job_id}/stems/{kind}/preview`
+- `GET /api/jobs/{job_id}/stems/{kind}/download`
 - `GET /api/jobs/{job_id}/files/{file_name}`
 
-Historical completed jobs are not analyzed automatically at startup. Use the Analyze action or `POST /api/jobs/{job_id}/analyze`. An identical completed analysis is reused unless `force=true`. Active duplicate analysis requests are rejected.
+Historical completed jobs are not analyzed or separated automatically at startup. Use the Analyze and Separate actions or the corresponding endpoints. Active or already completed separation attempts are rejected rather than duplicated.
 
-Artifact downloads are limited to persisted source, normalized-WAV, and metadata filenames. Arbitrary job-directory paths are rejected.
+The web API never accepts a worker executable, runtime lock, cache root, model repository, model revision, checkpoint filename, checkpoint hash, device path, or arbitrary artifact path. Stem preview and download resolution always starts from the validated published manifest.
 
 ## Local setup
 
 ### Windows without Docker
 
-Requirements:
+Base-application requirements:
 
 - Python 3.10 or newer; Python 3.12 is recommended;
 - FFmpeg and ffprobe on `PATH`;
@@ -521,6 +558,14 @@ winget install -e --id OpenJS.NodeJS.LTS
 winget install -e --id Gyan.FFmpeg
 ```
 
+Optional Windows x86-64 CPU separation runtime, using 64-bit PowerShell and CPython 3.13:
+
+```powershell
+pwsh -File scripts\install_demucs_windows_cpu.ps1
+```
+
+The installer creates an isolated runtime and performs `runtime-probe`; it does not download model weights. See `runtimes/profiles/windows-cpu/INSTALL.md` for the trusted worker, runtime-lock, and recommended cache paths.
+
 Close and reopen PowerShell after changing `PATH`. Open <http://localhost:8000>; do not browse to `0.0.0.0`.
 
 ### Linux or macOS without Docker
@@ -535,6 +580,14 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 FFmpeg and ffprobe must be installed separately and available on `PATH`.
 
+Optional Linux x86-64 CPU separation runtime, using CPython 3.13:
+
+```bash
+bash scripts/install_demucs_linux_cpu.sh
+```
+
+The installer creates an isolated runtime and performs an offline-safe `runtime-probe`; it does not prepare or download the model. See `docs/runtime/demucs-linux-cpu.md` for the profile identity and trusted paths. Other macOS, ARM, CUDA, and MPS profiles are not enabled by these CPU installers.
+
 ### Docker
 
 Docker Desktop or Docker Engine must be running:
@@ -543,7 +596,7 @@ Docker Desktop or Docker Engine must be running:
 docker compose up --build
 ```
 
-Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, JSON analysis, and SQLite history.
+Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, analysis JSON, stem manifests, stem WAVs, and SQLite history. The base Docker setup does not install the optional Demucs runtime or bundle model weights.
 
 ## Configuration
 
@@ -559,6 +612,16 @@ Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, J
 | `AUDIO_ANALYSIS_VERSION` | `baseline-librosa-v1` | Reproducibility and cache key |
 | `AUDIO_ANALYSIS_TIMEOUT_SECONDS` | `300` | Analysis timeout guard |
 | `AUDIO_SILENCE_RMS_THRESHOLD` | `0.0001` | Effective-silence threshold |
+| `STEM_SEPARATION_ENABLED` | `false` | Expose and run the optional local separation workflow |
+| `STEM_SEPARATION_VERSION` | `demucs-worker-v3` | Persisted service/manifest integration version |
+| `STEM_SEPARATION_WORKER_EXECUTABLE` | empty | Trusted absolute worker executable path |
+| `STEM_SEPARATION_RUNTIME_LOCK` | empty | Trusted absolute external `runtime-lock.json` path |
+| `STEM_SEPARATION_CACHE_DIR` | empty | Private local model-cache root; enabled blank value uses a data-directory default |
+| `STEM_SEPARATION_RUNTIME_PROFILE` | empty | Expected installed runtime-profile identifier |
+| `STEM_SEPARATION_DEVICE` | `cpu` | Worker device: `cpu`, `cuda`, or `mps` when a matching profile exists |
+| `STEM_SEPARATION_TIMEOUT_SECONDS` | `3600` | Per-separation worker timeout |
+
+Worker, runtime-lock, cache, and profile values are trusted local configuration. Never derive them from a web request. Enabling the feature does not download a model at startup; the first model preparation occurs only after an explicit separation request with consent.
 
 ## Validation
 
@@ -568,44 +631,40 @@ python -m compileall -q app tests
 node --check app/static/app.js
 ```
 
-Tests generate synthetic click tracks and tonal signals. They do not require internet access or copyrighted recordings.
+Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordinary repository CI does not install Demucs or PyTorch, access the network for model assets, run real inference, use copyrighted recordings, or commit model caches.
 
 ## Reliability behaviour
 
 - Existing SQLite databases are migrated in place.
-- Previously completed jobs remain readable with `analysis_status=not_started`.
+- Previously completed jobs remain readable with independent analysis and separation defaults.
 - Interrupted analysis retains successful source preparation and becomes retryable.
+- Interrupted separation retains source preparation, audio analysis, any previously published manifest, and its stem WAVs.
 - Analysis failures retain the source, `analysis.wav`, and metadata.
-- JSON is written atomically.
-- Technical tracebacks are logged; user-facing errors remain concise.
-- Meter and tonal-centre results are estimates and carry confidence values; unavailable values are returned as `null`.
+- Separation failures update only separation state and remain retryable.
+- Analysis JSON and stem manifests are written atomically.
+- Runtime capability is probed at startup or explicit refresh, not once per job serialization.
+- A missing or incompatible optional runtime does not prevent the base application from starting.
+- Technical tracebacks are logged; user-facing runtime, cache, lock, and artifact paths are redacted or omitted.
+- Meter, tonal-centre, and separated stems are estimates and carry warnings where applicable.
 
 ## Known limitations
 
-- No source separation yet.
-- No note or percussion-event transcription yet.
+- No pitched-note or percussion-event transcription yet.
 - No chord extraction yet.
 - No MusicXML, MIDI, PDF, tablature, or score rendering yet.
+- Stem separation currently supports only the audited four-stem `htdemucs` profile.
+- Separation quality varies by recording and does not guarantee complete instrument isolation.
+- Optional runtime installation is separately managed and platform-specific; the base application does not install it automatically.
+- The model checkpoint is not bundled and requires explicit first-use authorization for local cache preparation.
 - Current global tonal estimation evaluates Ionian/major and Aeolian/minor profiles only.
-- Dense pop arrangements cannot yet be represented as instrument parts.
+- Dense pop arrangements cannot yet be represented as reliable instrument parts.
 - URL ingestion depends on external platform availability and must only be used where the user is authorized to process the source.
 
 ## Next planned cycle
 
-The next planned implementation cycle is local Demucs stem separation using the maintained `adefossez/demucs` project and the `htdemucs` model.
+The next planned implementation stage is raw pitched-note and percussion-event representation and baseline transcription from the source and separated stems.
 
-The cycle should persist and expose at least:
-
-- vocals;
-- bass;
-- drums;
-- other/accompaniment;
-- model and separation versions;
-- warnings and failures;
-- safe stem preview/download;
-- retryable processing without destroying existing analysis.
-
-It must remain local, optional, and compatible with the broader score-generation architecture described above.
+That stage should preserve raw timing and confidence before score quantization, keep pitched and percussion events separate, record exact model/version provenance, and retain the current retry/preservation guarantees. Chord extraction, readable measures, MIDI, MusicXML, drum notation, tablature, and synchronized correction follow later in the canonical order.
 
 ## License
 
