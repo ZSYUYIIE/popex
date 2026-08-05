@@ -163,6 +163,11 @@ def write_raw_transcription(
                 "Raw transcription artifact directory changed during publication."
             )
         _replace_atomic(temporary, destination)
+        if _directory_snapshot(artifact_dir, job_dir) != directory_snapshot:
+            raise RawTranscriptionError(
+                "Raw transcription artifact directory changed during publication."
+            )
+        _require_regular_file(destination, artifact_dir)
         _fsync_directory(artifact_dir)
     except RawTranscriptionError:
         raise
@@ -622,7 +627,7 @@ def _alignment_candidate(
 
 
 def _alignment_event_type(value: Any, label: str) -> str:
-    if value not in {"pitched", "percussion"}:
+    if not isinstance(value, str) or value not in {"pitched", "percussion"}:
         raise RawTranscriptionValidationError(
             f"{label} must be pitched or percussion."
         )
