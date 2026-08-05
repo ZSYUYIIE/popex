@@ -1,0 +1,122 @@
+name: Demucs Windows real-model E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-real-model-e2e:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      HF_HUB_DISABLE_UPDATE_CHECK: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      DO_NOT_TRACK: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - name: Check out exact branch head
+        uses: actions/checkout@v4
+
+      - name: Set up lightweight base Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install base PopEx
+        shell: pwsh
+        run: python -m pip install -e ".[dev]"
+
+      - name: Install exact isolated Windows CPU runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          $Runtime = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-real-model-runtime"
+          $Cache = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-real-model-cache"
+          $Data = Join-Path $env:RUNNER_TEMP "popex-demucs-windows-real-model-data"
+          foreach ($Name in @("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")) {
+            Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+          }
+          & pwsh -NoProfile -File scripts/install_demucs_windows_cpu.ps1 -Destination $Runtime
+          if ($LASTEXITCODE -ne 0) {
+            throw "The exact Windows CPU runtime installation failed."
+          }
+          "POPEX_REAL_MODEL_RUNTIME=$Runtime" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POPEX_REAL_MODEL_WORKER=$(Join-Path $Runtime 'venv\Scripts\popex-demucs-worker.exe')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POPEX_REAL_MODEL_LOCK=$(Join-Path $Runtime 'runtime-lock.json')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POPEX_REAL_MODEL_CACHE=$Cache" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POPEX_REAL_MODEL_DATA=$Data" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Run real FastAPI model preparation and CPU inference
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Set-StrictMode -Version Latest
+          foreach ($Name in @("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")) {
+            Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+          }
+          $Output = & python scripts/validate_demucs_windows_real_model_e2e.py `
+            --worker $env:POPEX_REAL_MODEL_WORKER `
+            --runtime-lock $env:POPEX_REAL_MODEL_LOCK `
+            --cache-root $env:POPEX_REAL_MODEL_CACHE `
+            --data-dir $env:POPEX_REAL_MODEL_DATA `
+            --separation-timeout-seconds 3600 `
+            --poll-timeout-seconds 3600 2>&1
+          $ExitCode = $LASTEXITCODE
+          $Output | ForEach-Object { Write-Host $_ }
+          if ($ExitCode -ne 0) {
+            throw "The real Windows model validation failed."
+          }
+          $JsonLine = $Output | Where-Object {
+            $_ -is [string] -and $_.TrimStart().StartsWith("{")
+          } | Select-Object -Last 1
+          if (-not $JsonLine) {
+            throw "The validator did not emit its safe JSON summary."
+          }
+          $Evidence = $JsonLine | ConvertFrom-Json
+          if ($Evidence.status -ne "ok") {
+            throw "The validator summary did not report success."
+          }
+          @"
+          ## Windows real-model evidence
+
+          - Runtime profile: ``$($Evidence.runtimeProfile)``
+          - Worker / protocol: ``$($Evidence.workerVersion)`` / ``$($Evidence.protocolVersion)``
+          - Demucs / Torch: ``$($Evidence.demucsVersion)`` / ``$($Evidence.torchVersion)``
+          - Model revision: ``$($Evidence.model.revision)``
+          - Checkpoint bytes: ``$($Evidence.model.checkpointSizeBytes)``
+          - Stem count: ``$($Evidence.job.stemCount)``
+          - Separation status: ``$($Evidence.job.separationStatus)``
+          - Total elapsed seconds: ``$($Evidence.elapsedSeconds.total)``
+          - Machine paths exposed: ``$($Evidence.privacy.machinePathsExposed)``
+          - Artifacts uploaded: ``$($Evidence.privacy.artifactsUploaded)``
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Clean temporary runtime, cache, data, and generated media
+        if: always()
+        shell: pwsh
+        run: |
+          foreach ($Path in @(
+            $env:POPEX_REAL_MODEL_RUNTIME,
+            $env:POPEX_REAL_MODEL_CACHE,
+            $env:POPEX_REAL_MODEL_DATA
+          )) {
+            if ($Path) {
+              Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+          foreach ($Name in @(
+            "HF_TOKEN",
+            "HUGGING_FACE_HUB_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "POPEX_DEMUCS_RUNTIME_LOCK"
+          )) {
+            Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+          }
