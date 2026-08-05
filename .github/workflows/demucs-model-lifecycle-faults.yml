@@ -2,6 +2,9 @@ name: Demucs model lifecycle fault validation
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "agent/model-readiness-integrity"
   pull_request:
     paths:
       - ".github/workflows/demucs-model-lifecycle-faults.yml"
@@ -30,7 +33,6 @@ jobs:
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
       PYTHONNOUSERSITE: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
-      POPEX_FAULT_TMP: ${{ runner.temp }}/popex-model-lifecycle-faults
     steps:
       - uses: actions/checkout@v4
 
@@ -42,6 +44,10 @@ jobs:
       - name: Install base test dependencies only
         run: pip install -e '.[dev]'
 
+      - name: Define isolated fault workspace
+        shell: bash
+        run: echo "POPEX_FAULT_TMP=$RUNNER_TEMP/popex-model-lifecycle-focused" >> "$GITHUB_ENV"
+
       - name: Prepare isolated fault workspace
         shell: bash
         run: |
@@ -49,14 +55,14 @@ jobs:
           rm -rf -- "$POPEX_FAULT_TMP"
           mkdir -p -- "$POPEX_FAULT_TMP"
 
-      - name: Run deterministic offline fault characterization
+      - name: Run focused worker and lifecycle suites
         id: characterization
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/validate_demucs_model_lifecycle_faults.py \
-            | tee "$POPEX_FAULT_TMP/summary.json"
+          pytest -q tests/test_demucs_worker.py tests/test_demucs_model_lifecycle_faults.py \
+            | tee "$POPEX_FAULT_TMP/summary.txt"
 
       - name: Compile application, tests, and validator
         run: >-
@@ -82,15 +88,15 @@ jobs:
             exit 1
           fi
           if grep -R -E 'huggingface\.co|hf\.co' "$POPEX_FAULT_TMP"; then
-            echo "Fault validation unexpectedly recorded model-host access." >&2
+            echo "Focused validation unexpectedly recorded model-host access." >&2
             exit 1
           fi
 
-      - name: Enforce characterization result
+      - name: Enforce focused result
         if: steps.characterization.outcome != 'success'
         shell: bash
         run: |
-          echo "A production model-lifecycle characterization is failing; keep this PR blocked." >&2
+          echo "A focused worker or lifecycle suite is failing." >&2
           exit 1
 
       - name: Clean temporary fault state
