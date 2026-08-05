@@ -220,12 +220,12 @@ def test_passive_hash_detects_checkpoint_change_during_read(monkeypatch,tmp_path
 
 
 def test_post_publication_checkpoint_change_removes_new_readiness(monkeypatch,tmp_path,model):
- yamlmod(monkeypatch);hub(monkeypatch,downloader(model[0],[]));real=commands._revalidate_assets;calls={'count':0}
+ yamlmod(monkeypatch);hub(monkeypatch,downloader(model[0],[]));implementation_globals=commands.prepare_model.__globals__;real=implementation_globals['_revalidate_assets'];calls={'count':0}
  def mutate_on_post(cache_root,verified):
   calls['count']+=1
   if calls['count']==2:verified.checkpoint.lexical_path.write_bytes(bytes(x^0x55 for x in model[0]))
   return real(cache_root,verified)
- monkeypatch.setattr(commands,'_revalidate_assets',mutate_on_post)
+ monkeypatch.setitem(implementation_globals,'_revalidate_assets',mutate_on_post)
  with pytest.raises(Exception):commands.prepare_model(str(tmp_path))
  assert not (tmp_path/constants.READINESS_RELATIVE_PATH).exists()
  assert not list((tmp_path/'readiness').glob('*.tmp'))
