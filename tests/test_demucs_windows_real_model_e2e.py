@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
 import soundfile as sf
 import yaml
 
-from scripts import validate_demucs_windows_real_model_e2e as validator
-
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "demucs-windows-real-model-e2e.yml"
 VALIDATOR = ROOT / "scripts" / "validate_demucs_windows_real_model_e2e.py"
 DOC = ROOT / "docs" / "runtime" / "demucs-windows-real-model-e2e.md"
+
+_SPEC = importlib.util.spec_from_file_location(
+    "popex_demucs_windows_real_model_e2e_validator",
+    VALIDATOR,
+)
+assert _SPEC is not None and _SPEC.loader is not None
+validator = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = validator
+_SPEC.loader.exec_module(validator)
 
 
 def _workflow() -> dict:
