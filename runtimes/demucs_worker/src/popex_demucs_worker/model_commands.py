@@ -2,6 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .constants import (
+    BAG_FILE,
+    CHECKPOINT_FILE,
+    CHECKPOINT_SHA256,
+    CHECKPOINT_SIZE_BYTES,
+    DEMUCS_VERSION,
+    MODEL_REPOSITORY,
+    MODEL_REVISION,
+    READINESS_RELATIVE_PATH,
+    WORKER_VERSION,
+)
 from .model_artifacts import (
     VerifiedAssets,
     _manifest,
@@ -18,6 +29,31 @@ from .runtime_support import _download_exact_assets
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _not_ready_result(runtime_profile: str, versions: dict[str, str]) -> dict:
+    """Return a fail-closed non-ready result for a detected in-flight replacement.
+
+    The worker command has not published readiness. Base clients reject this result
+    because ``offlineReady`` is false, while direct callers can inspect the state
+    without mistaking an old manifest for authoritative readiness.
+    """
+    return {
+        "runtimeProfile": runtime_profile,
+        "workerVersion": WORKER_VERSION,
+        "demucsVersion": DEMUCS_VERSION,
+        "torchVersion": versions["torch"],
+        "huggingfaceHubVersion": versions["huggingface_hub"],
+        "modelRepository": MODEL_REPOSITORY,
+        "modelRevision": MODEL_REVISION,
+        "bagFile": BAG_FILE,
+        "checkpointFile": CHECKPOINT_FILE,
+        "checkpointSizeBytes": CHECKPOINT_SIZE_BYTES,
+        "checkpointSha256": CHECKPOINT_SHA256,
+        "verifiedAt": _utc_now(),
+        "offlineReady": False,
+        "readinessManifest": READINESS_RELATIVE_PATH,
+    }
 
 
 def _publish_verified_readiness(
@@ -72,11 +108,21 @@ def prepare_model(cache_root_text: str) -> dict:
 def verify_model(cache_root_text: str) -> dict:
     cache_root = trusted_root(cache_root_text)
     runtime_profile, versions, _ = require_compatible_runtime()
-    load_readiness_manifest(cache_root)
+    try:
+        load_readiness_manifest(cache_root)
+    except WorkerError as exc:
+        if exc.code == "CHECKPOINT_CHANGED_DURING_VERIFICATION":
+            return _not_ready_result(runtime_profile, versions)
+        raise
     bag_path, checkpoint_path = _download_exact_assets(
         cache_root, local_files_only=True
     )
-    verified = _verify_assets(cache_root, bag_path, checkpoint_path)
+    try:
+        verified = _verify_assets(cache_root, bag_path, checkpoint_path)
+    except WorkerError as exc:
+        if exc.code == "CHECKPOINT_CHANGED_DURING_VERIFICATION":
+            return _not_ready_result(runtime_profile, versions)
+        raise
     return _publish_verified_readiness(
         cache_root,
         runtime_profile,
