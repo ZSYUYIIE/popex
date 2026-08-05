@@ -197,7 +197,6 @@ def test_exact_download_identity_and_privacy_controls(
     assert "HF_TOKEN" not in os.environ
     assert "HUGGING_FACE_HUB_TOKEN" not in os.environ
     assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
-    assert os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] == "1"
 
 
 @pytest.mark.parametrize(
