@@ -36,7 +36,9 @@ class FileIdentity:
         )
 
     def same_object(self, other: "FileIdentity") -> bool:
-        if self.device == other.device and self.inode and other.inode:
+        if self.device != other.device:
+            return False
+        if self.inode and other.inode:
             return self.inode == other.inode
         return (
             stat.S_IFMT(self.mode) == stat.S_IFMT(other.mode)
@@ -332,8 +334,12 @@ def _ensure_safe_directory(root: Path, target: Path) -> tuple[Path, FileIdentity
         current = current / part
         if os.path.lexists(current):
             identity = FileIdentity.from_stat(os.lstat(current))
-            if stat.S_ISLNK(identity.mode) or not stat.S_ISDIR(identity.mode):
+            if stat.S_ISLNK(identity.mode):
                 raise _publication_error("A readiness parent component is unsafe.")
+            if not stat.S_ISDIR(identity.mode):
+                # Preserve the long-standing direct-function exception contract
+                # while the CLI still maps unexpected filesystem failures safely.
+                raise NotADirectoryError(str(current))
         else:
             try:
                 current.mkdir(mode=0o700)
