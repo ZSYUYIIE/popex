@@ -2,6 +2,9 @@ name: Demucs model lifecycle fault validation
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - "agent/model-readiness-integrity"
   pull_request:
     paths:
       - ".github/workflows/demucs-model-lifecycle-faults.yml"
