@@ -1,0 +1,26 @@
+name: Demucs Linux real-model end-to-end
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demucs-linux-real-model-e2e
+  cancel-in-progress: false
+
+jobs:
+  linux-real-model-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Recovery checkpoint
+        run: |
+          echo "Manual-only real-model validation is being implemented on this draft PR."
