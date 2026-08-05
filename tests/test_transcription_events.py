@@ -384,6 +384,14 @@ def test_alignment_reference_raw_time_and_event_type_must_match() -> None:
         validate_raw_transcription(value)
 
 
+@pytest.mark.parametrize("bad", [[], {}, True])
+def test_alignment_event_type_malformed_values_fail_safely(bad: object) -> None:
+    value = payload()
+    value["alignmentCandidates"][0]["eventType"] = bad
+    with pytest.raises(RawTranscriptionValidationError):
+        validate_raw_transcription(value)
+
+
 def test_alignment_offset_uses_raw_minus_aligned_convention() -> None:
     result = validate_raw_transcription(payload())
     item = next(x for x in result["alignmentCandidates"] if x["eventId"] == "r000002")
@@ -502,6 +510,42 @@ def test_failed_replacement_preserves_previous_and_removes_temp(
     assert path.read_bytes() == before
     assert load_raw_transcription(JOB_ID, settings) == validate_raw_transcription(first)
     assert not list(path.parent.glob(".raw-events.json.*.tmp"))
+
+
+@pytest.mark.parametrize("mutation", ["parent", "destination"])
+def test_post_replace_revalidates_parent_and_final_object_and_cleans_temp(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    import app.transcription_events as module
+
+    path = write_raw_transcription(JOB_ID, settings, payload())
+    artifact_dir = path.parent
+    job_dir = artifact_dir.parent
+    replacement = payload()
+    replacement["transcriptionVersion"] = "raw-events-v2"
+    original_replace = module._replace_atomic
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside", encoding="utf-8")
+
+    def replace_then_mutate(source: Path, destination: Path) -> None:
+        original_replace(source, destination)
+        if mutation == "parent":
+            moved = job_dir / "transcription-replaced"
+            artifact_dir.rename(moved)
+            artifact_dir.mkdir(mode=0o700)
+        else:
+            destination.unlink()
+            destination.symlink_to(outside)
+
+    monkeypatch.setattr(module, "_replace_atomic", replace_then_mutate)
+    with pytest.raises(RawTranscriptionError):
+        write_raw_transcription(JOB_ID, settings, replacement)
+
+    assert not list(job_dir.rglob(".raw-events.json.*.tmp"))
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
 def test_symlinked_transcription_directory_is_rejected(settings: Settings, tmp_path: Path) -> None:
