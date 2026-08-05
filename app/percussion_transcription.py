@@ -170,10 +170,11 @@ def transcribe_percussion_audio(
         events.append(
             {
                 "id": f"r{index:06d}",
+                "sourceKind": safe_source_kind,
                 "timeSeconds": _round_seconds(raw_time),
                 "strength": round(transient_strength, 3),
                 "hits": hits,
-                "features": {
+                "rawFeatureSummary": {
                     "lowBandRatio": round(
                         float(feature["lowBandRatio"]),
                         3,
