@@ -63,6 +63,8 @@ node --check app/static/app.js
 
 ## Final workflow evidence
 
-Status: pending the single final manual workflow run on the stable PR head.
+Status: blocked before dispatch.
 
-After the run, this section records the exact head SHA, workflow run number and ID, conclusion, safe JSON summary, and confirmation that cleanup completed. Runtime, cache, model, database, WAV, and local-path logs are not preserved as artifacts.
+Repository CI run `171` (run ID `30973494047`) passed on the complete implementation head with `459 passed`, compile-all success, and JavaScript syntax success. The manual real-model workflow has no run number or run ID because GitHub only permits `workflow_dispatch` for a workflow definition present on the default branch. This new workflow exists only on the required unmerged feature branch, and this agent is not authorized to merge it or modify an existing default-branch workflow solely to bootstrap dispatch.
+
+No checkpoint was downloaded and no real inference was claimed. An orchestrator-controlled default-branch or integration checkpoint is required before the exact workflow can be dispatched. After that checkpoint, the workflow must run against the unchanged validation contract and either record its safe success summary and cleanup evidence or preserve a genuine model-host/runtime/inference failure as a blocked result.
