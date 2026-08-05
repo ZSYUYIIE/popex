@@ -17,6 +17,22 @@ from app.percussion_transcription import (
 
 
 SR = 44_100
+_REQUIRED_EVENT_KEYS = {
+    "id",
+    "sourceKind",
+    "timeSeconds",
+    "strength",
+    "hits",
+}
+_OPTIONAL_EVENT_KEYS = {"rawFeatureSummary", "warnings"}
+_RAW_FEATURE_KEYS = {
+    "lowBandRatio",
+    "midBandRatio",
+    "highBandRatio",
+    "spectralCentroidHz",
+    "spectralRolloffHz",
+    "transientStrength",
+}
 
 
 def _write_wav(
@@ -95,6 +111,31 @@ def _kinds(event: dict) -> set[str]:
 def _first_event(result: dict) -> dict:
     assert result["events"]
     return result["events"][0]
+
+
+def _assert_raw_event_contract(event: dict, source_kind: str) -> None:
+    assert _REQUIRED_EVENT_KEYS <= set(event)
+    assert set(event) <= _REQUIRED_EVENT_KEYS | _OPTIONAL_EVENT_KEYS
+    assert event["sourceKind"] == source_kind
+    assert isinstance(event["id"], str) and event["id"]
+    assert math.isfinite(event["timeSeconds"])
+    assert event["timeSeconds"] >= 0
+    assert 0 <= event["strength"] <= 1
+    assert isinstance(event["hits"], list) and event["hits"]
+    assert "features" not in event
+    for hit in event["hits"]:
+        assert set(hit) == {"kind", "confidence"}
+        assert isinstance(hit["kind"], str) and hit["kind"]
+        assert 0 <= hit["confidence"] <= 1
+    if "rawFeatureSummary" in event:
+        summary = event["rawFeatureSummary"]
+        assert set(summary) == _RAW_FEATURE_KEYS
+        for value in summary.values():
+            assert isinstance(value, (int, float)) and not isinstance(value, bool)
+            assert math.isfinite(float(value))
+    if "warnings" in event:
+        assert isinstance(event["warnings"], list)
+        assert all(isinstance(value, str) and value for value in event["warnings"])
 
 
 def test_low_frequency_pulse_is_broadly_classified_as_kick(
@@ -342,6 +383,32 @@ def test_full_mix_emits_honesty_warning(tmp_path: Path) -> None:
     assert "drums stem" in warning
 
 
+def test_events_match_canonical_raw_event_contract(tmp_path: Path) -> None:
+    source_kind = "isolated_drums_v2"
+    audio = _sine_pulse(
+        70.0,
+        time_seconds=0.35,
+        duration_seconds=2.0,
+    )
+    audio += _band_noise_pulse(
+        7_000.0,
+        16_000.0,
+        time_seconds=1.2,
+        pulse_seconds=0.04,
+        duration_seconds=2.0,
+        seed=10,
+    )
+    path = _write_wav(tmp_path / "contract.wav", audio)
+
+    result = transcribe_percussion_audio(path, source_kind=source_kind)
+
+    assert result["events"]
+    assert result["sourceKind"] == source_kind
+    for event in result["events"]:
+        _assert_raw_event_contract(event, result["sourceKind"])
+        assert "rawFeatureSummary" in event
+
+
 def test_result_schema_is_bounded_finite_and_path_free(
     tmp_path: Path,
 ) -> None:
@@ -369,15 +436,9 @@ def test_result_schema_is_bounded_finite_and_path_free(
     assert str(tmp_path) not in encoded
     assert "samples" not in encoded.lower()
     for index, event in enumerate(result["events"], 1):
+        _assert_raw_event_contract(event, result["sourceKind"])
         assert event["id"] == f"r{index:06d}"
-        assert math.isfinite(event["timeSeconds"])
-        assert event["timeSeconds"] >= 0
-        assert 0 <= event["strength"] <= 1
-        assert event["hits"]
         assert len(event["hits"]) <= 3
-        for hit in event["hits"]:
-            assert hit["kind"]
-            assert 0 <= hit["confidence"] <= 1
 
 
 def test_input_audio_is_never_modified(tmp_path: Path) -> None:
