@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 from datetime import datetime
 from importlib import metadata
@@ -26,7 +27,8 @@ from .constants import (
     RuntimeLockError,
     load_runtime_lock,
 )
-from .paths import resolve_contained, trusted_root
+from .model_artifacts import _verify_assets
+from .paths import resolve_contained, safe_posix_relative, trusted_root
 from .protocol import (
     EXIT_MODEL_DOWNLOAD_REQUIRED,
     EXIT_MODEL_VERIFICATION_FAILED,
@@ -132,17 +134,27 @@ def _parse_verified_at(value: object) -> None:
         )
 
 
-def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
-    manifest_path = cache_root.joinpath(*READINESS_RELATIVE_PATH.split("/"))
-    if not manifest_path.exists():
-        raise WorkerError(
-            "MODEL_DOWNLOAD_REQUIRED",
-            "The verified htdemucs model is not available in this runtime.",
-            EXIT_MODEL_DOWNLOAD_REQUIRED,
-            retryable=True,
-        )
+def _validate_readiness_path(cache_root: Path, manifest_path: Path) -> Path:
+    current = cache_root
+    for part in Path(READINESS_RELATIVE_PATH).parts[:-1]:
+        current = current / part
+        try:
+            value = os.lstat(current)
+        except OSError as exc:
+            raise WorkerError(
+                "READINESS_MANIFEST_INVALID",
+                "The model readiness manifest parent is unavailable.",
+                EXIT_MODEL_VERIFICATION_FAILED,
+            ) from exc
+        if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+            raise WorkerError(
+                "READINESS_MANIFEST_INVALID",
+                "The model readiness manifest parent is unsafe.",
+                EXIT_MODEL_VERIFICATION_FAILED,
+            )
     try:
-        resolved_manifest = manifest_path.resolve(strict=True)
+        lexical = os.lstat(manifest_path)
+        resolved = manifest_path.resolve(strict=True)
     except OSError as exc:
         raise WorkerError(
             "READINESS_MANIFEST_INVALID",
@@ -150,15 +162,30 @@ def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
             EXIT_MODEL_VERIFICATION_FAILED,
         ) from exc
     if (
-        manifest_path.is_symlink()
-        or not resolved_manifest.is_relative_to(cache_root)
-        or not resolved_manifest.is_file()
+        stat.S_ISLNK(lexical.st_mode)
+        or not stat.S_ISREG(lexical.st_mode)
+        or not resolved.is_relative_to(cache_root)
+        or os.path.normcase(str(resolved)) != os.path.normcase(str(manifest_path))
     ):
         raise WorkerError(
             "READINESS_MANIFEST_INVALID",
             "The model readiness manifest is not safely contained.",
             EXIT_MODEL_VERIFICATION_FAILED,
         )
+    return resolved
+
+
+def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
+    root = trusted_root(str(cache_root))
+    manifest_path = root.joinpath(*READINESS_RELATIVE_PATH.split("/"))
+    if not manifest_path.exists():
+        raise WorkerError(
+            "MODEL_DOWNLOAD_REQUIRED",
+            "The verified htdemucs model is not available in this runtime.",
+            EXIT_MODEL_DOWNLOAD_REQUIRED,
+            retryable=True,
+        )
+    resolved_manifest = _validate_readiness_path(root, manifest_path)
     try:
         payload = json.loads(resolved_manifest.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -220,33 +247,41 @@ def load_readiness_manifest(cache_root: Path) -> tuple[dict, Path, Path, Path]:
             "The model readiness manifest asset map is invalid.",
             EXIT_MODEL_VERIFICATION_FAILED,
         )
-    bag_path = resolve_contained(
-        cache_root,
+    bag_relative = safe_posix_relative(assets["bag"], error_code="MODEL_ASSET_INVALID")
+    checkpoint_relative = safe_posix_relative(
+        assets["checkpoint"], error_code="MODEL_ASSET_INVALID"
+    )
+    # Keep the existing containment error behavior before the cryptographic pass.
+    resolve_contained(
+        root,
         assets["bag"],
         require_regular_file=True,
         error_code="MODEL_ASSET_INVALID",
     )
-    checkpoint_path = resolve_contained(
-        cache_root,
+    resolve_contained(
+        root,
         assets["checkpoint"],
         require_regular_file=True,
         error_code="MODEL_ASSET_INVALID",
     )
-    try:
-        size = checkpoint_path.stat().st_size
-    except OSError as exc:
+    bag_lexical = root.joinpath(*bag_relative.parts)
+    checkpoint_lexical = root.joinpath(*checkpoint_relative.parts)
+    verified = _verify_assets(root, bag_lexical, checkpoint_lexical)
+    if (
+        verified.bag_relative != assets["bag"]
+        or verified.checkpoint_relative != assets["checkpoint"]
+    ):
         raise WorkerError(
-            "MODEL_ASSET_INVALID",
-            "The checkpoint file is unavailable.",
-            EXIT_MODEL_VERIFICATION_FAILED,
-        ) from exc
-    if size != CHECKPOINT_SIZE_BYTES:
-        raise WorkerError(
-            "CHECKPOINT_SIZE_MISMATCH",
-            "The cached checkpoint size does not match the approved model.",
+            "READINESS_MANIFEST_INVALID",
+            "The model readiness manifest asset identity changed.",
             EXIT_MODEL_VERIFICATION_FAILED,
         )
-    return payload, resolved_manifest, bag_path, checkpoint_path
+    return (
+        payload,
+        resolved_manifest,
+        verified.bag.resolved_path,
+        verified.checkpoint.resolved_path,
+    )
 
 
 def model_probe(cache_root_text: str) -> dict:
@@ -262,7 +297,7 @@ def model_probe(cache_root_text: str) -> dict:
         "modelRevision": payload["modelRevision"],
         "checkpointFile": payload["checkpointFile"],
         "checkpointSizeBytes": checkpoint_path.stat().st_size,
-        "checkpointSha256": payload["checkpointSha256"],
+        "checkpointSha256": CHECKPOINT_SHA256,
         "verifiedAt": payload["verifiedAt"],
         "offlineReady": True,
         "readinessManifest": READINESS_RELATIVE_PATH,

@@ -3,7 +3,7 @@ import hashlib, json, os, sys, types
 from pathlib import Path
 import pytest
 ROOT=Path(__file__).resolve().parents[1]; WR=ROOT/'runtimes'/'demucs_worker'; sys.path.insert(0,str(WR/'src'))
-from popex_demucs_worker import cli,commands,constants,model_artifacts,probes,separation_command
+from popex_demucs_worker import cli,commands,constants,model_artifacts,paths,probes,separation_command
 LOCK={'demucs':'4.1.0','torch':'test-torch','huggingface_hub':'test-hub','safetensors':'test-safe','PyYAML':'test-yaml'}; PROFILE='test-linux-cpu-v1'; OPT={'demucs','demucs.api','demucs.apply','demucs.hf','torch','safetensors','huggingface_hub','yaml'}
 RUN_ID='0123456789abcdef0123456789abcdef'; OTHER_RUN_ID='fedcba9876543210fedcba9876543210'
 
@@ -179,3 +179,82 @@ def test_readiness_parent_symlink_escape_rejected(capsys,tmp_path):
 
 def test_allow_nan_false_fallback(capsys,monkeypatch):
  monkeypatch.setattr(cli,'runtime_probe',lambda:{'bad':float('nan')});code,e,o=run(capsys,'--protocol-version','1','runtime-probe');assert(code,e['error']['code'])==(50,'INTERNAL_ERROR');assert o.out.count('\n')==1
+
+
+def test_readiness_parent_swap_after_temporary_write_is_contained(monkeypatch,tmp_path,model):
+ yamlmod(monkeypatch);hub(monkeypatch,downloader(model[0],[]));outside=tmp_path.parent/(tmp_path.name+'-outside');outside.mkdir()
+ real_replace=paths._replace_child;swapped={'done':False}
+ def swap(parent,source,destination,directory_fd):
+  if not swapped['done']:
+   swapped['done']=True;old=parent.with_name(parent.name+'-old');parent.rename(old);parent.symlink_to(outside,target_is_directory=True)
+  return real_replace(parent,source,destination,directory_fd)
+ monkeypatch.setattr(paths,'_replace_child',swap)
+ with pytest.raises(Exception):commands.prepare_model(str(tmp_path))
+ assert not (outside/constants.READINESS_RELATIVE_PATH.split('/')[-1]).exists()
+ assert not list(outside.glob('*.tmp'))
+ old=tmp_path/'readiness-old'
+ assert not (old/constants.READINESS_RELATIVE_PATH.split('/')[-1]).exists()
+ assert not list(old.glob('*.tmp'))
+
+
+@pytest.mark.parametrize('kind',['symlink','directory'])
+def test_preexisting_unsafe_readiness_target_is_never_overwritten(monkeypatch,tmp_path,model,kind):
+ parent=tmp_path/'readiness';parent.mkdir();target=parent/Path(constants.READINESS_RELATIVE_PATH).name;outside=tmp_path/'outside-readiness.json';outside.write_bytes(b'outside')
+ if kind=='symlink':target.symlink_to(outside)
+ else:target.mkdir()
+ yamlmod(monkeypatch);hub(monkeypatch,downloader(model[0],[]))
+ with pytest.raises(Exception):commands.prepare_model(str(tmp_path))
+ assert outside.read_bytes()==b'outside'
+ if kind=='symlink':assert target.is_symlink()
+ else:assert target.is_dir()
+ assert not list(parent.glob('*.tmp'))
+
+
+def test_passive_hash_detects_checkpoint_change_during_read(monkeypatch,tmp_path,model):
+ ready(monkeypatch,tmp_path,model[0]);payload=json.loads((tmp_path/constants.READINESS_RELATIVE_PATH).read_text());checkpoint=tmp_path/payload['cacheAssets']['checkpoint'];real=model_artifacts._sha256
+ def mutate(path):
+  digest=real(path);path.write_bytes(bytes(x^0x33 for x in model[0]));return digest
+ monkeypatch.setattr(model_artifacts,'_sha256',mutate)
+ with pytest.raises(Exception) as caught:probes.model_probe(str(tmp_path))
+ assert getattr(caught.value,'code',None)=='CHECKPOINT_CHANGED_DURING_VERIFICATION'
+
+
+def test_post_publication_checkpoint_change_removes_new_readiness(monkeypatch,tmp_path,model):
+ yamlmod(monkeypatch);hub(monkeypatch,downloader(model[0],[]));implementation_globals=commands.prepare_model.__globals__;real=implementation_globals['_revalidate_assets'];calls={'count':0}
+ def mutate_on_post(cache_root,verified):
+  calls['count']+=1
+  if calls['count']==2:verified.checkpoint.lexical_path.write_bytes(bytes(x^0x55 for x in model[0]))
+  return real(cache_root,verified)
+ monkeypatch.setitem(implementation_globals,'_revalidate_assets',mutate_on_post)
+ with pytest.raises(Exception):commands.prepare_model(str(tmp_path))
+ assert not (tmp_path/constants.READINESS_RELATIVE_PATH).exists()
+ assert not list((tmp_path/'readiness').glob('*.tmp'))
+
+
+def test_unchanged_valid_cache_still_probes_successfully(monkeypatch,tmp_path,model):
+ result,_=ready(monkeypatch,tmp_path,model[0]);probe=probes.model_probe(str(tmp_path))
+ assert result['offlineReady'] is True and probe['offlineReady'] is True
+ assert probe['checkpointSha256']==model[1]
+
+
+def test_checkpoint_hashing_streams_84mb_scale(monkeypatch,tmp_path):
+ checkpoint=tmp_path/'large.safetensors';checkpoint.write_bytes(b'');checkpoint.open('r+b').truncate(84_025_440);real_open=Path.open;sizes=[]
+ class Tracking:
+  def __init__(self,handle):self.handle=handle
+  def __enter__(self):self.handle.__enter__();return self
+  def __exit__(self,*args):return self.handle.__exit__(*args)
+  def read(self,size=-1):sizes.append(size);return self.handle.read(size)
+ def tracked(path,*args,**kwargs):
+  handle=real_open(path,*args,**kwargs)
+  return Tracking(handle) if path==checkpoint and args and args[0]=='rb' else handle
+ monkeypatch.setattr(Path,'open',tracked)
+ digest=model_artifacts._sha256(checkpoint)
+ assert digest==hashlib.sha256(b'\x00'*84_025_440).hexdigest()
+ assert sizes and -1 not in sizes and max(sizes)<=1024*1024 and len(sizes)>2
+
+
+def test_readiness_publication_fallback_without_directory_fd(monkeypatch,tmp_path,model):
+ monkeypatch.setattr(paths,'_open_directory_fd',lambda parent,expected:None);result,_=ready(monkeypatch,tmp_path,model[0])
+ assert result['offlineReady'] is True
+ assert probes.model_probe(str(tmp_path))['offlineReady'] is True
+ assert not list((tmp_path/'readiness').glob('*.tmp'))
