@@ -23,7 +23,7 @@ _SEPARATION_RELATIVE_PATH = "stems/stem-separation.json"
 _JOB_ID_PATTERN = re.compile(r"[a-f0-9]{32}")
 _SAFE_SLUG_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _SAFE_ID_PATTERN = re.compile(r"[a-z][a-z0-9_-]{0,63}")
-_OPEN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_OPEN_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
 _METADATA_KEY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,127}")
 _SUBDIVISION_PATTERN = re.compile(r"(?:[1-9][0-9]*)(?:/[1-9][0-9]*)?(?:[TDtd])?")
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
@@ -37,6 +37,7 @@ _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _MAX_EVENTS_PER_COLLECTION = 100_000
 _MAX_ALIGNMENT_CANDIDATES = 200_000
 _MAX_WARNINGS = 128
+_MAX_CANDIDATE_WARNINGS = 8
 _MAX_WARNING_LENGTH = 500
 _MAX_NOTE_NAME_LENGTH = 64
 _MAX_VERSION_LENGTH = 256
@@ -46,7 +47,8 @@ _MAX_FEATURE_KEYS = 64
 _MAX_METADATA_KEYS = 128
 _MAX_METADATA_LIST = 128
 _MAX_METADATA_STRING = 1024
-_MAX_METADATA_DEPTH = 5
+_MAX_METADATA_DEPTH = 6
+_MAX_INDEX = 2_147_483_647
 
 _FORBIDDEN_METADATA_KEYS = frozenset(
     {
@@ -97,61 +99,44 @@ def validate_raw_transcription(payload: Mapping[str, Any]) -> dict[str, Any]:
         optional={"sourceSeparation"},
         label="raw transcription",
     )
-
     schema_version = _integer(value["schemaVersion"], "schemaVersion")
     if schema_version != RAW_TRANSCRIPTION_SCHEMA_VERSION:
         raise RawTranscriptionValidationError(
             "Unsupported raw-transcription schema version."
         )
 
-    transcription_version = _version(
-        value["transcriptionVersion"], "transcriptionVersion"
-    )
-    created_at = _utc_timestamp(value["createdAt"], "createdAt")
-    source_analysis = _source_analysis(value["sourceAnalysis"])
-    source_separation = (
-        _source_separation(value["sourceSeparation"])
-        if "sourceSeparation" in value
-        else None
-    )
-    algorithms = _algorithms(value["algorithms"])
+    result: dict[str, Any] = {
+        "schemaVersion": RAW_TRANSCRIPTION_SCHEMA_VERSION,
+        "transcriptionVersion": _version(
+            value["transcriptionVersion"], "transcriptionVersion"
+        ),
+        "createdAt": _utc_timestamp(value["createdAt"], "createdAt"),
+        "sourceAnalysis": _source_analysis(value["sourceAnalysis"]),
+    }
+    if "sourceSeparation" in value:
+        result["sourceSeparation"] = _source_separation(value["sourceSeparation"])
+    result["algorithms"] = _algorithms(value["algorithms"])
 
     pitched = _pitched_events(value["pitchedNoteEvents"])
     percussion = _percussion_events(value["percussionEvents"])
-    event_times: dict[str, float] = {}
+    event_index: dict[str, tuple[str, float]] = {}
     for event in pitched:
         event_id = event["id"]
-        if event_id in event_times:
+        if event_id in event_index:
             raise RawTranscriptionValidationError("Duplicate transcription event ID.")
-        event_times[event_id] = event["startSeconds"]
+        event_index[event_id] = ("pitched", event["startSeconds"])
     for event in percussion:
         event_id = event["id"]
-        if event_id in event_times:
+        if event_id in event_index:
             raise RawTranscriptionValidationError("Duplicate transcription event ID.")
-        event_times[event_id] = event["timeSeconds"]
+        event_index[event_id] = ("percussion", event["timeSeconds"])
 
-    alignment = _alignment_candidates(
-        value["alignmentCandidates"], event_times=event_times
+    result["pitchedNoteEvents"] = pitched
+    result["percussionEvents"] = percussion
+    result["alignmentCandidates"] = _alignment_candidates(
+        value["alignmentCandidates"], event_index=event_index
     )
-    warnings = _warnings(value["warnings"], "warnings")
-
-    result: dict[str, Any] = {
-        "schemaVersion": RAW_TRANSCRIPTION_SCHEMA_VERSION,
-        "transcriptionVersion": transcription_version,
-        "createdAt": created_at,
-        "sourceAnalysis": source_analysis,
-    }
-    if source_separation is not None:
-        result["sourceSeparation"] = source_separation
-    result.update(
-        {
-            "algorithms": algorithms,
-            "pitchedNoteEvents": pitched,
-            "percussionEvents": percussion,
-            "alignmentCandidates": alignment,
-            "warnings": warnings,
-        }
-    )
+    result["warnings"] = _warnings(value["warnings"], "warnings")
     _encoded_payload(result)
     return result
 
@@ -169,17 +154,15 @@ def write_raw_transcription(
     assert artifact_dir is not None
     destination = artifact_dir / "raw-events.json"
     _validate_existing_destination(destination, artifact_dir)
-
     temporary = artifact_dir / f".raw-events.json.{uuid4().hex}.tmp"
+    directory_snapshot = _directory_snapshot(artifact_dir, job_dir)
     try:
         _write_exclusive_regular_file(temporary, encoded, artifact_dir)
-        directory_snapshot = _directory_snapshot(artifact_dir, job_dir)
-        _replace_atomic(temporary, destination)
         if _directory_snapshot(artifact_dir, job_dir) != directory_snapshot:
             raise RawTranscriptionError(
                 "Raw transcription artifact directory changed during publication."
             )
-        _require_regular_file(destination, artifact_dir)
+        _replace_atomic(temporary, destination)
         _fsync_directory(artifact_dir)
     except RawTranscriptionError:
         raise
@@ -207,15 +190,11 @@ def load_raw_transcription(
     except FileNotFoundError:
         return None
     except OSError as exc:
-        raise RawTranscriptionError(
-            "Saved raw transcription is unavailable."
-        ) from exc
-
+        raise RawTranscriptionError("Saved raw transcription is unavailable.") from exc
     data = _read_stable_regular_file(destination, artifact_dir)
     try:
         payload = json.loads(
-            data.decode("utf-8"),
-            parse_constant=_reject_json_constant,
+            data.decode("utf-8"), parse_constant=_reject_json_constant
         )
     except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise RawTranscriptionError(
@@ -272,9 +251,7 @@ def _source_separation(value: Any) -> dict[str, Any]:
             source["separationVersion"], "sourceSeparation.separationVersion"
         ),
         "model": _metadata_mapping(
-            model,
-            label="sourceSeparation.model",
-            max_depth=_MAX_METADATA_DEPTH,
+            model, label="sourceSeparation.model", max_depth=_MAX_METADATA_DEPTH
         ),
     }
 
@@ -294,8 +271,9 @@ def _algorithms(value: Any) -> dict[str, Any]:
             raise RawTranscriptionValidationError(
                 f"Algorithm {component!r} must declare a version."
             )
-        version = _version(record["version"], f"algorithms.{component}.version")
-        output: dict[str, Any] = {"version": version}
+        output: dict[str, Any] = {
+            "version": _version(record["version"], f"algorithms.{component}.version")
+        }
         for key in sorted(record):
             if key == "version":
                 continue
@@ -368,14 +346,9 @@ def _pitched_event(value: Any, index: int) -> dict[str, Any]:
             minimum=0.0,
             exclusive_minimum=True,
         ),
-        "noteName": _text(
-            event["noteName"], f"{label}.noteName", _MAX_NOTE_NAME_LENGTH
-        ),
+        "noteName": _text(event["noteName"], f"{label}.noteName", _MAX_NOTE_NAME_LENGTH),
         "confidence": _number(
-            event["confidence"],
-            f"{label}.confidence",
-            minimum=0.0,
-            maximum=1.0,
+            event["confidence"], f"{label}.confidence", minimum=0.0, maximum=1.0
         ),
     }
     if "velocity" in event:
@@ -413,24 +386,12 @@ def _percussion_event(value: Any, index: int) -> dict[str, Any]:
             f"{label}.hits must contain between 1 and {_MAX_HITS_PER_EVENT} hits."
         )
     normalized_hits = [_hit(item, label, i) for i, item in enumerate(hits)]
-    normalized_hits.sort(
-        key=lambda item: (
-            item["kind"],
-            -item["confidence"],
-            json.dumps(item, ensure_ascii=False, sort_keys=True, allow_nan=False),
-        )
-    )
     output: dict[str, Any] = {
         "id": _event_id(event["id"], f"{label}.id"),
         "sourceKind": _slug(event["sourceKind"], f"{label}.sourceKind"),
-        "timeSeconds": _number(
-            event["timeSeconds"], f"{label}.timeSeconds", minimum=0.0
-        ),
+        "timeSeconds": _number(event["timeSeconds"], f"{label}.timeSeconds", minimum=0.0),
         "strength": _number(
-            event["strength"],
-            f"{label}.strength",
-            minimum=0.0,
-            maximum=1.0,
+            event["strength"], f"{label}.strength", minimum=0.0, maximum=1.0
         ),
         "hits": normalized_hits,
     }
@@ -457,18 +418,12 @@ def _hit(value: Any, event_label: str, index: int) -> dict[str, Any]:
     output: dict[str, Any] = {
         "kind": _slug(hit["kind"], f"{label}.kind"),
         "confidence": _number(
-            hit["confidence"],
-            f"{label}.confidence",
-            minimum=0.0,
-            maximum=1.0,
+            hit["confidence"], f"{label}.confidence", minimum=0.0, maximum=1.0
         ),
     }
     if "strength" in hit:
         output["strength"] = _number(
-            hit["strength"],
-            f"{label}.strength",
-            minimum=0.0,
-            maximum=1.0,
+            hit["strength"], f"{label}.strength", minimum=0.0, maximum=1.0
         )
     if "label" in hit:
         output["label"] = _text(hit["label"], f"{label}.label", 128)
@@ -495,21 +450,28 @@ def _optional_common_event_fields(
 def _alignment_candidates(
     value: Any,
     *,
-    event_times: Mapping[str, float],
+    event_index: Mapping[str, tuple[str, float]],
 ) -> list[dict[str, Any]]:
     candidates = _sequence(value, "alignmentCandidates")
     if len(candidates) > _MAX_ALIGNMENT_CANDIDATES:
         raise RawTranscriptionValidationError("Too many alignment candidates.")
     normalized = [
-        _alignment_candidate(item, index, event_times)
+        _alignment_candidate(item, index, event_index)
         for index, item in enumerate(candidates)
     ]
     normalized.sort(
         key=lambda item: (
             item["rawTimeSeconds"],
+            item["eventType"],
             item["eventId"],
             item.get("beatIndex", -1),
-            str(item.get("subdivision", "")),
+            (
+                0,
+                item.get("subdivision", -1),
+            )
+            if isinstance(item.get("subdivision"), int)
+            else (1, str(item.get("subdivision", ""))),
+            item.get("subdivisionIndex", -1),
             json.dumps(item, ensure_ascii=False, sort_keys=True, allow_nan=False),
         )
     )
@@ -519,79 +481,162 @@ def _alignment_candidates(
 def _alignment_candidate(
     value: Any,
     index: int,
-    event_times: Mapping[str, float],
+    event_index: Mapping[str, tuple[str, float]],
 ) -> dict[str, Any]:
     label = f"alignmentCandidates[{index}]"
     candidate = _mapping(value, label)
     _require_keys(
         candidate,
-        required={"eventId", "rawTimeSeconds"},
+        required={"eventId", "eventType", "rawTimeSeconds"},
         optional={
             "beatIndex",
             "subdivision",
+            "subdivisionIndex",
             "alignedTimeSeconds",
             "offsetSeconds",
             "confidence",
+            "measureIndex",
+            "beatInMeasure",
+            "warnings",
             "collection",
             "eventCollection",
         },
         label=label,
     )
     event_id = _event_id(candidate["eventId"], f"{label}.eventId")
-    if event_id not in event_times:
+    if event_id not in event_index:
         raise RawTranscriptionValidationError(
             f"{label}.eventId does not reference a raw event."
+        )
+    expected_type, expected_time = event_index[event_id]
+    event_type = _alignment_event_type(candidate["eventType"], f"{label}.eventType")
+    if event_type != expected_type:
+        raise RawTranscriptionValidationError(
+            f"{label}.eventType does not match the referenced raw event collection."
         )
     raw_time = _number(
         candidate["rawTimeSeconds"], f"{label}.rawTimeSeconds", minimum=0.0
     )
-    if raw_time != event_times[event_id]:
+    if raw_time != expected_time:
         raise RawTranscriptionValidationError(
             f"{label}.rawTimeSeconds must retain the referenced raw event time."
         )
     output: dict[str, Any] = {
         "eventId": event_id,
+        "eventType": event_type,
         "rawTimeSeconds": raw_time,
     }
+
+    if "confidence" in candidate:
+        output["confidence"] = _number(
+            candidate["confidence"], f"{label}.confidence", minimum=0.0, maximum=1.0
+        )
+    if "warnings" in candidate:
+        output["warnings"] = _candidate_warnings(
+            candidate["warnings"], f"{label}.warnings"
+        )
+
     if "beatIndex" in candidate:
         output["beatIndex"] = _integer_range(
-            candidate["beatIndex"], f"{label}.beatIndex", 0, 2_147_483_647
+            candidate["beatIndex"], f"{label}.beatIndex", 0, _MAX_INDEX
         )
     if "subdivision" in candidate:
         output["subdivision"] = _subdivision(
             candidate["subdivision"], f"{label}.subdivision"
         )
-    if "alignedTimeSeconds" in candidate:
-        output["alignedTimeSeconds"] = _number(
+    if "subdivisionIndex" in candidate:
+        subdivision_index = _integer_range(
+            candidate["subdivisionIndex"],
+            f"{label}.subdivisionIndex",
+            0,
+            _MAX_INDEX,
+        )
+        subdivision = output.get("subdivision")
+        if not isinstance(subdivision, int):
+            raise RawTranscriptionValidationError(
+                f"{label}.subdivisionIndex requires an integer subdivision."
+            )
+        if subdivision_index >= subdivision:
+            raise RawTranscriptionValidationError(
+                f"{label}.subdivisionIndex must be less than subdivision."
+            )
+        output["subdivisionIndex"] = subdivision_index
+
+    has_aligned = "alignedTimeSeconds" in candidate
+    has_offset = "offsetSeconds" in candidate
+    if has_aligned != has_offset:
+        raise RawTranscriptionValidationError(
+            f"{label}.alignedTimeSeconds and offsetSeconds must appear together."
+        )
+    if has_aligned:
+        aligned = _number(
             candidate["alignedTimeSeconds"],
             f"{label}.alignedTimeSeconds",
             minimum=0.0,
         )
-    if "offsetSeconds" in candidate:
-        output["offsetSeconds"] = _number(
-            candidate["offsetSeconds"], f"{label}.offsetSeconds"
-        )
-    if "confidence" in candidate:
-        output["confidence"] = _number(
-            candidate["confidence"],
-            f"{label}.confidence",
-            minimum=0.0,
-            maximum=1.0,
-        )
-    if "alignedTimeSeconds" in output and "offsetSeconds" in output:
-        if not math.isclose(
-            output["alignedTimeSeconds"] - raw_time,
-            output["offsetSeconds"],
-            rel_tol=1e-9,
-            abs_tol=1e-9,
-        ):
+        offset = _number(candidate["offsetSeconds"], f"{label}.offsetSeconds")
+        if not math.isclose(raw_time - aligned, offset, rel_tol=1e-9, abs_tol=1e-9):
             raise RawTranscriptionValidationError(
-                f"{label}.offsetSeconds does not match the advisory aligned time."
+                f"{label}.offsetSeconds does not match rawTimeSeconds - alignedTimeSeconds."
             )
+        output["alignedTimeSeconds"] = aligned
+        output["offsetSeconds"] = offset
+
+    has_measure = "measureIndex" in candidate
+    has_beat_in_measure = "beatInMeasure" in candidate
+    if has_measure != has_beat_in_measure:
+        raise RawTranscriptionValidationError(
+            f"{label}.measureIndex and beatInMeasure must appear together."
+        )
+    if has_measure:
+        if "beatIndex" not in output:
+            raise RawTranscriptionValidationError(
+                f"{label}.measure fields require beatIndex."
+            )
+        output["measureIndex"] = _integer_range(
+            candidate["measureIndex"], f"{label}.measureIndex", 0, _MAX_INDEX
+        )
+        output["beatInMeasure"] = _integer_range(
+            candidate["beatInMeasure"], f"{label}.beatInMeasure", 1, _MAX_INDEX
+        )
+
+    grid_fields = {"beatIndex", "subdivision", "subdivisionIndex"}
+    present_grid = grid_fields.intersection(output)
+    if present_grid and present_grid != grid_fields:
+        raise RawTranscriptionValidationError(
+            f"{label} has incomplete subdivision alignment metadata."
+        )
+    if has_aligned and present_grid != grid_fields:
+        raise RawTranscriptionValidationError(
+            f"{label}.alignedTimeSeconds requires complete grid metadata."
+        )
+    if present_grid == grid_fields and not has_aligned:
+        raise RawTranscriptionValidationError(
+            f"{label}.grid metadata requires an aligned time and offset."
+        )
+
     for key in ("collection", "eventCollection"):
         if key in candidate:
             output[key] = _slug(candidate[key], f"{label}.{key}")
     return output
+
+
+def _alignment_event_type(value: Any, label: str) -> str:
+    if value not in {"pitched", "percussion"}:
+        raise RawTranscriptionValidationError(
+            f"{label} must be pitched or percussion."
+        )
+    return value
+
+
+def _candidate_warnings(value: Any, label: str) -> list[str]:
+    warnings = _sequence(value, label)
+    if len(warnings) > _MAX_CANDIDATE_WARNINGS:
+        raise RawTranscriptionValidationError(f"{label} contains too many warnings.")
+    return [
+        _text(item, f"{label}[{index}]", _MAX_WARNING_LENGTH)
+        for index, item in enumerate(warnings)
+    ]
 
 
 def _feature_summary(value: Any, label: str) -> dict[str, Any]:
@@ -613,10 +658,7 @@ def _metadata_mapping(
     for key in sorted(value):
         _metadata_key(key, label)
         output[key] = _metadata_value(
-            value[key],
-            label=f"{label}.{key}",
-            depth=1,
-            max_depth=max_depth,
+            value[key], label=f"{label}.{key}", depth=1, max_depth=max_depth
         )
     return output
 
@@ -653,9 +695,7 @@ def _metadata_value(
                 max_depth=max_depth,
             )
         return output
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         if len(value) > _MAX_METADATA_LIST:
             raise RawTranscriptionValidationError(f"{label} contains too many values.")
         return [
@@ -773,9 +813,7 @@ def _reject_unsafe_path_text(value: str, label: str) -> None:
             or candidate.lower().startswith("file:")
         ):
             raise RawTranscriptionValidationError(f"{label} contains a machine path.")
-        parts = tuple(
-            part for part in normalized.split("/") if part not in {"", "."}
-        )
+        parts = tuple(part for part in normalized.split("/") if part not in {"", "."})
         if ".." in parts or _MACHINE_COMPONENT_PATTERN.search(normalized):
             raise RawTranscriptionValidationError(
                 f"{label} contains unsafe traversal or a machine path."
@@ -850,9 +888,7 @@ def _mapping(value: Any, label: str) -> Mapping[str, Any]:
 
 
 def _sequence(value: Any, label: str) -> list[Any]:
-    if not isinstance(value, Sequence) or isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise RawTranscriptionValidationError(f"{label} must be an array.")
     return list(value)
 
@@ -865,22 +901,14 @@ def _require_keys(
     label: str,
 ) -> None:
     keys = set(value)
-    missing = required - keys
-    unknown = keys - required - optional
-    if missing or unknown:
+    if required - keys or keys - required - optional:
         raise RawTranscriptionValidationError(f"{label} has invalid fields.")
 
 
 def _encoded_payload(payload: Mapping[str, Any]) -> bytes:
     try:
         data = (
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-                allow_nan=False,
-            )
-            + "\n"
+            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise RawTranscriptionValidationError(
@@ -903,29 +931,19 @@ def _secure_job_root(job_id: str, settings: Settings) -> Path:
     try:
         lexical_exports = settings.exports_dir
         exports_info = lexical_exports.lstat()
-        if stat.S_ISLNK(exports_info.st_mode) or not stat.S_ISDIR(
-            exports_info.st_mode
-        ):
-            raise RawTranscriptionError(
-                "Raw transcription job directory is unsafe."
-            )
+        if stat.S_ISLNK(exports_info.st_mode) or not stat.S_ISDIR(exports_info.st_mode):
+            raise RawTranscriptionError("Raw transcription job directory is unsafe.")
         exports_root = lexical_exports.resolve(strict=True)
         lexical_job = lexical_exports / job_id
         job_info = lexical_job.lstat()
         if stat.S_ISLNK(job_info.st_mode) or not stat.S_ISDIR(job_info.st_mode):
-            raise RawTranscriptionError(
-                "Raw transcription job directory is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription job directory is unsafe.")
         job_root = lexical_job.resolve(strict=True)
         if job_root.parent != exports_root:
-            raise RawTranscriptionError(
-                "Raw transcription job directory is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription job directory is unsafe.")
         expected = secure_job_dir(settings, job_id).resolve(strict=True)
         if expected != job_root:
-            raise RawTranscriptionError(
-                "Raw transcription job directory is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription job directory is unsafe.")
         return job_root
     except (RawTranscriptionError, RawTranscriptionValidationError):
         raise
@@ -956,28 +974,20 @@ def _artifact_directory(job_dir: Path, *, create: bool) -> Path | None:
     return directory
 
 
-def _directory_snapshot(
-    directory: Path, job_dir: Path
-) -> tuple[int, int, int]:
+def _directory_snapshot(directory: Path, job_dir: Path) -> tuple[int, int, int]:
     try:
         info = directory.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise RawTranscriptionError(
-                "Raw transcription directory is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription directory is unsafe.")
         resolved = directory.resolve(strict=True)
         root = job_dir.resolve(strict=True)
         if resolved.parent != root:
-            raise RawTranscriptionError(
-                "Raw transcription directory is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription directory is unsafe.")
         return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
     except RawTranscriptionError:
         raise
     except OSError as exc:
-        raise RawTranscriptionError(
-            "Raw transcription directory is unsafe."
-        ) from exc
+        raise RawTranscriptionError("Raw transcription directory is unsafe.") from exc
 
 
 def _validate_existing_destination(destination: Path, artifact_dir: Path) -> None:
@@ -992,13 +1002,8 @@ def _validate_existing_destination(destination: Path, artifact_dir: Path) -> Non
     _require_regular_file(destination, artifact_dir)
 
 
-def _write_exclusive_regular_file(
-    path: Path,
-    data: bytes,
-    artifact_dir: Path,
-) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+def _write_exclusive_regular_file(path: Path, data: bytes, artifact_dir: Path) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd: int | None = None
     try:
         fd = os.open(path, flags, 0o600)
@@ -1009,8 +1014,7 @@ def _write_exclusive_regular_file(
                 raise OSError("Short write")
             offset += written
         os.fsync(fd)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise RawTranscriptionError(
                 "Temporary raw transcription file is unsafe."
             )
@@ -1039,6 +1043,7 @@ def _read_stable_regular_file(path: Path, artifact_dir: Path) -> bytes:
     before = _require_regular_file(path, artifact_dir)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     fd: int | None = None
+    after_open: os.stat_result | None = None
     try:
         fd = os.open(path, flags)
         opened = os.fstat(fd)
@@ -1049,18 +1054,14 @@ def _read_stable_regular_file(path: Path, artifact_dir: Path) -> bytes:
         chunks: list[bytes] = []
         total = 0
         while True:
-            chunk = os.read(
-                fd,
-                min(1024 * 1024, _MAX_ARTIFACT_BYTES + 1 - total),
-            )
+            remaining = _MAX_ARTIFACT_BYTES + 1 - total
+            chunk = os.read(fd, min(1024 * 1024, remaining))
             if not chunk:
                 break
             chunks.append(chunk)
             total += len(chunk)
             if total > _MAX_ARTIFACT_BYTES:
-                raise RawTranscriptionError(
-                    "Saved raw transcription is too large."
-                )
+                raise RawTranscriptionError("Saved raw transcription is too large.")
         after_open = os.fstat(fd)
     except RawTranscriptionError:
         raise
@@ -1072,10 +1073,8 @@ def _read_stable_regular_file(path: Path, artifact_dir: Path) -> bytes:
         if fd is not None:
             os.close(fd)
     after = _require_regular_file(path, artifact_dir)
-    if (
-        _snapshot(before) != _snapshot(after_open)
-        or _snapshot(before) != _snapshot(after)
-    ):
+    assert after_open is not None
+    if _snapshot(before) != _snapshot(after_open) or _snapshot(before) != _snapshot(after):
         raise RawTranscriptionError(
             "Saved raw transcription changed during validation."
         )
@@ -1086,15 +1085,11 @@ def _require_regular_file(path: Path, artifact_dir: Path) -> os.stat_result:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise RawTranscriptionError(
-                "Raw transcription artifact path is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription artifact path is unsafe.")
         resolved = path.resolve(strict=True)
         root = artifact_dir.resolve(strict=True)
         if resolved.parent != root:
-            raise RawTranscriptionError(
-                "Raw transcription artifact path is unsafe."
-            )
+            raise RawTranscriptionError("Raw transcription artifact path is unsafe.")
         return info
     except RawTranscriptionError:
         raise
@@ -1107,14 +1102,11 @@ def _require_regular_file(path: Path, artifact_dir: Path) -> os.stat_result:
 def _remove_temporary(path: Path, artifact_dir: Path) -> None:
     try:
         info = path.lstat()
-    except FileNotFoundError:
-        return
-    except OSError:
+    except (FileNotFoundError, OSError):
         return
     if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
         try:
-            resolved = path.resolve(strict=True)
-            if resolved.parent == artifact_dir.resolve(strict=True):
+            if path.resolve(strict=True).parent == artifact_dir.resolve(strict=True):
                 path.unlink()
         except OSError:
             pass
