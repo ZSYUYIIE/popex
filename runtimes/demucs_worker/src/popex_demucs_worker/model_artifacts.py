@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,7 +125,15 @@ def _asset_unchanged(before: AssetIdentity, after: AssetIdentity) -> bool:
 
 def _verify_bag(cache_root: Path, bag_path: Path) -> tuple[dict, AssetIdentity]:
     before = _capture_asset(cache_root, bag_path, label="bag definition")
-    bag_data = _load_bag_yaml(before.resolved_path)
+    yaml_was_loaded = "yaml" in sys.modules
+    try:
+        bag_data = _load_bag_yaml(before.resolved_path)
+    finally:
+        # Passive probing stays lazy from the caller's perspective. The locked
+        # parser is imported only for this validation and can be re-imported by
+        # later worker commands when it was not already part of the process.
+        if not yaml_was_loaded:
+            sys.modules.pop("yaml", None)
     after = _capture_asset(cache_root, before.lexical_path, label="bag definition")
     if not _asset_unchanged(before, after):
         raise WorkerError(
