@@ -1,0 +1,99 @@
+name: Demucs model lifecycle fault validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/demucs-model-lifecycle-faults.yml"
+      - "scripts/validate_demucs_model_lifecycle_faults.py"
+      - "tests/test_demucs_model_lifecycle_faults.py"
+      - "docs/reviews/demucs-model-lifecycle-faults.md"
+      - "runtimes/demucs_worker/**"
+      - "app/separation_runtime.py"
+      - "app/separation_service.py"
+      - "app/separation_capability.py"
+      - "app/db.py"
+      - "app/main.py"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-model-lifecycle-faults:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+      HF_HUB_DISABLE_UPDATE_CHECK: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      PYTHONNOUSERSITE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      POPEX_FAULT_TMP: ${{ runner.temp }}/popex-model-lifecycle-faults
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install base test dependencies only
+        run: pip install -e '.[dev]'
+
+      - name: Prepare isolated fault workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf -- "$POPEX_FAULT_TMP"
+          mkdir -p -- "$POPEX_FAULT_TMP"
+
+      - name: Run deterministic offline fault characterization
+        id: characterization
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/validate_demucs_model_lifecycle_faults.py \
+            | tee "$POPEX_FAULT_TMP/summary.json"
+
+      - name: Compile application, tests, and validator
+        run: >-
+          python -m compileall -q app tests
+          scripts/validate_demucs_model_lifecycle_faults.py
+
+      - name: Check browser JavaScript
+        run: node --check app/static/app.js
+
+      - name: Assert no real model or cache artifact was created
+        shell: bash
+        run: |
+          set -euo pipefail
+          forbidden="$(find "$POPEX_FAULT_TMP" -type f \( \
+            -name '955717e8.safetensors' -o \
+            -name '*.safetensors' -o \
+            -name '*.th' -o \
+            -name '*.ckpt' -o \
+            -name 'htdemucs-bf35a81b-v1.json' \
+          \) -print)"
+          if [[ -n "$forbidden" ]]; then
+            echo "A prohibited model or readiness artifact was created." >&2
+            exit 1
+          fi
+          if grep -R -E 'huggingface\.co|hf\.co' "$POPEX_FAULT_TMP"; then
+            echo "Fault validation unexpectedly recorded model-host access." >&2
+            exit 1
+          fi
+
+      - name: Enforce characterization result
+        if: steps.characterization.outcome != 'success'
+        shell: bash
+        run: |
+          echo "A production model-lifecycle characterization is failing; keep this PR blocked." >&2
+          exit 1
+
+      - name: Clean temporary fault state
+        if: always()
+        shell: bash
+        run: rm -rf -- "$POPEX_FAULT_TMP"
