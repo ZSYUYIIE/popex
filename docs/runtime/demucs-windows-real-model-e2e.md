@@ -40,7 +40,7 @@ Only generated deterministic stereo 44.1 kHz PCM-16 audio is used. No private or
 
 ## Workflow operation
 
-Run **Demucs Windows real-model E2E** from the GitHub Actions workflow-dispatch UI on the final stable branch head. The job has read-only repository permissions and a bounded timeout.
+Run **Demucs Windows real-model E2E** from the GitHub Actions workflow-dispatch UI after the workflow file is present on the repository default branch. The job has read-only repository permissions and a bounded timeout.
 
 The workflow does not upload an artifact. Its safe JSON summary and GitHub step summary contain only versions, audited model identity, stem metadata, elapsed times, measurable process-memory values, and privacy booleans.
 
@@ -59,14 +59,21 @@ An `always()` cleanup step removes the temporary runtime, model cache, applicati
 - unsafe or nonempty trusted paths are refused;
 - failure output is path-safe and traceback-free.
 
+Repository CI run #166 (run ID `30973370606`) passed all 458 tests, Python compilation, and browser JavaScript syntax on the corrected authorized implementation. This is offline/static evidence only and is not a substitute for real model preparation and inference.
+
 ## Final workflow evidence
 
-- Branch head: pending final stable head
-- Workflow run number: pending
-- Workflow run ID: pending
-- Result: pending manual real-model execution
+- Pull request: `#35`
+- Candidate branch: `agent/windows-real-model-e2e`
+- Candidate branch head: recorded in the current `popex-agent-handoff:v1` block
+- Manual workflow run number: none
+- Manual workflow run ID: none
+- Result: **blocked before dispatch**
+- Blocker: GitHub requires a `workflow_dispatch` workflow to exist on the default branch before the manual dispatch UI/API can run it. This new workflow is intentionally confined to the unmerged issue branch, and this agent is not authorized to merge it or alter an existing default-branch workflow.
 - Runtime profile: `windows-x86_64-cpu-cpython313`
-- Inference replacement with mocks: prohibited
+- Real model preparation performed: no
+- Real CPU inference performed: no
+- Inference replacement with mocks: prohibited and not performed
 - Runtime, cache, database, model, and media artifact upload: none
 
-If the final real workflow exposes a runtime, model-host, checkpoint, or inference incompatibility, preserve its safe logs and mark the pull request blocked. Do not weaken versions, hashes, model identity, CPU-only requirements, or replace inference with a fake result.
+The orchestrator must first make the manual workflow available from the default branch through an authorized integration step, then dispatch the exact integrated code. If that real run exposes a runtime, model-host, checkpoint, or inference incompatibility, preserve its safe logs and keep the pull request blocked. Do not weaken versions, hashes, model identity, CPU-only requirements, or replace inference with a fake result.
