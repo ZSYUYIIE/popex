@@ -25,10 +25,11 @@ jobs:
           source = main.read_text(encoding="utf-8")
           occurrences = source.count("\n] -> None:")
           assert occurrences >= 1, "expected damaged function signatures"
-          main.write_text(
-              source.replace("\n] -> None:", "\n) -> None:"),
-              encoding="utf-8",
-          )
+          source = source.replace("\n] -> None:", "\n) -> None:")
+          broken = '            and (job_dir / str(job.get("normalized_file_name")).is_file()\n'
+          fixed = '            and (job_dir / str(job.get("normalized_file_name"))).is_file()\n'
+          assert source.count(broken) == 1, "unexpected normalized-file expression"
+          main.write_text(source.replace(broken, fixed), encoding="utf-8")
 
           tests = Path("tests/test_transcription_api.py")
           source = tests.read_text(encoding="utf-8")
