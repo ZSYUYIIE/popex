@@ -240,7 +240,7 @@ def test_contract_is_absent_before_analysis_and_live_after_completion(
     assert contract["canStart"] is True
     assert contract["available"] is False
     assert contract["startUrl"] == f"/api/jobs/{job_id}/transcribe"
-    assert contract["detailsUrl"].endswith("?includeEvents=false"
+    assert contract["detailsUrl"].endswith("?includeEvents=false")
     assert contract["downloadUrl"] is None
     for internal in (
         "transcription_status",

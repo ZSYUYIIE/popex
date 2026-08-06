@@ -756,7 +756,7 @@ def _execute_processor(
         MediaResult,
     ],
     analysis_processor: AnalysisProcessor,
-] -> None:
+) -> None:
     def map_preparation_progress(progress: float) -> float:
         if not settings.audio_analysis_enabled:
             return progress
@@ -850,7 +850,7 @@ def _run_analysis_job(
     job_id: str,
     settings: Settings,
     processor: AnalysisProcessor,
-] -> None:
+) -> None:
     def update_stage(stage: str, message: str, progress: float) -> None:
         db.update_job(
             settings.database_path,
@@ -1101,7 +1101,7 @@ def _serialize_job(
         ),
         "analysisAudioAvailable": bool(
             job.get("normalized_file_name") in allowed_names
-            and (job_dir / str(job.get("normalized_file_name")).is_file()
+            and (job_dir / str(job.get("normalized_file_name"))).is_file()
         ),
     }
     payload["analysis"] = {
