@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import mimetypes
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -37,6 +39,7 @@ from app.media import (
     MediaResult,
     cleanup_job_dir,
     dependency_report,
+    friendly_error,
     generated_source_name,
     process_upload,
     process_url,
@@ -55,6 +58,19 @@ from app.separation_service import (
     SeparationService,
     SeparationStartConflict,
 )
+from app.transcription_artifacts import (
+    TranscriptionArtifactError,
+    TranscriptionArtifactUnavailableError,
+    load_transcription_details,
+    transcription_json_path,
+)
+from app.transcription_events import RAW_TRANSCRIPTION_RELATIVE_PATH
+from app.transcription_pipeline import (
+    TRANSCRIPTION_VERSION,
+    TranscriptionPipelineError,
+    TranscriptionPipelineResult,
+    transcribe_job,
+)
 
 
 UrlProcessor = Callable[
@@ -70,6 +86,11 @@ AnalysisProcessor = Callable[
     AudioAnalysisResult,
 ]
 SeparationProcessor = Callable[..., StemSeparationResult]
+TranscriptionProcessor = Callable[
+    [str, Settings, Callable[[str, str, float], None]],
+    TranscriptionPipelineResult,
+]
+
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
 ALLOWED_GENERIC_MIME_TYPES = {
@@ -99,6 +120,21 @@ _INTERNAL_SEPARATION_FIELDS = frozenset(
         "separation_error",
     }
 )
+_INTERNAL_TRANSCRIPTION_FIELDS = frozenset(
+    {
+        "transcription_status",
+        "transcription_stage",
+        "transcription_progress",
+        "transcription_message",
+        "transcription_version",
+        "transcription_artifact_file_name",
+        "transcribed_at",
+        "pitched_event_count",
+        "percussion_event_count",
+        "aligned_event_count",
+        "transcription_error",
+    }
+)
 
 
 class JobCreate(BaseModel):
@@ -118,6 +154,7 @@ def create_app(
     analysis_processor: AnalysisProcessor = analyze_audio,
     separation_runtime_client: Any | None = None,
     separation_processor: SeparationProcessor = separate_stems,
+    transcription_processor: TranscriptionProcessor = transcribe_job,
 ) -> FastAPI:
     app_settings = settings or Settings.from_env()
     separation_service = SeparationService(
@@ -259,7 +296,7 @@ def create_app(
                             status_code=413,
                             detail=(
                                 f"Upload exceeds the "
-                                f"{app_settings.max_upload_mb} MB limit."
+                                f"{settings.max_upload_mb} MB limit."
                             ),
                         )
                     output.write(chunk)
@@ -416,12 +453,67 @@ def create_app(
                 job_id,
                 allow_model_download=payload.allowModelDownload,
                 schedule=background_tasks.add_task,
-            )
+             )
         except SeparationJobNotFound:
             raise HTTPException(status_code=404, detail="Job not found") from None
         except SeparationStartConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
         return serialize_job(record)
+
+    @app.post(
+        "/api/jobs/{job_id}/transcribe",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def transcribe_existing_job(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        force: str | None = Query(None),
+    ) -> dict:
+        force_value = _strict_query_bool(force, field="force", default=False)
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if (
+            record.get("preparation_status") != "completed"
+            or record.get("analysis_status") != "completed"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Source preparation and audio analysis must be complete before "
+                    "raw transcription."
+                ),
+            )
+        transcription_status = record.get("transcription_status") or "not_started"
+        if transcription_status == "processing":
+            raise HTTPException(
+                status_code=409,
+                detail="Raw transcription is already running.",
+            )
+        if transcription_status == "completed" and not force_value:
+            raise HTTPException(
+                status_code=409,
+                detail="Raw transcription is already complete; use force=true to rerun.",
+            )
+        claimed = db.claim_transcription_attempt(
+            app_settings.database_path,
+            job_id,
+            transcription_version=TRANSCRIPTION_VERSION,
+            force=force_value,
+        )
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail="Raw transcription could not be started in the current state.",
+            )
+        background_tasks.add_task(
+            _run_transcription_job,
+            job_id,
+            app_settings,
+            transcription_processor,
+        )
+        current = db.get_job(app_settings.database_path, job_id)
+        return serialize_job(current or record)
 
     @app.get("/api/jobs/{job_id}/analysis")
     def get_analysis(job_id: str) -> dict:
@@ -438,7 +530,7 @@ def create_app(
             "analysisVersion": record.get("analysis_version"),
             "summary": _analysis_summary(record),
             "result": result,
-            "warnings": result.get("warnings", []) if result else [],
+            "warnings": result.get('warnings', []) if result else [],
             "downloadUrl": (
                 f"/api/jobs/{job_id}/analysis/download" if result else None
             ),
@@ -467,6 +559,60 @@ def create_app(
         return FileResponse(
             path,
             filename="audio-analysis.json",
+            media_type="application/json",
+        )
+
+    @app.get("/api/jobs/{job_id}/transcription")
+    def get_transcription(
+        job_id: str,
+        include_events: str | None = Query(None, alias="includeEvents"),
+    ) -> dict:
+        include_events_value = _strict_query_bool(
+            include_events, field="includeEvents", default=False
+        )
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            details = load_transcription_details(job_id, app_settings, record)
+        except TranscriptionArtifactUnavailableError:
+            raise HTTPException(
+                status_code=404,
+                detail="Published raw transcription is unavailable.",
+            ) from None
+        except TranscriptionArtifactError:
+            logging.exception(
+                "Published raw transcription failed validation for job %s", job_id
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Published raw transcription could not be validated.",
+            ) from None
+        return details.payload(include_events=include_events_value)
+
+    @app.get("/api/jobs/{job_id}/transcription/download")
+    def download_transcription(job_id: str) -> FileResponse:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            path = transcription_json_path(job_id, app_settings, record)
+        except TranscriptionArtifactUnavailableError:
+            raise HTTPException(
+                status_code=404,
+                detail="Published raw transcription is unavailable.",
+            ) from None
+        except TranscriptionArtifactError:
+            logging.exception(
+                "Published raw transcription failed validation for job %s", job_id
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Published raw transcription could not be validated.",
+            ) from None
+        return FileResponse(
+            path,
+            filename="raw-transcription.json",
             media_type="application/json",
         )
 
@@ -752,6 +898,133 @@ def _run_analysis_job(
         )
 
 
+def _run_transcription_job(
+    job_id: str,
+    settings: Settings,
+    processor: TranscriptionProcessor,
+) -> None:
+    last_progress = 1.0
+
+    def update_stage(stage: str, message: str, progress: float) -> None:
+        nonlocal last_progress
+        try:
+            numeric_progress = float(progress)
+        except (TypeError, ValueError):
+            numeric_progress = last_progress
+        numeric_progress = max(last_progress, min(99.0, max(1.0, numeric_progress)))
+        last_progress = round(numeric_progress, 1)
+        db.update_job(
+            settings.database_path,
+            job_id,
+            transcription_status="processing",
+            transcription_stage=stage,
+            transcription_progress=last_progress,
+            transcription_message=message,
+            transcription_error=None,
+        )
+
+    try:
+        result = processor(job_id, settings, update_stage)
+    except TranscriptionPipelineError as exc:
+        _record_transcription_failure(
+            settings,
+            job_id,
+            _safe_transcription_error(str(exc), settings),
+            progress=last_progress,
+        )
+    except Exception:
+        logging.exception("Unexpected raw transcription failure for job %s", job_id)
+        _record_transcription_failure(
+            settings,
+            job_id,
+            "Unexpected raw transcription failure. Check server logs.",
+            progress=last_progress,
+        )
+    else:
+        if (
+            not isinstance(result, TranscriptionPipelineResult)
+            or result.artifact_file_name != RAW_TRANSCRIPTION_RELATIVE_PATH
+            or not isinstance(result.transcription_version, str)
+            or not result.transcription_version
+            or not isinstance(result.transcribed_at, str)
+            or not result.transcribed_at
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in (
+                    result.pitched_event_count,
+                    result.percussion_event_count,
+                    result.aligned_event_count,
+                )
+            )
+        ):
+            logging.error("Transcription processor returned an invalid result for %s", job_id)
+            _record_transcription_failure(
+                settings,
+                job_id,
+                "Raw transcription returned an invalid result.",
+                progress=last_progress,
+            )
+            return
+        db.update_job(
+            settings.database_path,
+            job_id,
+            transcription_status="completed",
+            transcription_stage="completed",
+            transcription_progress=100,
+            transcription_message="Raw transcription complete.",
+            transcription_version=result.transcription_version,
+            transcription_artifact_file_name=result.artifact_file_name,
+            transcribed_at=result.transcribed_at,
+            pitched_event_count=result.pitched_event_count,
+            percussion_event_count=result.percussion_event_count,
+            aligned_event_count=result.aligned_event_count,
+            transcription_error=None,
+        )
+
+
+def _record_transcription_failure(
+    settings: Settings,
+    job_id: str,
+    error: str,
+    *,
+    progress: float,
+) -> None:
+    db.update_job(
+        settings.database_path,
+        job_id,
+        transcription_status="failed",
+        transcription_stage="failed",
+        transcription_progress=round(max(1.0, min(99.0, progress)), 1),
+        transcription_message=(
+            "Raw transcription stopped; prepared audio and any previous result remain available."
+        ),
+        transcription_error=error,
+    )
+
+
+def _safe_transcription_error(value: str, settings: Settings) -> str:
+    text = str(value)
+    lowered = text.lower()
+    if "traceback (most recent call last)" in lowered or "stack trace" in lowered:
+        return "Raw transcription failed."
+    try:
+        cleaned = friendly_error(text, settings=settings)
+    except (OSError, RuntimeError, ValueError):
+        return "Raw transcription failed."
+    cleaned = re.sub(r"(?i)\b(?:https?|file)://[^\s]+", "<external location>", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(?:token|password|secret|api[_-]?key|authorization|bearer)"
+        r"\s*(?:=|:)?\s*[^\s,;]+",
+        "<redacted>",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)0x[0-9a-f]{6,}", "<address>", cleaned)
+    cleaned = " ".join(cleaned.replace("\x00", "").split()).strip()
+    if not cleaned:
+        return "Raw transcription failed."
+    return cleaned[:500]
+
+
 def _record_analysis_failure(
     settings: Settings,
     job_id: str,
@@ -809,6 +1082,7 @@ def _serialize_job(
         key: value
         for key, value in job.items()
         if key not in _INTERNAL_SEPARATION_FIELDS
+        and key not in _INTERNAL_TRANSCRIPTION_FIELDS
     }
     payload["files"] = []
     job_dir = settings.exports_dir / job["id"]
@@ -847,7 +1121,80 @@ def _serialize_job(
         separation = separation_service.serialize_job(job)
         if separation is not None:
             payload["separation"] = separation
+    transcription = _serialize_transcription(job)
+    if transcription is not None:
+        payload["transcription"] = transcription
     return payload
+
+
+def _serialize_transcription(job: dict) -> dict[str, Any] | None:
+    status_value = job.get("transcription_status")
+    status = status_value if isinstance(status_value, str) and status_value else "not_started"
+    should_expose = (
+        job.get("analysis_status") == "completed"
+        or status != "not_started"
+        or job.get("transcription_artifact_file_name") is not None
+    )
+    if not should_expose:
+        return None
+    job_id = job["id"]
+    available = (
+        job.get("transcription_artifact_file_name")
+        == RAW_TRANSCRIPTION_RELATIVE_PATH
+    )
+    ready = (
+        job.get("preparation_status") == "completed"
+        and job.get("analysis_status") == "completed"
+    )
+    return {
+        "enabled": True,
+        "status": status,
+        "stage": job.get("transcription_stage") or "not_started",
+        "progress": _safe_progress(job.get("transcription_progress")),
+        "message": job.get("transcription_message"),
+        "version": job.get("transcription_version"),
+        "available": available,
+        "counts": {
+            "pitched": _safe_count(job.get("pitched_event_count")),
+            "percussion": _safe_count(job.get("percussion_event_count")),
+            "aligned": _safe_count(job.get("aligned_event_count")),
+        },
+        "canStart": ready and status in {"not_started", "failed"},
+        "startUrl": f"/api/jobs/{job_id}/transcribe",
+        "detailsUrl": f"/api/jobs/{job_id}/transcription?includeEvents=false",
+        "downloadUrl": (
+            f"/api/jobs/{job_id}/transcription/download" if available else None
+        ),
+        "error": job.get("transcription_error"),
+    }
+
+
+
+def _strict_query_bool(value: str | None, *, field: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise HTTPException(
+        status_code=422,
+        detail=f"{field} must be true or false.",
+    )
+
+def _safe_progress(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    number = float(value)
+    if not math.isfinite(number):
+        return 0.0
+    return round(max(0.0, min(100.0, number)), 1)
+
+
+def _safe_count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
 
 
 def _analysis_summary(job: dict) -> dict:
