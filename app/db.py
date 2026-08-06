@@ -6,6 +6,14 @@ from pathlib import Path
 from typing import Any
 
 
+_TRANSCRIPTION_COUNT_FIELDS = frozenset(
+    {
+        "pitched_event_count",
+        "percussion_event_count",
+        "aligned_event_count",
+    }
+)
+
 NEW_COLUMNS: dict[str, str] = {
     "source_type": "TEXT NOT NULL DEFAULT 'url'",
     "stage": "TEXT NOT NULL DEFAULT 'queued'",
@@ -36,6 +44,23 @@ NEW_COLUMNS: dict[str, str] = {
     "stem_manifest_file_name": "TEXT",
     "separated_at": "TEXT",
     "separation_error": "TEXT",
+    "transcription_status": "TEXT NOT NULL DEFAULT 'not_started'",
+    "transcription_stage": "TEXT NOT NULL DEFAULT 'not_started'",
+    "transcription_progress": "REAL NOT NULL DEFAULT 0",
+    "transcription_message": "TEXT",
+    "transcription_version": "TEXT",
+    "transcription_artifact_file_name": "TEXT",
+    "transcribed_at": "TEXT",
+    "pitched_event_count": (
+        "INTEGER CHECK (pitched_event_count IS NULL OR pitched_event_count >= 0)"
+    ),
+    "percussion_event_count": (
+        "INTEGER CHECK (percussion_event_count IS NULL OR percussion_event_count >= 0)"
+    ),
+    "aligned_event_count": (
+        "INTEGER CHECK (aligned_event_count IS NULL OR aligned_event_count >= 0)"
+    ),
+    "transcription_error": "TEXT",
 }
 
 
@@ -94,7 +119,24 @@ def init_database(database_path: Path) -> None:
                 separation_model TEXT,
                 stem_manifest_file_name TEXT,
                 separated_at TEXT,
-                separation_error TEXT
+                separation_error TEXT,
+                transcription_status TEXT NOT NULL DEFAULT 'not_started',
+                transcription_stage TEXT NOT NULL DEFAULT 'not_started',
+                transcription_progress REAL NOT NULL DEFAULT 0,
+                transcription_message TEXT,
+                transcription_version TEXT,
+                transcription_artifact_file_name TEXT,
+                transcribed_at TEXT,
+                pitched_event_count INTEGER
+                    CHECK (pitched_event_count IS NULL OR pitched_event_count >= 0),
+                percussion_event_count INTEGER
+                    CHECK (
+                        percussion_event_count IS NULL
+                        OR percussion_event_count >= 0
+                    ),
+                aligned_event_count INTEGER
+                    CHECK (aligned_event_count IS NULL OR aligned_event_count >= 0),
+                transcription_error TEXT
             )
             """
         )
@@ -154,7 +196,32 @@ def init_database(database_path: Path) -> None:
                 separation_stage = COALESCE(
                     NULLIF(separation_stage, ''),
                     'not_started'
-                )
+                ),
+                transcription_status = COALESCE(
+                    NULLIF(TRIM(transcription_status), ''),
+                    'not_started'
+                ),
+                transcription_stage = COALESCE(
+                    NULLIF(TRIM(transcription_stage), ''),
+                    'not_started'
+                ),
+                transcription_progress = CASE
+                    WHEN transcription_progress IS NULL
+                         OR transcription_progress < 0 THEN 0
+                    ELSE transcription_progress
+                END,
+                pitched_event_count = CASE
+                    WHEN pitched_event_count < 0 THEN NULL
+                    ELSE pitched_event_count
+                END,
+                percussion_event_count = CASE
+                    WHEN percussion_event_count < 0 THEN NULL
+                    ELSE percussion_event_count
+                END,
+                aligned_event_count = CASE
+                    WHEN aligned_event_count < 0 THEN NULL
+                    ELSE aligned_event_count
+                END
             """
         )
 
@@ -199,6 +266,7 @@ def fail_incomplete_jobs(database_path: Path) -> None:
                 updated_at = ?
             WHERE status IN ('queued', 'processing')
               AND separation_status != 'processing'
+              AND transcription_status != 'processing'
             """,
             (now,),
         )
@@ -227,6 +295,37 @@ def fail_incomplete_jobs(database_path: Path) -> None:
                 separation_error = 'Stem separation was interrupted by a server restart.',
                 updated_at = ?
             WHERE separation_status = 'processing'
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                         AND analysis_status = 'completed' THEN 'completed'
+                    ELSE status
+                END,
+                stage = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                         AND analysis_status = 'completed' THEN 'completed'
+                    ELSE stage
+                END,
+                message = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                         AND analysis_status = 'completed'
+                        THEN 'Prepared and analyzed audio remains available; raw transcription can be retried.'
+                    ELSE message
+                END,
+                transcription_status = 'failed',
+                transcription_stage = 'failed',
+                transcription_message = 'Prepared and analyzed audio remains available; raw transcription can be retried.',
+                transcription_error = 'Raw transcription was interrupted by a server restart.',
+                updated_at = ?
+            WHERE transcription_status = 'processing'
             """,
             (now,),
         )
@@ -307,6 +406,45 @@ def claim_separation_attempt(
         return cursor.rowcount == 1
 
 
+def claim_transcription_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    transcription_version: str,
+    force: bool = False,
+    message: str = "Preparing raw transcription.",
+) -> bool:
+    now = utc_now()
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET transcription_status = 'processing',
+                transcription_stage = 'preparing_transcription',
+                transcription_progress = 1,
+                transcription_message = ?,
+                transcription_version = ?,
+                transcription_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+              AND preparation_status = 'completed'
+              AND analysis_status = 'completed'
+              AND (
+                    transcription_status IN ('not_started', 'failed')
+                    OR (? = 1 AND transcription_status = 'completed')
+              )
+            """,
+            (
+                message,
+                transcription_version,
+                now,
+                job_id,
+                int(bool(force)),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
 def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
     allowed = set(NEW_COLUMNS) | {
         "source_url",
@@ -318,6 +456,7 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
         "error",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
+    _validate_transcription_counts(values)
     if not values:
         return
     values["updated_at"] = utc_now()
@@ -328,6 +467,15 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
             f"UPDATE jobs SET {assignments} WHERE id = ?",
             parameters,
         )
+
+
+def _validate_transcription_counts(values: dict[str, Any]) -> None:
+    for field in _TRANSCRIPTION_COUNT_FIELDS:
+        value = values.get(field)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{field} must be a non-negative integer or None.")
 
 
 def get_job(database_path: Path, job_id: str) -> dict[str, Any] | None:
