@@ -139,7 +139,9 @@ def load_transcription_details(
         transcribed_at=artifact["createdAt"],
         pitched_event_count=len(pitched),
         percussion_event_count=len(percussion),
-        aligned_event_count=len(alignment),
+        aligned_event_count=sum(
+            1 for item in alignment if "alignedTimeSeconds" in item
+        ),
         source_kinds=source_kinds,
         algorithms=copy.deepcopy(artifact["algorithms"]),
         warnings=tuple(artifact["warnings"]),
