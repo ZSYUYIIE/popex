@@ -200,18 +200,27 @@ def test_completed_details_derive_counts_sources_and_provenance_from_artifact(
     assert details.transcribed_at == expected["createdAt"]
     assert details.pitched_event_count == 2
     assert details.percussion_event_count == 2
-    assert details.aligned_event_count == 2
+    assert details.aligned_event_count == 1
     assert details.source_kinds == ("bass", "drums", "full_mix", "vocals")
     assert details.algorithms == expected["algorithms"]
     assert details.warnings == tuple(expected["warnings"])
     assert payload["counts"] == {
         "pitched": 2,
         "percussion": 2,
-        "aligned": 2,
+        "aligned": 1,
     }
     assert payload["pitchedNoteEvents"] == expected["pitchedNoteEvents"]
     assert payload["percussionEvents"] == expected["percussionEvents"]
     assert payload["alignmentCandidates"] == expected["alignmentCandidates"]
+    assert len(payload["alignmentCandidates"]) == 2
+    assert sum(
+        "alignedTimeSeconds" in candidate
+        for candidate in payload["alignmentCandidates"]
+    ) == 1
+    assert any(
+        "alignedTimeSeconds" not in candidate
+        for candidate in payload["alignmentCandidates"]
+    )
     assert payload["downloadFileName"] == "raw-transcription.json"
     encoded = json.dumps(payload, allow_nan=False)
     assert str(settings.data_dir) not in encoded
@@ -233,7 +242,7 @@ def test_summary_mode_omits_events_but_preserves_truth(settings: Settings) -> No
     assert summary["counts"] == {
         "pitched": 2,
         "percussion": 2,
-        "aligned": 2,
+        "aligned": 1,
     }
     assert summary["sourceKinds"] == [
         "bass",
@@ -269,13 +278,17 @@ def test_failed_retry_preserves_previous_valid_artifact_and_current_failure(
     assert details.status == "failed"
     assert details.stage == "failed"
     assert details.progress == 43.5
+    assert details.aligned_event_count == 1
     assert details.pitched_note_events == tuple(expected["pitchedNoteEvents"])
     assert details.percussion_events == tuple(expected["percussionEvents"])
+    assert details.alignment_candidates == tuple(expected["alignmentCandidates"])
     assert details.error
     assert str(settings.data_dir) not in details.error
     assert "super-secret-value" not in details.error
     assert str(settings.data_dir) not in (details.message or "")
     assert payload["available"] is True
+    assert payload["counts"]["aligned"] == 1
+    assert payload["alignmentCandidates"] == expected["alignmentCandidates"]
     assert payload["error"] == details.error
 
 
@@ -377,25 +390,31 @@ def test_invalid_job_id_and_nonmapping_job_fail_safely(
         load_transcription_details(JOB_ID, settings, [])  # type: ignore[arg-type]
 
 
-def test_database_counts_and_version_cannot_override_validated_truth(
+def test_hostile_database_counts_and_version_cannot_override_validated_truth(
     settings: Settings,
 ) -> None:
-    publish(settings)
+    expected = publish(settings)
     details = load_transcription_details(
         JOB_ID,
         settings,
         job_record(
             pitched_event_count=0,
             percussion_event_count=500_000,
-            aligned_event_count=-1,
+            aligned_event_count=2_147_483_647,
             transcription_version="db-lie-v99",
             transcribed_at="2099-01-01T00:00:00+00:00",
         ),
     )
 
+    assert len(expected["alignmentCandidates"]) == 2
+    assert sum(
+        "alignedTimeSeconds" in candidate
+        for candidate in expected["alignmentCandidates"]
+    ) == 1
     assert details.pitched_event_count == 2
     assert details.percussion_event_count == 2
-    assert details.aligned_event_count == 2
+    assert details.aligned_event_count == 1
+    assert details.payload(include_events=False)["counts"]["aligned"] == 1
     assert details.transcription_version == "baseline-pyin-onset-v1"
     assert details.transcribed_at == CREATED_AT
 
