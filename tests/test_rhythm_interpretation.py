@@ -5,7 +5,7 @@ from app.rhythm_interpretation import *
 
 def timing(**x):
  d={"tempoBpm":120.,"tempoConfidence":.9,"tempoStable":True,"beatsSeconds":[0,.5,1,1.5,2,2.5,3,3.5,4],"beatConfidence":.9,"downbeatsSeconds":[0,2,4],"meter":4,"meterConfidence":.85};d.update(x);return d
-def p(i,a,b,s="vocals",c=.9):return {"id":i,"sourceKind":s,"startSeconds":a,"endSeconds":b,"midiNote":69,"midiPitch":69.,"confidence":c}
+def p(i,a,b,s="vocals",c=.9):return {"id":i,"sourceKind":s,"startSeconds":a,"endSeconds":b,"midiNote":69,"midiPitch":69.,"frequencyHz":440.,"noteName":"A4","confidence":c,"warnings":[]}
 def r(i,t):return {"id":i,"sourceKind":"drums","timeSeconds":t,"strength":.9,"hits":[{"kind":"kick","confidence":.8}]}
 def al(i,k,t,g=None,c=.9,**x):
  d={"eventId":i,"eventType":k,"rawTimeSeconds":t,"confidence":c,"warnings":[]}
