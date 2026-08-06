@@ -1,4 +1,5 @@
 const $=(s)=>document.querySelector(s);
+// Issue #55 checkpoint: raw-transcription UI remains absent until a live contract exists.
 const urlForm=$("#extract-form"),urlInput=$("#video-url"),submitButton=$("#submit-button"),formMessage=$("#form-message");
 const uploadForm=$("#upload-form"),fileInput=$("#media-file"),uploadButton=$("#upload-button"),uploadMessage=$("#upload-message"),dropZone=$("#drop-zone"),dropTitle=$("#drop-title"),selectedFileMessage=$("#selected-file");
 const jobsContainer=$("#jobs"),jobsMessage=$("#jobs-message"),refreshButton=$("#refresh-button");
