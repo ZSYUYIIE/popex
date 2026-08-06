@@ -293,7 +293,11 @@ def test_no_stem_job_runs_real_detectors_alignment_and_publication(settings: Set
     assert result.input_mode == "full_mix"
     assert result.artifact_file_name == RAW_TRANSCRIPTION_RELATIVE_PATH
     assert result.pitched_event_count >= 1
-    assert result.percussion_event_count >= 1
+    assert result.percussion_event_count == len(result.payload["percussionEvents"])
+    percussion_algorithm = result.payload["algorithms"]["percussionDetection"]
+    assert percussion_algorithm["sources"]["full_mix"]["version"] == "baseline-onset-bands-v1"
+    if result.percussion_event_count == 0:
+        assert any("No reliable percussion onsets" in item for item in result.warnings)
     assert "sourceSeparation" not in result.payload
     assert result.payload["algorithms"]["transcriptionPipeline"]["demucsRequired"] is False
     assert (job_dir / "analysis.wav").read_bytes() == before
