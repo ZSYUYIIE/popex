@@ -395,7 +395,7 @@ def test_details_default_to_summary_and_full_mode_preserves_events(
             f"/api/jobs/{job_id}/transcription?includeEvents=true"
         )
         invalid = client.get(
-            f"/api/jobs/{job_id}/transcription/includeEvents=1"
+            f"/api/jobs/{job_id}/transcription?includeEvents=1"
         )
 
     assert summary.status_code == explicit_summary.status_code == full.status_code == 200
