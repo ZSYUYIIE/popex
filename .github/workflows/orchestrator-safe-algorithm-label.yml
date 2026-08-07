@@ -22,13 +22,19 @@ jobs:
           from pathlib import Path
           path = Path('app/static/app.js')
           text = path.read_text(encoding='utf-8')
+          marker = 'function interpretationAlgorithms(detail)'
+          start = text.index(marker)
+          end = text.index('\n', start)
+          line = text[start:end]
           old = 'String(name).replace(/([a-z0-9])([A-Z])/g,"$1 $2")'
           new = 'String(name).replace(/([a-z0-9])([A-Z])/g,"$1_$2")'
-          if text.count(old) != 1:
-              raise SystemExit(f'expected one interpretation algorithm marker, found {text.count(old)}')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          if old not in line:
+              raise SystemExit(0)
+          line = line.replace(old, new, 1)
+          path.write_text(text[:start] + line + text[end:], encoding='utf-8')
           PY
           node --check app/static/app.js
+          if git diff --quiet -- app/static/app.js; then exit 0; fi
           git config user.name popex-orchestrator
           git config user.email actions@users.noreply.github.com
           git add app/static/app.js
