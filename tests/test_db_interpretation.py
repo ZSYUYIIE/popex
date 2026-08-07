@@ -133,7 +133,6 @@ def test_existing_database_migrates_without_losing_transcription(tmp_path: Path)
                 connection.execute(f"ALTER TABLE jobs DROP COLUMN {field}")
             except sqlite3.OperationalError:
                 pass
-    # Simulate a database from immediately before interpretation fields existed.
     db.init_database(database)
     after = db.get_job(database, "legacy-transcribed")
 
@@ -174,7 +173,7 @@ def test_blank_legacy_interpretation_state_and_negative_counts_are_normalized(
             """
             UPDATE jobs
             SET interpretation_status = '   ',
-                interpretation_stage = NULL,
+                interpretation_stage = '',
                 interpretation_progress = -5,
                 interpretation_part_count = -1,
                 interpretation_phrase_count = -2,
