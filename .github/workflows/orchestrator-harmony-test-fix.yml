@@ -1,0 +1,36 @@
+name: Orchestrator harmony uncertainty test fix
+
+on:
+  push:
+    branches:
+      - orchestrator/harmony-inference
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: orchestrator/harmony-inference
+          fetch-depth: 0
+      - name: Align power interval expectation with unresolved root ambiguity
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('tests/test_harmony_inference.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''    assert first["primaryCandidate"]["quality"] == "power"\n    assert first["primaryCandidate"]["symbol"] == "C5"\n    assert first["primaryCandidate"]["confidence"] <= 0.6\n    qualities = {candidate["quality"] for candidate in first["alternatives"]}\n    assert "major" in qualities or "minor" in qualities\n    assert any("lacks a third" in warning for warning in first["warnings"])\n'''
+          new = '''    assert first["unresolved"] is True\n    assert first["primaryCandidate"] is None\n    assert len(first["alternatives"]) <= 3\n    assert first["alternatives"][0]["quality"] == "power"\n    assert first["alternatives"][0]["confidence"] <= 0.6\n    assert {candidate["root"] for candidate in first["alternatives"] if candidate["quality"] == "power"} >= {"C", "G"}\n    assert any("lacks a third" in warning for warning in first["warnings"])\n'''
+          if old not in text:
+              raise SystemExit('power ambiguity test marker not found')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+          python -m pytest -q tests/test_harmony_inference.py
+          git config user.name popex-orchestrator
+          git config user.email actions@users.noreply.github.com
+          git add tests/test_harmony_inference.py
+          git commit -m 'Keep two-note power harmony root unresolved'
+          git push origin HEAD:orchestrator/harmony-inference
