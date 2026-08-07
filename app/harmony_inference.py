@@ -301,9 +301,7 @@ def _parse_timing(value: object) -> dict[str, Any]:
         raise HarmonyInferenceError("Beat times must be an array.")
     if len(beats_value) > _MAX_WINDOWS + 1:
         raise HarmonyInferenceError("Too many beat times for harmonic inference.")
-    beats = tuple(
-        _number(item, "beat time", minimum=0) for item in beats_value
-    )
+    beats = tuple(_number(item, "beat time", minimum=0) for item in beats_value)
     if any(later <= earlier for earlier, later in zip(beats, beats[1:])):
         raise HarmonyInferenceError("Beat times must be strictly increasing.")
     confidence = value.get("beatConfidence")
@@ -624,7 +622,9 @@ def _rank_candidates(
                 for pitch_class in chord_pcs
             )
             coverage = present / len(chord_pcs)
-            minimum_coverage = 1.0 if quality == "power" else 0.75 if len(chord_pcs) == 4 else 2 / 3
+            minimum_coverage = (
+                1.0 if quality == "power" else 0.75 if len(chord_pcs) == 4 else 2 / 3
+            )
             if coverage < minimum_coverage or support < _MIN_CANDIDATE_SUPPORT:
                 continue
             root_ratio = pitch_class_weights[root_pc] / total
@@ -643,6 +643,8 @@ def _rank_candidates(
             )
             tonal_support = _tonal_support(root_pc, quality, tonal_context)
             score += tonal_support
+            if len(chord_pcs) == 3 and coverage < 1.0:
+                score -= 0.20
             if len(chord_pcs) == 4 and coverage < 1.0:
                 score -= 0.06
             if quality == "power":
@@ -737,7 +739,11 @@ def _bass_inversion_candidate(
     except ValueError:
         return None
     labels = ("root_position", "first_inversion", "second_inversion", "third_inversion")
-    position = labels[position_index] if position_index < len(labels) else "upper_chord_tone_bass"
+    position = (
+        labels[position_index]
+        if position_index < len(labels)
+        else "upper_chord_tone_bass"
+    )
     confidence = min(
         candidate_score,
         statistics.mean(event.confidence for event in lowest),
