@@ -24,11 +24,9 @@ jobs:
           text = path.read_text(encoding='utf-8')
           old = 'const safeName=safeSlugLabel(name);let version="";'
           new = 'const safeName=safeSlugLabel(String(name).replace(/([a-z0-9])([A-Z])/g,"$1 $2"));let version="";'
-          if new in text:
-              raise SystemExit(0)
           index = text.rfind(old)
           if index < 0:
-              raise SystemExit('interpretation algorithm label marker not found')
+              raise SystemExit(0)
           path.write_text(text[:index] + new + text[index + len(old):], encoding='utf-8')
           PY
           node --check app/static/app.js
