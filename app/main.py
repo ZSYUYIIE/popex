@@ -58,6 +58,19 @@ from app.separation_service import (
     SeparationService,
     SeparationStartConflict,
 )
+from app.interpretation_artifacts import (
+    InterpretationArtifactError,
+    InterpretationArtifactUnavailableError,
+    interpretation_json_path,
+    load_interpretation_details,
+)
+from app.interpretation_pipeline import (
+    INTERPRETATION_PIPELINE_VERSION,
+    InterpretationPipelineError,
+    InterpretationPipelineResult,
+    interpret_transcription_job,
+)
+from app.transcription_draft import INTERPRETATION_DRAFT_RELATIVE_PATH
 from app.transcription_artifacts import (
     TranscriptionArtifactError,
     TranscriptionArtifactUnavailableError,
@@ -89,6 +102,10 @@ SeparationProcessor = Callable[..., StemSeparationResult]
 TranscriptionProcessor = Callable[
     [str, Settings, Callable[[str, str, float], None]],
     TranscriptionPipelineResult,
+]
+InterpretationProcessor = Callable[
+    [str, Settings, Callable[[str, str, float], None]],
+    InterpretationPipelineResult,
 ]
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -136,6 +153,24 @@ _INTERNAL_TRANSCRIPTION_FIELDS = frozenset(
     }
 )
 
+_INTERNAL_INTERPRETATION_FIELDS = frozenset(
+    {
+        "interpretation_status",
+        "interpretation_stage",
+        "interpretation_progress",
+        "interpretation_message",
+        "interpretation_version",
+        "interpretation_artifact_file_name",
+        "interpreted_at",
+        "interpretation_part_count",
+        "interpretation_phrase_count",
+        "interpretation_pitched_item_count",
+        "interpretation_percussion_item_count",
+        "interpretation_warning_count",
+        "interpretation_error",
+    }
+)
+
 
 class JobCreate(BaseModel):
     url: HttpUrl
@@ -155,6 +190,7 @@ def create_app(
     separation_runtime_client: Any | None = None,
     separation_processor: SeparationProcessor = separate_stems,
     transcription_processor: TranscriptionProcessor = transcribe_job,
+    interpretation_processor: InterpretationProcessor = interpret_transcription_job,
 ) -> FastAPI:
     app_settings = settings or Settings.from_env()
     separation_service = SeparationService(
@@ -515,6 +551,70 @@ def create_app(
         current = db.get_job(app_settings.database_path, job_id)
         return serialize_job(current or record)
 
+    @app.post(
+        "/api/jobs/{job_id}/interpret",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def interpret_existing_job(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        force: str | None = Query(None),
+    ) -> dict:
+        force_value = _strict_query_bool(force, field="force", default=False)
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if (
+            record.get("transcription_status") != "completed"
+            or record.get("transcription_artifact_file_name")
+            != RAW_TRANSCRIPTION_RELATIVE_PATH
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Completed raw transcription is required before editable interpretation.",
+            )
+        try:
+            transcription_json_path(job_id, app_settings, record)
+        except (
+            TranscriptionArtifactUnavailableError,
+            TranscriptionArtifactError,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="A valid published raw transcription is required before editable interpretation.",
+            ) from None
+
+        interpretation_status = record.get("interpretation_status") or "not_started"
+        if interpretation_status == "processing":
+            raise HTTPException(
+                status_code=409,
+                detail="Editable interpretation is already running.",
+            )
+        if interpretation_status == "completed" and not force_value:
+            raise HTTPException(
+                status_code=409,
+                detail="Editable interpretation is already complete; use force=true to re-interpret.",
+            )
+        claimed = db.claim_interpretation_attempt(
+            app_settings.database_path,
+            job_id,
+            interpretation_version=INTERPRETATION_PIPELINE_VERSION,
+            force=force_value,
+        )
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail="Editable interpretation could not be started in the current state.",
+            )
+        background_tasks.add_task(
+            _run_interpretation_job,
+            job_id,
+            app_settings,
+            interpretation_processor,
+        )
+        current = db.get_job(app_settings.database_path, job_id)
+        return serialize_job(current or record)
+
     @app.get("/api/jobs/{job_id}/analysis")
     def get_analysis(job_id: str) -> dict:
         record = db.get_job(app_settings.database_path, job_id)
@@ -613,6 +713,60 @@ def create_app(
         return FileResponse(
             path,
             filename="raw-transcription.json",
+            media_type="application/json",
+        )
+
+    @app.get("/api/jobs/{job_id}/interpretation")
+    def get_interpretation(
+        job_id: str,
+        include_items: str | None = Query(None, alias="includeItems"),
+    ) -> dict:
+        include_items_value = _strict_query_bool(
+            include_items, field="includeItems", default=False
+        )
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            details = load_interpretation_details(job_id, app_settings, record)
+        except InterpretationArtifactUnavailableError:
+            raise HTTPException(
+                status_code=404,
+                detail="Published editable interpretation is unavailable.",
+            ) from None
+        except InterpretationArtifactError:
+            logging.exception(
+                "Published editable interpretation failed validation for job %s", job_id
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Published editable interpretation could not be validated.",
+            ) from None
+        return details.payload(include_items=include_items_value)
+
+    @app.get("/api/jobs/{job_id}/interpretation/download")
+    def download_interpretation(job_id: str) -> FileResponse:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            path = interpretation_json_path(job_id, app_settings, record)
+        except InterpretationArtifactUnavailableError:
+            raise HTTPException(
+                status_code=404,
+                detail="Published editable interpretation is unavailable.",
+            ) from None
+        except InterpretationArtifactError:
+            logging.exception(
+                "Published editable interpretation failed validation for job %s", job_id
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Published editable interpretation could not be validated.",
+            ) from None
+        return FileResponse(
+            path,
+            filename="editable-interpretation.json",
             media_type="application/json",
         )
 
@@ -1025,6 +1179,140 @@ def _safe_transcription_error(value: str, settings: Settings) -> str:
     return cleaned[:500]
 
 
+def _run_interpretation_job(
+    job_id: str,
+    settings: Settings,
+    processor: InterpretationProcessor,
+) -> None:
+    last_progress = 1.0
+
+    def update_stage(stage: str, message: str, progress: float) -> None:
+        nonlocal last_progress
+        try:
+            numeric_progress = float(progress)
+        except (TypeError, ValueError):
+            numeric_progress = last_progress
+        numeric_progress = max(last_progress, min(99.0, max(1.0, numeric_progress)))
+        last_progress = round(numeric_progress, 1)
+        db.update_job(
+            settings.database_path,
+            job_id,
+            interpretation_status="processing",
+            interpretation_stage=stage,
+            interpretation_progress=last_progress,
+            interpretation_message=message,
+            interpretation_error=None,
+        )
+
+    try:
+        result = processor(job_id, settings, update_stage)
+    except InterpretationPipelineError as exc:
+        _record_interpretation_failure(
+            settings,
+            job_id,
+            _safe_interpretation_error(str(exc), settings),
+            progress=last_progress,
+        )
+    except Exception:
+        logging.exception("Unexpected editable interpretation failure for job %s", job_id)
+        _record_interpretation_failure(
+            settings,
+            job_id,
+            "Unexpected editable interpretation failure. Check server logs.",
+            progress=last_progress,
+        )
+    else:
+        counts = (
+            result.part_count if isinstance(result, InterpretationPipelineResult) else None,
+            result.phrase_count if isinstance(result, InterpretationPipelineResult) else None,
+            result.pitched_item_count if isinstance(result, InterpretationPipelineResult) else None,
+            result.percussion_item_count if isinstance(result, InterpretationPipelineResult) else None,
+            result.warning_count if isinstance(result, InterpretationPipelineResult) else None,
+        )
+        if (
+            not isinstance(result, InterpretationPipelineResult)
+            or result.draft_file_name != INTERPRETATION_DRAFT_RELATIVE_PATH
+            or not isinstance(result.version, str)
+            or not result.version
+            or not isinstance(result.created_at, str)
+            or not result.created_at
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in counts
+            )
+            or not isinstance(result.warnings, tuple)
+            or result.warning_count != len(result.warnings)
+        ):
+            logging.error("Interpretation processor returned an invalid result for %s", job_id)
+            _record_interpretation_failure(
+                settings,
+                job_id,
+                "Editable interpretation returned an invalid result.",
+                progress=last_progress,
+            )
+            return
+        db.update_job(
+            settings.database_path,
+            job_id,
+            interpretation_status="completed",
+            interpretation_stage="completed",
+            interpretation_progress=100,
+            interpretation_message="Editable interpretation complete.",
+            interpretation_version=result.version,
+            interpretation_artifact_file_name=result.draft_file_name,
+            interpreted_at=result.created_at,
+            interpretation_part_count=result.part_count,
+            interpretation_phrase_count=result.phrase_count,
+            interpretation_pitched_item_count=result.pitched_item_count,
+            interpretation_percussion_item_count=result.percussion_item_count,
+            interpretation_warning_count=result.warning_count,
+            interpretation_error=None,
+        )
+
+
+def _record_interpretation_failure(
+    settings: Settings,
+    job_id: str,
+    error: str,
+    *,
+    progress: float,
+) -> None:
+    db.update_job(
+        settings.database_path,
+        job_id,
+        interpretation_status="failed",
+        interpretation_stage="failed",
+        interpretation_progress=round(max(1.0, min(99.0, progress)), 1),
+        interpretation_message=(
+            "Editable interpretation stopped; raw transcription and any previous draft remain available."
+        ),
+        interpretation_error=error,
+    )
+
+
+def _safe_interpretation_error(value: str, settings: Settings) -> str:
+    text = str(value)
+    lowered = text.lower()
+    if "traceback (most recent call last)" in lowered or "stack trace" in lowered:
+        return "Editable interpretation failed."
+    try:
+        cleaned = friendly_error(text, settings=settings)
+    except (OSError, RuntimeError, ValueError):
+        return "Editable interpretation failed."
+    cleaned = re.sub(r"(?i)\b(?:https?|file)://[^\s]+", "<external location>", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(?:token|password|secret|api[_-]?key|authorization|bearer)"
+        r"\s*(?:=|:)?\s*[^\s,;]+",
+        "<redacted>",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)0x[0-9a-f]{6,}", "<address>", cleaned)
+    cleaned = " ".join(cleaned.replace("\x00", "").split()).strip()
+    if not cleaned:
+        return "Editable interpretation failed."
+    return cleaned[:500]
+
+
 def _record_analysis_failure(
     settings: Settings,
     job_id: str,
@@ -1083,6 +1371,7 @@ def _serialize_job(
         for key, value in job.items()
         if key not in _INTERNAL_SEPARATION_FIELDS
         and key not in _INTERNAL_TRANSCRIPTION_FIELDS
+        and key not in _INTERNAL_INTERPRETATION_FIELDS
     }
     payload["files"] = []
     job_dir = settings.exports_dir / job["id"]
@@ -1124,6 +1413,9 @@ def _serialize_job(
     transcription = _serialize_transcription(job)
     if transcription is not None:
         payload["transcription"] = transcription
+    interpretation = _serialize_interpretation(job)
+    if interpretation is not None:
+        payload["interpretation"] = interpretation
     return payload
 
 
@@ -1168,6 +1460,52 @@ def _serialize_transcription(job: dict) -> dict[str, Any] | None:
         "error": job.get("transcription_error"),
     }
 
+
+def _serialize_interpretation(job: dict) -> dict[str, Any] | None:
+    status_value = job.get("interpretation_status")
+    status = status_value if isinstance(status_value, str) and status_value else "not_started"
+    should_expose = (
+        job.get("transcription_status") == "completed"
+        or status != "not_started"
+        or job.get("interpretation_artifact_file_name") is not None
+    )
+    if not should_expose:
+        return None
+    job_id = job["id"]
+    available = (
+        job.get("interpretation_artifact_file_name")
+        == INTERPRETATION_DRAFT_RELATIVE_PATH
+    )
+    ready = (
+        job.get("transcription_status") == "completed"
+        and job.get("transcription_artifact_file_name")
+        == RAW_TRANSCRIPTION_RELATIVE_PATH
+    )
+    return {
+        "enabled": True,
+        "status": status,
+        "stage": job.get("interpretation_stage") or "not_started",
+        "progress": _safe_progress(job.get("interpretation_progress")),
+        "message": job.get("interpretation_message"),
+        "version": job.get("interpretation_version"),
+        "available": available,
+        "counts": {
+            "parts": _safe_count(job.get("interpretation_part_count")),
+            "phrases": _safe_count(job.get("interpretation_phrase_count")),
+            "pitched": _safe_count(job.get("interpretation_pitched_item_count")),
+            "percussion": _safe_count(job.get("interpretation_percussion_item_count")),
+            "warnings": _safe_count(job.get("interpretation_warning_count")),
+        },
+        "canStart": ready and status in {"not_started", "failed"},
+        "canReinterpret": ready and status == "completed",
+        "startUrl": f"/api/jobs/{job_id}/interpret",
+        "detailsUrl": f"/api/jobs/{job_id}/interpretation?includeItems=false",
+        "fullDetailsUrl": f"/api/jobs/{job_id}/interpretation?includeItems=true",
+        "downloadUrl": (
+            f"/api/jobs/{job_id}/interpretation/download" if available else None
+        ),
+        "error": job.get("interpretation_error"),
+    }
 
 
 def _strict_query_bool(value: str | None, *, field: str, default: bool) -> bool:
