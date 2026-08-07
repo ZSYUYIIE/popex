@@ -13,6 +13,15 @@ _TRANSCRIPTION_COUNT_FIELDS = frozenset(
         "aligned_event_count",
     }
 )
+_INTERPRETATION_COUNT_FIELDS = frozenset(
+    {
+        "interpretation_part_count",
+        "interpretation_phrase_count",
+        "interpretation_pitched_item_count",
+        "interpretation_percussion_item_count",
+        "interpretation_warning_count",
+    }
+)
 
 NEW_COLUMNS: dict[str, str] = {
     "source_type": "TEXT NOT NULL DEFAULT 'url'",
@@ -61,6 +70,29 @@ NEW_COLUMNS: dict[str, str] = {
         "INTEGER CHECK (aligned_event_count IS NULL OR aligned_event_count >= 0)"
     ),
     "transcription_error": "TEXT",
+    "interpretation_status": "TEXT NOT NULL DEFAULT 'not_started'",
+    "interpretation_stage": "TEXT NOT NULL DEFAULT 'not_started'",
+    "interpretation_progress": "REAL NOT NULL DEFAULT 0",
+    "interpretation_message": "TEXT",
+    "interpretation_version": "TEXT",
+    "interpretation_artifact_file_name": "TEXT",
+    "interpreted_at": "TEXT",
+    "interpretation_part_count": (
+        "INTEGER CHECK (interpretation_part_count IS NULL OR interpretation_part_count >= 0)"
+    ),
+    "interpretation_phrase_count": (
+        "INTEGER CHECK (interpretation_phrase_count IS NULL OR interpretation_phrase_count >= 0)"
+    ),
+    "interpretation_pitched_item_count": (
+        "INTEGER CHECK (interpretation_pitched_item_count IS NULL OR interpretation_pitched_item_count >= 0)"
+    ),
+    "interpretation_percussion_item_count": (
+        "INTEGER CHECK (interpretation_percussion_item_count IS NULL OR interpretation_percussion_item_count >= 0)"
+    ),
+    "interpretation_warning_count": (
+        "INTEGER CHECK (interpretation_warning_count IS NULL OR interpretation_warning_count >= 0)"
+    ),
+    "interpretation_error": "TEXT",
 }
 
 
@@ -136,7 +168,40 @@ def init_database(database_path: Path) -> None:
                     ),
                 aligned_event_count INTEGER
                     CHECK (aligned_event_count IS NULL OR aligned_event_count >= 0),
-                transcription_error TEXT
+                transcription_error TEXT,
+                interpretation_status TEXT NOT NULL DEFAULT 'not_started',
+                interpretation_stage TEXT NOT NULL DEFAULT 'not_started',
+                interpretation_progress REAL NOT NULL DEFAULT 0,
+                interpretation_message TEXT,
+                interpretation_version TEXT,
+                interpretation_artifact_file_name TEXT,
+                interpreted_at TEXT,
+                interpretation_part_count INTEGER
+                    CHECK (
+                        interpretation_part_count IS NULL
+                        OR interpretation_part_count >= 0
+                    ),
+                interpretation_phrase_count INTEGER
+                    CHECK (
+                        interpretation_phrase_count IS NULL
+                        OR interpretation_phrase_count >= 0
+                    ),
+                interpretation_pitched_item_count INTEGER
+                    CHECK (
+                        interpretation_pitched_item_count IS NULL
+                        OR interpretation_pitched_item_count >= 0
+                    ),
+                interpretation_percussion_item_count INTEGER
+                    CHECK (
+                        interpretation_percussion_item_count IS NULL
+                        OR interpretation_percussion_item_count >= 0
+                    ),
+                interpretation_warning_count INTEGER
+                    CHECK (
+                        interpretation_warning_count IS NULL
+                        OR interpretation_warning_count >= 0
+                    ),
+                interpretation_error TEXT
             )
             """
         )
@@ -221,6 +286,39 @@ def init_database(database_path: Path) -> None:
                 aligned_event_count = CASE
                     WHEN aligned_event_count < 0 THEN NULL
                     ELSE aligned_event_count
+                END,
+                interpretation_status = COALESCE(
+                    NULLIF(TRIM(interpretation_status), ''),
+                    'not_started'
+                ),
+                interpretation_stage = COALESCE(
+                    NULLIF(TRIM(interpretation_stage), ''),
+                    'not_started'
+                ),
+                interpretation_progress = CASE
+                    WHEN interpretation_progress IS NULL
+                         OR interpretation_progress < 0 THEN 0
+                    ELSE interpretation_progress
+                END,
+                interpretation_part_count = CASE
+                    WHEN interpretation_part_count < 0 THEN NULL
+                    ELSE interpretation_part_count
+                END,
+                interpretation_phrase_count = CASE
+                    WHEN interpretation_phrase_count < 0 THEN NULL
+                    ELSE interpretation_phrase_count
+                END,
+                interpretation_pitched_item_count = CASE
+                    WHEN interpretation_pitched_item_count < 0 THEN NULL
+                    ELSE interpretation_pitched_item_count
+                END,
+                interpretation_percussion_item_count = CASE
+                    WHEN interpretation_percussion_item_count < 0 THEN NULL
+                    ELSE interpretation_percussion_item_count
+                END,
+                interpretation_warning_count = CASE
+                    WHEN interpretation_warning_count < 0 THEN NULL
+                    ELSE interpretation_warning_count
                 END
             """
         )
@@ -267,6 +365,7 @@ def fail_incomplete_jobs(database_path: Path) -> None:
             WHERE status IN ('queued', 'processing')
               AND separation_status != 'processing'
               AND transcription_status != 'processing'
+              AND interpretation_status != 'processing'
             """,
             (now,),
         )
@@ -326,6 +425,40 @@ def fail_incomplete_jobs(database_path: Path) -> None:
                 transcription_error = 'Raw transcription was interrupted by a server restart.',
                 updated_at = ?
             WHERE transcription_status = 'processing'
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            UPDATE jobs
+            SET status = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                         AND analysis_status = 'completed'
+                         AND transcription_status = 'completed' THEN 'completed'
+                    ELSE status
+                END,
+                stage = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                         AND analysis_status = 'completed'
+                         AND transcription_status = 'completed' THEN 'completed'
+                    ELSE stage
+                END,
+                message = CASE
+                    WHEN status IN ('queued', 'processing')
+                         AND preparation_status = 'completed'
+                         AND analysis_status = 'completed'
+                         AND transcription_status = 'completed'
+                        THEN 'Raw transcription and any previous editable draft remain available; interpretation can be retried.'
+                    ELSE message
+                END,
+                interpretation_status = 'failed',
+                interpretation_stage = 'failed',
+                interpretation_message = 'Raw transcription and any previous editable draft remain available; interpretation can be retried.',
+                interpretation_error = 'Editable interpretation was interrupted by a server restart.',
+                updated_at = ?
+            WHERE interpretation_status = 'processing'
             """,
             (now,),
         )
@@ -445,6 +578,47 @@ def claim_transcription_attempt(
         return cursor.rowcount == 1
 
 
+def claim_interpretation_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    interpretation_version: str,
+    force: bool = False,
+    message: str = "Preparing editable interpretation.",
+) -> bool:
+    """Atomically claim one editable-interpretation attempt without clearing prior output."""
+    now = utc_now()
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET interpretation_status = 'processing',
+                interpretation_stage = 'preparing_interpretation',
+                interpretation_progress = 1,
+                interpretation_message = ?,
+                interpretation_version = ?,
+                interpretation_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+              AND preparation_status = 'completed'
+              AND analysis_status = 'completed'
+              AND transcription_status = 'completed'
+              AND (
+                    interpretation_status IN ('not_started', 'failed')
+                    OR (? = 1 AND interpretation_status = 'completed')
+              )
+            """,
+            (
+                message,
+                interpretation_version,
+                now,
+                job_id,
+                int(bool(force)),
+            ),
+        )
+        return cursor.rowcount == 1
+
+
 def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
     allowed = set(NEW_COLUMNS) | {
         "source_url",
@@ -456,7 +630,7 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
         "error",
     }
     values = {key: value for key, value in fields.items() if key in allowed}
-    _validate_transcription_counts(values)
+    _validate_nonnegative_counts(values)
     if not values:
         return
     values["updated_at"] = utc_now()
@@ -469,9 +643,11 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
         )
 
 
-def _validate_transcription_counts(values: dict[str, Any]) -> None:
-    for field in _TRANSCRIPTION_COUNT_FIELDS:
-        value = values.get(field)
+def _validate_nonnegative_counts(values: dict[str, Any]) -> None:
+    for field in _TRANSCRIPTION_COUNT_FIELDS | _INTERPRETATION_COUNT_FIELDS:
+        if field not in values:
+            continue
+        value = values[field]
         if value is None:
             continue
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
