@@ -267,6 +267,27 @@ def test_pre_replace_failure_preserves_previous_artifact(
     assert not list(path.parent.glob(".*.tmp"))
 
 
+def test_post_replace_failure_preserves_previous_artifact(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+
+    import app.harmony_artifacts as module
+
+    def fail_directory_sync(_directory: Path) -> None:
+        raise HarmonyArtifactError("simulated post-replace sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_directory_sync)
+    with pytest.raises(HarmonyArtifactError, match="post-replace"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob(".*.tmp"))
+
+
 def test_corrupt_json_and_schema_are_not_exposed(settings: Settings) -> None:
     path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
     path.write_text("{not json", encoding="utf-8")
