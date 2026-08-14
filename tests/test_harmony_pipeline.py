@@ -90,7 +90,6 @@ def _tonality() -> dict:
         "mode": "major",
         "symbol": "C major",
         "confidence": 0.82,
-        "scoreMargin": 0.1,
         "tuningOffsetCents": 3.0,
         "chromaMean": [0.0] * 12,
         "alternatives": [],
