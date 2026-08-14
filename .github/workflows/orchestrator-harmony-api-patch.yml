@@ -1,0 +1,39 @@
+name: Orchestrator harmonic API patch
+
+on:
+  push:
+    branches:
+      - orchestrator/harmony-api
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: orchestrator/harmony-api
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Patch and validate harmonic API
+        run: |
+          python .github/scripts/orchestrator_harmony_api_patch.py
+          pip install -e '.[dev]'
+          pytest tests/test_harmony_api.py
+          pytest
+          python -m compileall -q app tests
+          node --check app/static/app.js
+          git diff --check
+          if git diff --quiet -- app/main.py; then
+            exit 0
+          fi
+          git config user.name popex-orchestrator
+          git config user.email actions@users.noreply.github.com
+          git add app/main.py
+          git commit -m "Wire durable harmonic-context API workflow"
+          git push origin HEAD:orchestrator/harmony-api
