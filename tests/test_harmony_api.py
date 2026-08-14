@@ -274,11 +274,22 @@ def create_job(
         aligned_event_count=0 if transcribed else None,
         interpretation_status=interpretation_status,
         interpretation_stage=interpretation_status,
-        harmony_status=harmony_status,
-        harmony_stage=harmony_status,
     )
     if transcribed:
         write_raw_transcription(job_id, settings, raw_payload())
+    if harmony_status == "processing":
+        assert db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+        )
+    elif harmony_status != "not_started":
+        db.update_job(
+            settings.database_path,
+            job_id,
+            harmony_status=harmony_status,
+            harmony_stage=harmony_status,
+        )
     return job_id
 
 
@@ -314,7 +325,7 @@ def publish_harmony(
             "unresolvedSegmentCount"
         ],
         harmony_unresolved_event_count=diagnostics["unresolvedEventCount"],
-        harmony_warning_count=diagnostics["warningCount"],
+        harmony_warning_count=len(payload["warnings"]),
         harmony_used_interpretation_context=False,
         harmony_error=None,
     )
@@ -773,7 +784,7 @@ def test_summary_full_details_and_download_use_validated_artifact_truth(
         "resolved": artifact["diagnostics"]["resolvedSegmentCount"],
         "unresolved": artifact["diagnostics"]["unresolvedSegmentCount"],
         "unresolvedEvents": artifact["diagnostics"]["unresolvedEventCount"],
-        "warnings": artifact["diagnostics"]["warningCount"],
+        "warnings": len(artifact["warnings"]),
     }
     assert "rawEvidence" not in summary_payload
     assert "segments" not in summary_payload
