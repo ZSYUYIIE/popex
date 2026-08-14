@@ -2,7 +2,8 @@ from pathlib import Path
 
 path = Path("tests/test_harmony_pipeline.py")
 text = path.read_text(encoding="utf-8")
-old = '''def _alignment(events: list[dict]) -> list[dict]:
+
+old_alignment = '''def _alignment(events: list[dict]) -> list[dict]:
     result = []
     for event in events:
         raw_time = event["startSeconds"]
@@ -23,7 +24,7 @@ old = '''def _alignment(events: list[dict]) -> list[dict]:
         )
     return result
 '''
-new = '''def _alignment(events: list[dict]) -> list[dict]:
+new_alignment = '''def _alignment(events: list[dict]) -> list[dict]:
     result = []
     for event in events:
         raw_time = event["startSeconds"]
@@ -44,9 +45,31 @@ new = '''def _alignment(events: list[dict]) -> list[dict]:
         )
     return result
 '''
-if old in text:
-    if text.count(old) != 1:
+old_assertion = '''    assert reloaded_raw["pitchedNoteEvents"][0]["midiPitch"] == 60.12
+'''
+new_assertion = '''    assert next(
+        event["midiPitch"]
+        for event in reloaded_raw["pitchedNoteEvents"]
+        if event["id"] == "p_c"
+    ) == 60.12
+'''
+
+changed = False
+if old_alignment in text:
+    if text.count(old_alignment) != 1:
         raise SystemExit("alignment fixture marker is ambiguous")
-    path.write_text(text.replace(old, new, 1), encoding="utf-8")
-elif new not in text:
+    text = text.replace(old_alignment, new_alignment, 1)
+    changed = True
+elif new_alignment not in text:
     raise SystemExit("alignment fixture marker not found")
+
+if old_assertion in text:
+    if text.count(old_assertion) != 1:
+        raise SystemExit("raw event assertion marker is ambiguous")
+    text = text.replace(old_assertion, new_assertion, 1)
+    changed = True
+elif new_assertion not in text:
+    raise SystemExit("raw event assertion marker not found")
+
+if changed:
+    path.write_text(text, encoding="utf-8")
