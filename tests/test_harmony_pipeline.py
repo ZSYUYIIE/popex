@@ -181,10 +181,10 @@ def _alignment(events: list[dict]) -> list[dict]:
                 "eventType": "pitched",
                 "rawTimeSeconds": raw_time,
                 "beatIndex": 0,
-                "subdivision": 4,
-                "subdivisionIndex": min(3, int(round(raw_time * 4))),
-                "alignedTimeSeconds": raw_time,
-                "offsetSeconds": 0.0,
+                "subdivision": 1,
+                "subdivisionIndex": 0,
+                "alignedTimeSeconds": 0.0,
+                "offsetSeconds": raw_time,
                 "confidence": 0.9,
                 "measureIndex": 0,
                 "beatInMeasure": 1,
@@ -387,7 +387,11 @@ def test_processor_receives_detached_exact_current_inputs(
     assert captured["version"] == HARMONY_INFERENCE_VERSION
     reloaded_raw = load_raw_transcription(JOB_ID, settings)
     assert reloaded_raw is not None
-    assert reloaded_raw["pitchedNoteEvents"][0]["midiPitch"] == 60.12
+    assert next(
+        event["midiPitch"]
+        for event in reloaded_raw["pitchedNoteEvents"]
+        if event["id"] == "p_c"
+    ) == 60.12
     reloaded_draft = load_transcription_draft(JOB_ID, settings)
     assert reloaded_draft == draft
 
