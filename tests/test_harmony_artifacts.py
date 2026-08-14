@@ -89,6 +89,13 @@ def resolved_result():
             event("bass_e", 52, source="bass", confidence=0.95, midi_pitch=52.08),
             event("e", 64, source="other", midi_pitch=63.91),
             event("g", 67, source="other", midi_pitch=67.04),
+            event(
+                "fsharp",
+                66,
+                source="other",
+                confidence=0.18,
+                midi_pitch=66.03,
+            ),
         ],
         timing(),
         tonality(),

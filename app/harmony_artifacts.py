@@ -1010,6 +1010,8 @@ def _keys(
     optional: set[str],
     label: str,
 ) -> None:
+    if not all(isinstance(key, str) for key in value):
+        raise HarmonyArtifactValidationError(f"{label} contains a non-string field.")
     keys = set(value)
     missing = required - keys
     unknown = keys - required - optional
@@ -1021,8 +1023,6 @@ def _keys(
         raise HarmonyArtifactValidationError(
             f"{label} contains unsupported fields: {', '.join(sorted(unknown))}."
         )
-    if not all(isinstance(key, str) for key in value):
-        raise HarmonyArtifactValidationError(f"{label} contains a non-string field.")
 
 
 def _id(value: Any, label: str) -> str:
