@@ -75,7 +75,9 @@ from app.harmony_artifacts import (
     HarmonyArtifactError,
     HarmonyArtifactUnavailableError,
     harmony_artifact_path,
+    harmony_attempt_artifact_file_name,
     load_harmony_artifact,
+    remove_harmony_artifact,
 )
 from app.harmony_pipeline import (
     HARMONY_PIPELINE_VERSION,
@@ -124,10 +126,7 @@ InterpretationProcessor = Callable[
     [str, Settings, Callable[[str, str, float], None]],
     InterpretationPipelineResult,
 ]
-HarmonyProcessor = Callable[
-    [str, Settings, Callable[[str, str, float], None]],
-    HarmonyPipelineResult,
-]
+HarmonyProcessor = Callable[..., HarmonyPipelineResult]
 
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
@@ -158,6 +157,9 @@ _HARMONY_PITCH_CLASS_NAMES = (
     "A",
     "A#",
     "B",
+)
+_HARMONY_ARTIFACT_FILE_RE = re.compile(
+    r"harmony/harmonic-context(?:\.[a-f0-9]{32})?\.json"
 )
 _INTERNAL_SEPARATION_FIELDS = frozenset(
     {
@@ -744,7 +746,7 @@ def create_app(
             )
 
         harmony_status = record.get("harmony_status") or "not_started"
-        if harmony_status == "processing":
+        if harmony_status == "processing" and not force_value:
             raise HTTPException(
                 status_code=409,
                 detail="Harmonic-context processing is already running.",
@@ -789,7 +791,6 @@ def create_app(
             attempt_id,
         )
         return serialize_job(current or record)
-
 
     @app.get("/api/jobs/{job_id}/analysis")
     def get_analysis(job_id: str) -> dict:
@@ -971,9 +972,19 @@ def create_app(
         record = db.get_job(app_settings.database_path, job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found")
+        artifact_file_name = record.get("harmony_artifact_file_name")
+        if not _is_harmony_artifact_file_name(artifact_file_name):
+            raise HTTPException(
+                status_code=404,
+                detail="Published harmonic context is unavailable.",
+            )
         _load_harmony_for_http(job_id, app_settings, record)
         try:
-            path = harmony_artifact_path(job_id, app_settings)
+            path = harmony_artifact_path(
+                job_id,
+                app_settings,
+                artifact_file_name=artifact_file_name,
+            )
         except HarmonyArtifactUnavailableError:
             raise HTTPException(
                 status_code=404,
@@ -993,7 +1004,6 @@ def create_app(
             filename="harmonic-context.json",
             media_type="application/json",
         )
-
 
     @app.get("/api/jobs/{job_id}/stems")
     def get_stems(job_id: str) -> dict:
@@ -1545,6 +1555,20 @@ def _run_harmony_job(
     attempt_id: str | None = None,
 ) -> None:
     last_progress = 1.0
+    try:
+        expected_artifact_file_name = (
+            HARMONY_ARTIFACT_RELATIVE_PATH
+            if attempt_id is None
+            else harmony_attempt_artifact_file_name(attempt_id)
+        )
+    except HarmonyArtifactError:
+        _record_harmony_failure(
+            settings,
+            job_id,
+            "Harmonic-context attempt identity is invalid.",
+            attempt_id=attempt_id,
+        )
+        return
 
     def update_stage(stage: str, message: str, progress: float) -> None:
         nonlocal last_progress
@@ -1572,8 +1596,18 @@ def _run_harmony_job(
         last_progress = next_progress
 
     try:
-        result = processor(job_id, settings, update_stage)
+        result = processor(
+            job_id,
+            settings,
+            update_stage,
+            attempt_id=attempt_id,
+        )
     except HarmonyPipelineError as exc:
+        _cleanup_harmony_artifact(
+            settings,
+            job_id,
+            expected_artifact_file_name,
+        )
         _record_harmony_failure(
             settings,
             job_id,
@@ -1584,6 +1618,11 @@ def _run_harmony_job(
         logging.exception(
             "Unexpected harmonic-context failure for job %s",
             job_id,
+        )
+        _cleanup_harmony_artifact(
+            settings,
+            job_id,
+            expected_artifact_file_name,
         )
         _record_harmony_failure(
             settings,
@@ -1596,10 +1635,16 @@ def _run_harmony_job(
             job_id,
             settings,
             result,
+            attempt_id=attempt_id,
         ):
             logging.error(
                 "Harmony processor returned an invalid result for %s",
                 job_id,
+            )
+            _cleanup_harmony_artifact(
+                settings,
+                job_id,
+                expected_artifact_file_name,
             )
             _record_harmony_failure(
                 settings,
@@ -1627,6 +1672,11 @@ def _run_harmony_job(
                 "Discarded stale harmonic-context result for job %s",
                 job_id,
             )
+            _cleanup_harmony_artifact(
+                settings,
+                job_id,
+                expected_artifact_file_name,
+            )
             _record_harmony_failure(
                 settings,
                 job_id,
@@ -1634,6 +1684,11 @@ def _run_harmony_job(
                 attempt_id=attempt_id,
             )
             return
+        previous_artifact_file_name = (
+            current.get("harmony_artifact_file_name")
+            if current is not None
+            else None
+        )
         completed = db.complete_harmony_attempt(
             settings.database_path,
             job_id,
@@ -1654,14 +1709,40 @@ def _run_harmony_job(
                 "Discarded stale harmonic-context completion for job %s",
                 job_id,
             )
+            _cleanup_harmony_artifact(
+                settings,
+                job_id,
+                expected_artifact_file_name,
+            )
+            return
+        if (
+            isinstance(previous_artifact_file_name, str)
+            and previous_artifact_file_name != result.artifact_file_name
+            and _is_harmony_artifact_file_name(previous_artifact_file_name)
+        ):
+            _cleanup_harmony_artifact(
+                settings,
+                job_id,
+                previous_artifact_file_name,
+            )
 
 
 def _validate_harmony_processor_result(
     job_id: str,
     settings: Settings,
     result: object,
+    *,
+    attempt_id: str | None,
 ) -> bool:
     if not isinstance(result, HarmonyPipelineResult):
+        return False
+    try:
+        expected_artifact_file_name = (
+            HARMONY_ARTIFACT_RELATIVE_PATH
+            if attempt_id is None
+            else harmony_attempt_artifact_file_name(attempt_id)
+        )
+    except HarmonyArtifactError:
         return False
     counts = (
         result.event_count,
@@ -1672,7 +1753,7 @@ def _validate_harmony_processor_result(
         result.warning_count,
     )
     if (
-        result.artifact_file_name != HARMONY_ARTIFACT_RELATIVE_PATH
+        result.artifact_file_name != expected_artifact_file_name
         or not isinstance(result.version, str)
         or not result.version
         or not isinstance(result.created_at, str)
@@ -1702,7 +1783,11 @@ def _validate_harmony_processor_result(
     ):
         return False
     try:
-        artifact = load_harmony_artifact(job_id, settings)
+        artifact = load_harmony_artifact(
+            job_id,
+            settings,
+            artifact_file_name=expected_artifact_file_name,
+        )
     except HarmonyArtifactError:
         return False
     if artifact is None or artifact != result.payload:
@@ -1734,6 +1819,24 @@ def _validate_harmony_processor_result(
         ):
             return False
     return True
+
+
+def _cleanup_harmony_artifact(
+    settings: Settings,
+    job_id: str,
+    artifact_file_name: str,
+) -> None:
+    try:
+        remove_harmony_artifact(
+            job_id,
+            settings,
+            artifact_file_name=artifact_file_name,
+        )
+    except HarmonyArtifactError:
+        logging.warning(
+            "Could not clean a non-durable harmony artifact for job %s",
+            job_id,
+        )
 
 
 def _record_harmony_failure(
@@ -1776,7 +1879,6 @@ def _safe_harmony_error(value: str, settings: Settings) -> str:
     if not cleaned or "/" in cleaned or "\\" in cleaned:
         return "Harmonic-context processing failed."
     return cleaned[:500]
-
 
 
 def _record_analysis_failure(
@@ -1978,7 +2080,6 @@ def _serialize_interpretation(job: dict) -> dict[str, Any] | None:
     }
 
 
-
 def _serialize_harmony(job: dict) -> dict[str, Any] | None:
     status_value = job.get("harmony_status")
     status = (
@@ -1994,9 +2095,8 @@ def _serialize_harmony(job: dict) -> dict[str, Any] | None:
     if not should_expose:
         return None
     job_id = job["id"]
-    available = (
+    available = _is_harmony_artifact_file_name(
         job.get("harmony_artifact_file_name")
-        == HARMONY_ARTIFACT_RELATIVE_PATH
     )
     ready = (
         job.get("analysis_status") == "completed"
@@ -2049,7 +2149,6 @@ def _serialize_harmony(job: dict) -> dict[str, Any] | None:
     }
 
 
-
 def _strict_query_bool(value: str | None, *, field: str, default: bool) -> bool:
     if value is None:
         return default
@@ -2061,6 +2160,7 @@ def _strict_query_bool(value: str | None, *, field: str, default: bool) -> bool:
         status_code=422,
         detail=f"{field} must be true or false.",
     )
+
 
 def _safe_progress(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -2125,7 +2225,6 @@ def _serialize_file(job: dict, path: Path) -> dict:
     }
 
 
-
 def _load_matching_raw_transcription_for_harmony(
     job_id: str,
     settings: Settings,
@@ -2179,6 +2278,7 @@ def _harmony_raw_evidence(
             "pitchClass": event["midiNote"] % 12,
             "pitchName": _HARMONY_PITCH_CLASS_NAMES[event["midiNote"] % 12],
             "confidence": event["confidence"],
+            "warnings": list(event.get("warnings", [])),
         }
         for event in raw_transcription.get("pitchedNoteEvents", ())
     ]
@@ -2192,21 +2292,27 @@ def _harmony_raw_evidence(
     return evidence
 
 
+def _is_harmony_artifact_file_name(value: object) -> bool:
+    return isinstance(value, str) and _HARMONY_ARTIFACT_FILE_RE.fullmatch(value) is not None
+
+
 def _load_harmony_for_http(
     job_id: str,
     settings: Settings,
     record: dict,
 ) -> dict[str, Any]:
-    if (
-        record.get("harmony_artifact_file_name")
-        != HARMONY_ARTIFACT_RELATIVE_PATH
-    ):
+    artifact_file_name = record.get("harmony_artifact_file_name")
+    if not _is_harmony_artifact_file_name(artifact_file_name):
         raise HTTPException(
             status_code=404,
             detail="Published harmonic context is unavailable.",
         )
     try:
-        artifact = load_harmony_artifact(job_id, settings)
+        artifact = load_harmony_artifact(
+            job_id,
+            settings,
+            artifact_file_name=artifact_file_name,
+        )
     except HarmonyArtifactError:
         logging.exception(
             "Published harmonic context failed validation for job %s",
@@ -2351,7 +2457,6 @@ def _harmony_details_payload(
             "unresolvedEventIds"
         ]
     return payload
-
 
 
 def _stem_artifact_or_http_error(
