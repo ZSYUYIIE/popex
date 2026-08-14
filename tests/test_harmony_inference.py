@@ -95,6 +95,12 @@ def test_clear_c_major_is_resolved_with_raw_evidence() -> None:
     assert result.unresolved_event_ids == ()
     assert result.diagnostics["rawTimingAuthoritative"] is True
     assert result.diagnostics["fractionalPitchPreserved"] is True
+    assert result.diagnostics["rawEvidenceIncluded"] is True
+    assert result.raw_evidence[0]["id"] == "c"
+    assert result.raw_evidence[0]["rawStartSeconds"] == 0.0
+    assert result.raw_evidence[0]["rawEndSeconds"] == 1.0
+    assert result.raw_evidence[0]["midiPitch"] == 60.12
+    assert result.raw_evidence[0]["sourceKind"] == "vocals"
 
 
 def test_clear_a_minor_is_resolved() -> None:
@@ -273,6 +279,19 @@ def test_single_pitch_remains_unresolved_instead_of_fabricating_chord() -> None:
     assert first["primaryCandidate"] is None
     assert first["alternatives"] == []
     assert result.unresolved_event_ids == ("c",)
+    assert result.raw_evidence == (
+        {
+            "id": "c",
+            "sourceKind": "other",
+            "rawStartSeconds": 0.0,
+            "rawEndSeconds": 1.0,
+            "midiNote": 60,
+            "midiPitch": 60.0,
+            "pitchClass": 0,
+            "pitchName": "C",
+            "confidence": 0.9,
+        },
+    )
     assert any("does not support" in warning for warning in first["warnings"])
 
 
@@ -332,7 +351,9 @@ def test_payload_returns_detached_copy() -> None:
     first = result.payload()
     second = result.payload()
     first["segments"][0]["supportingEventIds"].clear()
+    first["raw_evidence"][0]["midiPitch"] = 0
     assert second["segments"][0]["supportingEventIds"] == ["c", "e", "g"]
+    assert second["raw_evidence"][0]["midiPitch"] == 60.0
 
 
 @pytest.mark.parametrize("bad", ["", "Bad ID", "../c", "c/1", "c\\1", "x" * 97])
@@ -405,12 +426,18 @@ def test_invalid_tonality_is_rejected_but_missing_tonality_is_valid() -> None:
         infer_harmony([], timing(), tonality("C", "ionian", 1.2))
 
 
-def test_unsafe_event_warning_text_is_rejected() -> None:
+@pytest.mark.parametrize(
+    "warning",
+    [
+        "debug at /home/user/private.wav",
+        "<script>alert(1)</script>",
+        "api_key=private-value",
+        "line one\nline two",
+    ],
+)
+def test_unsafe_event_warning_text_is_rejected(warning: str) -> None:
     with pytest.raises(HarmonyInferenceError, match="unsafe text"):
-        infer_harmony(
-            [event("c", 60, warnings=["debug at /home/user/private.wav"])],
-            timing(),
-        )
+        infer_harmony([event("c", 60, warnings=[warning])], timing())
 
 
 def test_bad_part_evidence_references_and_assignments_fail() -> None:

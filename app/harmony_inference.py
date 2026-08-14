@@ -66,6 +66,11 @@ _UNSAFE_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SECRET_TEXT_RE = re.compile(
+    r"\b(?:token|password|secret|authorization|api[_-]?key|access[_-]?key)\b\s*[:=]",
+    re.IGNORECASE,
+)
+
 _MAX_EVENTS = 100_000
 _MAX_WINDOWS = 20_000
 _MAX_ALTERNATIVES = 3
@@ -89,6 +94,7 @@ class HarmonyInferenceError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class HarmonyInferenceResult:
     version: str
+    raw_evidence: tuple[dict[str, Any], ...]
     segments: tuple[dict[str, Any], ...]
     tonal_context: dict[str, Any] | None
     unresolved_event_ids: tuple[str, ...]
@@ -153,6 +159,7 @@ def infer_harmony(
     timing_data = _parse_timing(timing)
     tonal_context = _parse_tonality(tonality)
     assignments = _parse_part_evidence(pitched_part_evidence, events)
+    raw_evidence = tuple(_raw_event_payload(event) for event in events)
 
     windows, window_mode = _build_windows(events, timing_data)
     warnings: list[str] = []
@@ -223,6 +230,7 @@ def infer_harmony(
         ),
         "rawTimingAuthoritative": True,
         "fractionalPitchPreserved": True,
+        "rawEvidenceIncluded": True,
         "tonalContextAdvisoryOnly": True,
         "bassSourceRequiredForInversion": True,
         "chordVocabulary": [quality for quality, _ in _CHORD_TEMPLATES],
@@ -232,6 +240,7 @@ def infer_harmony(
     }
     result = HarmonyInferenceResult(
         version=version,
+        raw_evidence=raw_evidence,
         segments=tuple(segments),
         tonal_context=_tonal_payload(tonal_context),
         unresolved_event_ids=unresolved_event_ids,
@@ -243,6 +252,20 @@ def infer_harmony(
     except (TypeError, ValueError) as exc:
         raise HarmonyInferenceError("Harmonic inference produced unsafe JSON data.") from exc
     return result
+
+
+def _raw_event_payload(event: _Event) -> dict[str, Any]:
+    return {
+        "id": event.event_id,
+        "sourceKind": event.source_kind,
+        "rawStartSeconds": event.start,
+        "rawEndSeconds": event.end,
+        "midiNote": event.midi_note,
+        "midiPitch": event.midi_pitch,
+        "pitchClass": event.pitch_class,
+        "pitchName": PITCH_CLASS_NAMES[event.pitch_class],
+        "confidence": event.confidence,
+    }
 
 
 def _parse_events(values: object) -> tuple[_Event, ...]:
@@ -852,6 +875,10 @@ def _validate_warnings(value: object, label: str) -> None:
             or not warning
             or len(warning) > _MAX_WARNING_LENGTH
             or _UNSAFE_TEXT_RE.search(warning)
+            or _SECRET_TEXT_RE.search(warning)
+            or "<" in warning
+            or ">" in warning
+            or any(ord(character) < 32 or ord(character) == 127 for character in warning)
         ):
             raise HarmonyInferenceError(f"{label} contains unsafe text.")
 
