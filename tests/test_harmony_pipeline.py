@@ -90,6 +90,7 @@ def _tonality() -> dict:
         "mode": "major",
         "symbol": "C major",
         "confidence": 0.82,
+        "scoreMargin": 0.1,
         "tuningOffsetCents": 3.0,
         "chromaMean": [0.0] * 12,
         "alternatives": [],
@@ -685,6 +686,48 @@ def test_publication_failure_preserves_previous_artifact(
     assert path.read_bytes() == before
 
 
+def test_post_replace_publication_failure_preserves_previous_artifact(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_inputs(settings)
+    infer_harmony_job(JOB_ID, settings, created_at=FIXED_HARMONY_AT)
+    path = _artifact_path(settings)
+    before = path.read_bytes()
+
+    import app.harmony_artifacts as artifact_module
+
+    def fail_directory_sync(_directory: Path) -> None:
+        raise HarmonyArtifactError("injected post-replace publication failure")
+
+    monkeypatch.setattr(artifact_module, "_fsync_directory", fail_directory_sync)
+    with pytest.raises(HarmonyPipelineError, match="could not be published safely"):
+        infer_harmony_job(
+            JOB_ID,
+            settings,
+            created_at="2026-08-14T04:01:00+00:00",
+        )
+    assert path.read_bytes() == before
+
+
+def test_first_post_replace_publication_failure_leaves_no_artifact(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_inputs(settings)
+    path = _artifact_path(settings)
+
+    import app.harmony_artifacts as artifact_module
+
+    def fail_directory_sync(_directory: Path) -> None:
+        raise HarmonyArtifactError("injected first publication post-replace failure")
+
+    monkeypatch.setattr(artifact_module, "_fsync_directory", fail_directory_sync)
+    with pytest.raises(HarmonyPipelineError, match="could not be published safely"):
+        infer_harmony_job(JOB_ID, settings, created_at=FIXED_HARMONY_AT)
+    assert not path.exists()
+
+
 def test_reload_failure_restores_previous_valid_artifact(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -715,6 +758,30 @@ def test_reload_failure_restores_previous_valid_artifact(
             created_at="2026-08-14T04:01:00+00:00",
         )
     assert path.read_bytes() == before
+
+
+def test_reload_failure_without_previous_removes_unverified_artifact(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_inputs(settings)
+    path = _artifact_path(settings)
+
+    import app.harmony_pipeline as pipeline_module
+
+    calls = 0
+
+    def fail_second_load(_job_id: str, _settings: Settings):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        raise HarmonyArtifactError("verification failed")
+
+    monkeypatch.setattr(pipeline_module, "load_harmony_artifact", fail_second_load)
+    with pytest.raises(HarmonyPipelineError, match="could not be verified"):
+        infer_harmony_job(JOB_ID, settings, created_at=FIXED_HARMONY_AT)
+    assert not path.exists()
 
 
 def test_reload_mismatch_restores_previous_valid_artifact(
@@ -748,6 +815,57 @@ def test_reload_mismatch_restores_previous_valid_artifact(
             created_at="2026-08-14T04:01:00+00:00",
         )
     assert path.read_bytes() == before
+
+
+def test_verification_restoration_failure_is_explicit_and_bounded(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_inputs(settings)
+    infer_harmony_job(JOB_ID, settings, created_at=FIXED_HARMONY_AT)
+
+    import app.harmony_artifacts as artifact_module
+    import app.harmony_pipeline as pipeline_module
+
+    actual_load = artifact_module.load_harmony_artifact
+    calls = 0
+
+    def fail_second_load(job_id: str, app_settings: Settings):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return actual_load(job_id, app_settings)
+        raise HarmonyArtifactError("verification failed")
+
+    def fail_restore(*_args, **_kwargs) -> None:
+        raise HarmonyArtifactError("restore failed at /private/secret")
+
+    monkeypatch.setattr(pipeline_module, "load_harmony_artifact", fail_second_load)
+    monkeypatch.setattr(pipeline_module, "_restore_harmony_artifact", fail_restore)
+    with pytest.raises(HarmonyPipelineError, match="could not be restored safely") as caught:
+        infer_harmony_job(
+            JOB_ID,
+            settings,
+            created_at="2026-08-14T04:01:00+00:00",
+        )
+    assert "/" not in str(caught.value)
+    assert "\\" not in str(caught.value)
+
+
+def test_windows_policy_does_not_require_directory_fsync(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as artifact_module
+
+    directory = settings.exports_dir / JOB_ID
+    monkeypatch.setattr(artifact_module, "_directory_fsync_supported", lambda: False)
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("directory open should be skipped when fsync is unsupported")
+
+    monkeypatch.setattr(artifact_module.os, "open", unexpected_open)
+    artifact_module._fsync_directory(directory)
 
 
 def test_same_inputs_and_timestamp_are_byte_stable(settings: Settings) -> None:
