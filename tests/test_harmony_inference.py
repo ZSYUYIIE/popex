@@ -147,6 +147,21 @@ def test_power_interval_keeps_major_minor_ambiguity_explicit() -> None:
     assert any("lacks a third" in warning for warning in first["warnings"])
 
 
+def test_major_third_dyad_remains_unresolved_with_alternatives() -> None:
+    result = infer_harmony(
+        [event("c", 60, source="full_mix"), event("e", 64, source="full_mix")],
+        timing(),
+    )
+    first = segment(result)
+
+    assert first["unresolved"] is True
+    assert first["primaryCandidate"] is None
+    identities = {(candidate["root"], candidate["quality"]) for candidate in first["alternatives"]}
+    assert ("C", "major") in identities
+    assert ("A", "minor") in identities
+    assert result.unresolved_event_ids == ("c", "e")
+
+
 def test_non_chord_tones_remain_visible_and_do_not_disappear() -> None:
     result = infer_harmony(
         [
@@ -476,6 +491,16 @@ def test_bad_part_evidence_references_and_assignments_fail() -> None:
                 "unassignedEventIds": ["c"],
             },
         )
+
+
+def test_unassigned_event_ids_are_bounded() -> None:
+    events = [event("c", 60)]
+    evidence = {
+        "assignments": [],
+        "unassignedEventIds": ["c"] * 100_001,
+    }
+    with pytest.raises(HarmonyInferenceError, match="Too many unassigned event IDs"):
+        infer_harmony(events, timing(), pitched_part_evidence=evidence)
 
 
 def test_no_final_notation_roman_numeral_or_tab_claims() -> None:
