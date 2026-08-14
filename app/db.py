@@ -1021,6 +1021,8 @@ def complete_harmony_attempt(
         artifact_file_name,
         safe_attempt_id,
     )
+    if safe_artifact_file_name is None:
+        return False
     safe_timestamp = _validate_harmony_timestamp(harmonized_at)
     safe_message = _validate_harmony_text(message, "harmony message", 500)
     counts = {
@@ -1330,20 +1332,14 @@ def _validate_harmony_artifact_pointer(value: Any) -> str:
 def _validate_completion_artifact_file_name(
     value: Any,
     attempt_id: str | None,
-) -> str:
+) -> str | None:
     pointer = _validate_harmony_artifact_pointer(value)
-    if attempt_id is None:
-        if pointer != _HARMONY_ARTIFACT_FILE_NAME:
-            raise ValueError(
-                "A no-nonce harmony completion must use the legacy canonical path."
-            )
-        return pointer
-    expected = f"harmony/harmonic-context.{attempt_id}.json"
-    if pointer != expected:
-        raise ValueError(
-            "Harmony completion artifact must match the active attempt identity."
-        )
-    return pointer
+    expected = (
+        _HARMONY_ARTIFACT_FILE_NAME
+        if attempt_id is None
+        else f"harmony/harmonic-context.{attempt_id}.json"
+    )
+    return pointer if pointer == expected else None
 
 
 def _validate_harmony_text(value: Any, label: str, maximum: int) -> str:
