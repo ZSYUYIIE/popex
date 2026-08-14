@@ -30,9 +30,11 @@ function element(selector) {{
       textContent: "",
       innerHTML: "",
       dataset: {{}},
+      attributes: {{}},
       classList: {{add() {{}}, remove() {{}}, toggle() {{}}}},
       addEventListener(type, handler) {{listeners.set(`${{selector}}:${{type}}`, handler);}},
-      setAttribute() {{}},
+      setAttribute(name, value) {{this.attributes[name] = String(value);}},
+      getAttribute(name) {{return this.attributes[name] ?? null;}},
       reportValidity() {{return true;}},
       focus() {{this.focused = true;}},
       scrollIntoView() {{}},
@@ -55,13 +57,26 @@ const source = fs.readFileSync({app_path}, "utf8").replace("updateFilePresentati
   harmonyStageText,
   deriveState,
   safeRelativeUrl,
+  hydrateCompletedAnalyses,
+  hydrateCompletedSeparations,
+  hydrateCompletedTranscriptions,
+  hydrateCompletedInterpretations,
   hydrateCompletedHarmonies,
   loadJobs,
   setDetail:(id,value)=>harmonyCache.set(id,value),
   clearDetails:()=>harmonyCache.clear(),
   setFetch:(value)=>{{fetchImpl=value;}},
   getElement:element,
-  getListener:(selector,type)=>listeners.get(selector+":"+type)
+  getListener:(selector,type)=>listeners.get(selector+":"+type),
+  getRevision:()=>jobsRevision,
+  getPollHandle:()=>pollHandle,
+  getCacheKeys:()=>({{
+    analysis:[...analysisCache.keys()],
+    separation:[...separationCache.keys()],
+    transcription:[...transcriptionCache.keys()],
+    interpretation:[...interpretationCache.keys()],
+    harmony:[...harmonyCache.keys()]
+  }})
 }};`;
 eval(source);
 (async () => {{
@@ -562,7 +577,8 @@ t.setFetch(async url=>{
   throw new Error("unexpected request "+url);
 });
 const stale=[{id:"old",status:"completed",preparation_status:"completed",files:[],analysis:{status:"completed"},transcription:{status:"completed"},harmony:{status:"completed",available:true,counts:{},fullDetailsUrl:"/api/jobs/old/harmony?includeSegments=true"}}];
-const pending=t.hydrateCompletedHarmonies(stale);
+const revision=t.getRevision();
+const pending=t.hydrateCompletedHarmonies(stale,revision);
 await Promise.resolve();
 await t.loadJobs();
 const newer=t.getElement("#jobs").innerHTML;
@@ -645,6 +661,180 @@ console.log(JSON.stringify({disabled:button.disabled,focused:button.focused,text
     assert result["focused"] is True
     assert result["text"] == "Harmonize"
     assert result["message"] == "bounded failure"
+
+
+def test_newer_load_wins_when_older_success_resolves_last() -> None:
+    result = _run_node(
+        """
+const requests=[];
+const timerCalls=[];
+global.setTimeout=(_fn,delay)=>{timerCalls.push(delay);return timerCalls.length;};
+global.clearTimeout=()=>{};
+t.setFetch(url=>{
+  if(url!=="/api/jobs")throw new Error("unexpected request "+url);
+  return new Promise((resolve,reject)=>requests.push({resolve,reject}));
+});
+const older=t.loadJobs({announce:true});
+const newer=t.loadJobs({announce:true});
+requests[1].resolve({ok:true,status:200,json:async()=>[{
+  id:"new",title:"New job",status:"processing",stage:"processing",message:"New work",
+  preparation_status:"processing",files:[]
+}]});
+await newer;
+const snapshot=()=>({
+  html:t.getElement("#jobs").innerHTML,
+  message:t.getElement("#jobs-message").textContent,
+  busy:t.getElement("#jobs").getAttribute("aria-busy"),
+  refreshDisabled:t.getElement("#refresh-button").disabled,
+  poll:t.getPollHandle(),
+  timerCalls:[...timerCalls],
+  caches:t.getCacheKeys()
+});
+const before=snapshot();
+requests[0].resolve({ok:true,status:200,json:async()=>[{
+  id:"old",title:"Old job",status:"completed",stage:"completed",message:"Old work",
+  preparation_status:"completed",files:[],analysis:{status:"not_started"}
+}]});
+await older;
+const after=snapshot();
+console.log(JSON.stringify({before,after}));
+"""
+    )
+    assert result["before"] == result["after"]
+    assert "New job" in result["after"]["html"]
+    assert "Old job" not in result["after"]["html"]
+    assert result["after"]["message"] == "Recent audio is up to date."
+    assert result["after"]["busy"] == "false"
+    assert result["after"]["refreshDisabled"] is False
+    assert result["after"]["timerCalls"] == [1500]
+    assert result["after"]["caches"] == {
+        "analysis": [],
+        "separation": [],
+        "transcription": [],
+        "interpretation": [],
+        "harmony": [],
+    }
+
+
+def test_newer_load_wins_when_older_failure_resolves_last() -> None:
+    result = _run_node(
+        """
+const requests=[];
+const timerCalls=[];
+global.setTimeout=(_fn,delay)=>{timerCalls.push(delay);return timerCalls.length;};
+global.clearTimeout=()=>{};
+t.setFetch(url=>{
+  if(url!=="/api/jobs")throw new Error("unexpected request "+url);
+  return new Promise((resolve,reject)=>requests.push({resolve,reject}));
+});
+const older=t.loadJobs({announce:true});
+const newer=t.loadJobs({announce:true});
+requests[1].resolve({ok:true,status:200,json:async()=>[{
+  id:"new",title:"New job",status:"processing",stage:"processing",message:"New work",
+  preparation_status:"processing",files:[]
+}]});
+await newer;
+const snapshot=()=>({
+  html:t.getElement("#jobs").innerHTML,
+  message:t.getElement("#jobs-message").textContent,
+  busy:t.getElement("#jobs").getAttribute("aria-busy"),
+  refreshDisabled:t.getElement("#refresh-button").disabled,
+  poll:t.getPollHandle(),
+  timerCalls:[...timerCalls],
+  caches:t.getCacheKeys()
+});
+const before=snapshot();
+requests[0].reject(new Error("stale request failed"));
+await older;
+const after=snapshot();
+console.log(JSON.stringify({before,after}));
+"""
+    )
+    assert result["before"] == result["after"]
+    assert "New job" in result["after"]["html"]
+    assert "Recent audio could not be loaded" not in result["after"]["html"]
+    assert "stale request failed" not in result["after"]["message"]
+    assert result["after"]["busy"] == "false"
+    assert result["after"]["refreshDisabled"] is False
+    assert result["after"]["timerCalls"] == [1500]
+
+
+def test_superseded_inflight_hydrators_cannot_cache_or_rerender() -> None:
+    result = _run_node(
+        """
+await t.loadJobs();
+const cases=[
+  {
+    name:"analysis",url:"/detail/analysis",hydrate:t.hydrateCompletedAnalyses,
+    jobs:[{id:"old-analysis",analysis:{status:"completed",endpoint:"/detail/analysis"}}],
+    payload:{warnings:["old analysis"]},cache:"analysis"
+  },
+  {
+    name:"separation",url:"/detail/separation",hydrate:t.hydrateCompletedSeparations,
+    jobs:[{id:"old-separation",separation:{status:"completed",detailsUrl:"/detail/separation"}}],
+    payload:{stems:[]},cache:"separation"
+  },
+  {
+    name:"transcription",url:"/detail/transcription",hydrate:t.hydrateCompletedTranscriptions,
+    jobs:[{id:"old-transcription",transcription:{status:"completed",detailsUrl:"/detail/transcription"}}],
+    payload:{counts:{}},cache:"transcription"
+  },
+  {
+    name:"interpretation",url:"/detail/interpretation",hydrate:t.hydrateCompletedInterpretations,
+    jobs:[{id:"old-interpretation",interpretation:{status:"completed",available:true,fullDetailsUrl:"/detail/interpretation"}}],
+    payload:{counts:{}},cache:"interpretation"
+  },
+  {
+    name:"harmony",url:"/detail/harmony",hydrate:t.hydrateCompletedHarmonies,
+    jobs:[{id:"old-harmony",harmony:{status:"completed",available:true,fullDetailsUrl:"/detail/harmony"}}],
+    payload:{counts:{},rawEvidence:[],segments:[]},cache:"harmony"
+  }
+];
+const results=[];
+for(const item of cases){
+  const revision=t.getRevision();
+  let resolveDetail=null;
+  t.setFetch(url=>{
+    if(url===item.url)return new Promise(resolve=>{resolveDetail=resolve;});
+    if(url==="/api/jobs")return Promise.resolve({ok:true,status:200,json:async()=>[{
+      id:`new-${item.name}`,title:`New ${item.name}`,status:"processing",stage:"processing",message:"New work",
+      preparation_status:"processing",files:[]
+    }]});
+    throw new Error("unexpected request "+url);
+  });
+  const pending=item.hydrate(item.jobs,revision);
+  await Promise.resolve();
+  await t.loadJobs({announce:true});
+  const snapshot=()=>({
+    html:t.getElement("#jobs").innerHTML,
+    message:t.getElement("#jobs-message").textContent,
+    busy:t.getElement("#jobs").getAttribute("aria-busy"),
+    refreshDisabled:t.getElement("#refresh-button").disabled,
+    poll:t.getPollHandle(),
+    caches:t.getCacheKeys()
+  });
+  const before=snapshot();
+  resolveDetail({ok:true,status:200,json:async()=>item.payload});
+  await pending;
+  const after=snapshot();
+  results.push({name:item.name,cache:item.cache,oldId:`old-${item.name}`,before,after});
+}
+console.log(JSON.stringify({results}));
+"""
+    )
+    assert [item["name"] for item in result["results"]] == [
+        "analysis",
+        "separation",
+        "transcription",
+        "interpretation",
+        "harmony",
+    ]
+    for item in result["results"]:
+        assert item["before"] == item["after"]
+        assert f"New {item['name']}" in item["after"]["html"]
+        assert item["oldId"] not in item["after"]["caches"][item["cache"]]
+        assert item["after"]["busy"] == "false"
+        assert item["after"]["refreshDisabled"] is False
 
 
 def test_harmony_segment_css_stacks_and_wraps_for_narrow_reflow() -> None:
