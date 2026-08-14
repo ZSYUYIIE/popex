@@ -14,7 +14,7 @@ call_end = source.index(
 replacement = """interpretation_start = text.index(
     \"_INTERNAL_INTERPRETATION_FIELDS = frozenset(\"
 )
-insertion_point = text.index(\"\\n\\n\\nclass JobCreate\", interpretation_start)
+insertion_point = text.index(\"class JobCreate\", interpretation_start)
 if \"_INTERNAL_HARMONY_FIELDS\" not in text[interpretation_start:insertion_point]:
     harmony_fields = '''_INTERNAL_HARMONY_FIELDS = frozenset(
     {
@@ -40,7 +40,7 @@ if \"_INTERNAL_HARMONY_FIELDS\" not in text[interpretation_start:insertion_point
     }
 )
 '''
-    text = text[:insertion_point] + \"\\n\" + harmony_fields + text[insertion_point:]
+    text = text[:insertion_point] + harmony_fields + \"\\n\\n\" + text[insertion_point:]
 """
 
 patched_source = source[:call_start] + replacement + source[call_end:]
