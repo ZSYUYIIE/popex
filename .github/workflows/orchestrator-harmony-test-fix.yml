@@ -1,4 +1,4 @@
-name: Orchestrator harmony uncertainty test fix
+name: Orchestrator harmony evidence contract repair
 
 on:
   push:
@@ -16,21 +16,110 @@ jobs:
         with:
           ref: orchestrator/harmony-inference
           fetch-depth: 0
-      - name: Align power interval expectation with unresolved root ambiguity
+      - name: Preserve raw evidence in the harmony result
         run: |
           python - <<'PY'
           from pathlib import Path
-          path = Path('tests/test_harmony_inference.py')
-          text = path.read_text(encoding='utf-8')
-          old = '''    assert first["primaryCandidate"]["quality"] == "power"\n    assert first["primaryCandidate"]["symbol"] == "C5"\n    assert first["primaryCandidate"]["confidence"] <= 0.6\n    qualities = {candidate["quality"] for candidate in first["alternatives"]}\n    assert "major" in qualities or "minor" in qualities\n    assert any("lacks a third" in warning for warning in first["warnings"])\n'''
-          new = '''    assert first["unresolved"] is True\n    assert first["primaryCandidate"] is None\n    assert len(first["alternatives"]) <= 3\n    assert first["alternatives"][0]["quality"] == "power"\n    assert first["alternatives"][0]["confidence"] <= 0.6\n    assert {candidate["root"] for candidate in first["alternatives"] if candidate["quality"] == "power"} >= {"C", "G"}\n    assert any("lacks a third" in warning for warning in first["warnings"])\n'''
-          if old not in text:
-              raise SystemExit('power ambiguity test marker not found')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          app_path = Path("app/harmony_inference.py")
+          test_path = Path("tests/test_harmony_inference.py")
+          app = app_path.read_text(encoding="utf-8")
+          tests = test_path.read_text(encoding="utf-8")
+
+          def replace_once(text: str, old: str, new: str, label: str) -> str:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected one marker, found {count}")
+              return text.replace(old, new, 1)
+
+          already_done = (
+              "raw_evidence: tuple[dict[str, Any], ...]" in app
+              and '"rawEvidenceIncluded": True' in app
+              and "_SECRET_TEXT_RE" in app
+              and "result.raw_evidence[0][\"midiPitch\"] == 60.12" in tests
+          )
+          if already_done:
+              print("harmony evidence contract already repaired")
+              raise SystemExit(0)
+
+          app = replace_once(
+              app,
+              '''class HarmonyInferenceResult:\n    version: str\n    segments: tuple[dict[str, Any], ...]\n''',
+              '''class HarmonyInferenceResult:\n    version: str\n    raw_evidence: tuple[dict[str, Any], ...]\n    segments: tuple[dict[str, Any], ...]\n''',
+              "result dataclass",
+          )
+          app = replace_once(
+              app,
+              '''    assignments = _parse_part_evidence(pitched_part_evidence, events)\n\n    windows, window_mode = _build_windows(events, timing_data)\n''',
+              '''    assignments = _parse_part_evidence(pitched_part_evidence, events)\n    raw_evidence = tuple(_raw_event_payload(event) for event in events)\n\n    windows, window_mode = _build_windows(events, timing_data)\n''',
+              "raw evidence construction",
+          )
+          app = replace_once(
+              app,
+              '''        "rawTimingAuthoritative": True,\n        "fractionalPitchPreserved": True,\n        "tonalContextAdvisoryOnly": True,\n''',
+              '''        "rawTimingAuthoritative": True,\n        "fractionalPitchPreserved": True,\n        "rawEvidenceIncluded": True,\n        "tonalContextAdvisoryOnly": True,\n''',
+              "diagnostics",
+          )
+          app = replace_once(
+              app,
+              '''    result = HarmonyInferenceResult(\n        version=version,\n        segments=tuple(segments),\n''',
+              '''    result = HarmonyInferenceResult(\n        version=version,\n        raw_evidence=raw_evidence,\n        segments=tuple(segments),\n''',
+              "result construction",
+          )
+          app = replace_once(
+              app,
+              '''\n\ndef _parse_events(values: object) -> tuple[_Event, ...]:\n''',
+              '''\n\ndef _raw_event_payload(event: _Event) -> dict[str, Any]:\n    return {\n        "id": event.event_id,\n        "sourceKind": event.source_kind,\n        "rawStartSeconds": event.start,\n        "rawEndSeconds": event.end,\n        "midiNote": event.midi_note,\n        "midiPitch": event.midi_pitch,\n        "pitchClass": event.pitch_class,\n        "pitchName": PITCH_CLASS_NAMES[event.pitch_class],\n        "confidence": event.confidence,\n    }\n\n\ndef _parse_events(values: object) -> tuple[_Event, ...]:\n''',
+              "raw evidence serializer",
+          )
+          app = replace_once(
+              app,
+              '''_MAX_EVENTS = 100_000\n''',
+              '''_SECRET_TEXT_RE = re.compile(\n    r"\\b(?:token|password|secret|authorization|api[_-]?key|access[_-]?key)\\b\\s*[:=]",\n    re.IGNORECASE,\n)\n\n_MAX_EVENTS = 100_000\n''',
+              "secret text guard",
+          )
+          app = replace_once(
+              app,
+              '''            or _UNSAFE_TEXT_RE.search(warning)\n        ):\n''',
+              '''            or _UNSAFE_TEXT_RE.search(warning)\n            or _SECRET_TEXT_RE.search(warning)\n            or "<" in warning\n            or ">" in warning\n            or any(ord(character) < 32 or ord(character) == 127 for character in warning)\n        ):\n''',
+              "warning validation",
+          )
+
+          tests = replace_once(
+              tests,
+              '''    assert result.diagnostics["rawTimingAuthoritative"] is True\n    assert result.diagnostics["fractionalPitchPreserved"] is True\n''',
+              '''    assert result.diagnostics["rawTimingAuthoritative"] is True\n    assert result.diagnostics["fractionalPitchPreserved"] is True\n    assert result.diagnostics["rawEvidenceIncluded"] is True\n    assert result.raw_evidence[0]["id"] == "c"\n    assert result.raw_evidence[0]["rawStartSeconds"] == 0.0\n    assert result.raw_evidence[0]["rawEndSeconds"] == 1.0\n    assert result.raw_evidence[0]["midiPitch"] == 60.12\n    assert result.raw_evidence[0]["sourceKind"] == "vocals"\n''',
+              "resolved raw evidence test",
+          )
+          tests = replace_once(
+              tests,
+              '''    assert result.unresolved_event_ids == ("c",)\n    assert any("does not support" in warning for warning in first["warnings"])\n''',
+              '''    assert result.unresolved_event_ids == ("c",)\n    assert result.raw_evidence == (\n        {\n            "id": "c",\n            "sourceKind": "other",\n            "rawStartSeconds": 0.0,\n            "rawEndSeconds": 1.0,\n            "midiNote": 60,\n            "midiPitch": 60.0,\n            "pitchClass": 0,\n            "pitchName": "C",\n            "confidence": 0.9,\n        },\n    )\n    assert any("does not support" in warning for warning in first["warnings"])\n''',
+              "unresolved raw evidence test",
+          )
+          tests = replace_once(
+              tests,
+              '''    first["segments"][0]["supportingEventIds"].clear()\n    assert second["segments"][0]["supportingEventIds"] == ["c", "e", "g"]\n''',
+              '''    first["segments"][0]["supportingEventIds"].clear()\n    first["raw_evidence"][0]["midiPitch"] = 0\n    assert second["segments"][0]["supportingEventIds"] == ["c", "e", "g"]\n    assert second["raw_evidence"][0]["midiPitch"] == 60.0\n''',
+              "detached payload test",
+          )
+          tests = replace_once(
+              tests,
+              '''def test_unsafe_event_warning_text_is_rejected() -> None:\n    with pytest.raises(HarmonyInferenceError, match="unsafe text"):\n        infer_harmony(\n            [event("c", 60, warnings=["debug at /home/user/private.wav"])],\n            timing(),\n        )\n''',
+              '''@pytest.mark.parametrize(\n    "warning",\n    [\n        "debug at /home/user/private.wav",\n        "<script>alert(1)</script>",\n        "api_key=private-value",\n        "line one\\nline two",\n    ],\n)\ndef test_unsafe_event_warning_text_is_rejected(warning: str) -> None:\n    with pytest.raises(HarmonyInferenceError, match="unsafe text"):\n        infer_harmony([event("c", 60, warnings=[warning])], timing())\n''',
+              "unsafe warning tests",
+          )
+
+          app_path.write_text(app, encoding="utf-8")
+          test_path.write_text(tests, encoding="utf-8")
           PY
-          python -m pytest -q tests/test_harmony_inference.py
+          python -m compileall -q app tests
+          git diff --check
+          if git diff --quiet -- app/harmony_inference.py tests/test_harmony_inference.py; then
+            exit 0
+          fi
           git config user.name popex-orchestrator
           git config user.email actions@users.noreply.github.com
-          git add tests/test_harmony_inference.py
-          git commit -m 'Keep two-note power harmony root unresolved'
+          git add app/harmony_inference.py tests/test_harmony_inference.py
+          git commit -m "Preserve raw evidence in harmonic inference"
           git push origin HEAD:orchestrator/harmony-inference
