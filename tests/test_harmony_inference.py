@@ -522,3 +522,91 @@ def test_no_final_notation_roman_numeral_or_tab_claims() -> None:
         "engraving",
     ):
         assert forbidden not in encoded.replace("romannumeralsgenerated", "")
+
+
+def test_raw_pitched_event_warnings_are_preserved_in_inference_evidence() -> None:
+    warnings = [
+        "Dominant line only; review this pitch.",
+        "Pitch boundary remains uncertain.",
+    ]
+    result = infer_harmony(
+        [
+            event("c", 60, warnings=warnings),
+            event("e", 64),
+            event("g", 67),
+        ],
+        timing(),
+    )
+    evidence = {item["id"]: item for item in result.raw_evidence}
+
+    assert evidence["c"]["warnings"] == warnings
+    assert evidence["e"]["warnings"] == []
+    assert evidence["g"]["warnings"] == []
+
+
+def test_attempt_scoped_harmony_artifacts_use_isolated_destinations(
+    tmp_path,
+) -> None:
+    from app.config import Settings
+    from app.harmony_artifacts import (
+        build_harmony_artifact,
+        load_harmony_artifact,
+        write_harmony_artifact,
+    )
+
+    settings = Settings(
+        data_dir=tmp_path,
+        allowed_hosts=("example.invalid",),
+        max_duration_seconds=60,
+        max_filesize_mb=16,
+        max_upload_mb=16,
+        audio_quality="192",
+    )
+    settings.exports_dir.mkdir(parents=True)
+    job_id = "c" * 32
+    (settings.exports_dir / job_id).mkdir()
+    inference = infer_harmony(
+        [event("c", 60), event("e", 64), event("g", 67)],
+        timing(),
+    )
+    first = build_harmony_artifact(
+        inference,
+        harmony_version="harmonic-context-v1",
+        created_at="2026-08-14T06:00:00+00:00",
+        transcription_version="raw-transcription-v1",
+        analysis_version="analysis-v1",
+    )
+    second = build_harmony_artifact(
+        inference,
+        harmony_version="harmonic-context-v1",
+        created_at="2026-08-14T06:01:00+00:00",
+        transcription_version="raw-transcription-v1",
+        analysis_version="analysis-v1",
+    )
+    first_file = f"harmony/harmonic-context.{'a' * 32}.json"
+    second_file = f"harmony/harmonic-context.{'b' * 32}.json"
+
+    first_path = write_harmony_artifact(
+        job_id,
+        settings,
+        first,
+        artifact_file_name=first_file,
+    )
+    second_path = write_harmony_artifact(
+        job_id,
+        settings,
+        second,
+        artifact_file_name=second_file,
+    )
+
+    assert first_path != second_path
+    assert load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=first_file,
+    ) == first
+    assert load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=second_file,
+    ) == second
