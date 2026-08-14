@@ -22,7 +22,7 @@ jobs:
           cache: pip
       - name: Patch and validate harmonic API
         run: |
-          python .github/scripts/orchestrator_harmony_api_patch.py
+          python .github/scripts/orchestrator_harmony_api_patch_runner.py
           pip install -e '.[dev]'
           pytest tests/test_harmony_api.py
           pytest
