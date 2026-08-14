@@ -45,6 +45,7 @@ _PITCH_CLASS_NAMES = (
 )
 
 _JOB_ID = re.compile(r"[a-f0-9]{32}")
+_ATTEMPT_ARTIFACT = re.compile(r"harmony/harmonic-context\.([a-f0-9]{32})\.json")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,95}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,95}")
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
@@ -61,6 +62,7 @@ _SECRET = re.compile(
 
 _MAX_ARTIFACT_BYTES = 24 * 1024 * 1024
 _MAX_RAW_EVENTS = 100_000
+_MAX_RAW_EVENT_WARNINGS = 8
 _MAX_SEGMENTS = 20_000
 _MAX_ALTERNATIVES = 16
 _MAX_REFERENCES = 100_000
@@ -81,6 +83,13 @@ class HarmonyArtifactValidationError(HarmonyArtifactError, ValueError):
 
 class HarmonyArtifactUnavailableError(HarmonyArtifactError):
     """Raised when no canonical harmonic-context artifact is available."""
+
+
+def harmony_attempt_artifact_file_name(attempt_id: str) -> str:
+    """Return the isolated canonical relative artifact name for one attempt."""
+    if not isinstance(attempt_id, str) or not _JOB_ID.fullmatch(attempt_id):
+        raise HarmonyArtifactError("Harmony attempt identity is invalid.")
+    return f"harmony/harmonic-context.{attempt_id}.json"
 
 
 def build_harmony_artifact(
@@ -211,16 +220,19 @@ def write_harmony_artifact(
     job_id: str,
     settings: Settings,
     payload: Mapping[str, Any],
+    *,
+    artifact_file_name: str = HARMONY_ARTIFACT_RELATIVE_PATH,
 ) -> Path:
-    """Validate and atomically publish the canonical harmonic-context artifact."""
+    """Validate and atomically publish one canonical harmonic-context artifact."""
     encoded = _encoded_payload(validate_harmony_artifact(payload))
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=True)
     assert directory is not None
-    destination = directory / "harmonic-context.json"
+    leaf = _artifact_leaf(artifact_file_name)
+    destination = directory / leaf
     _validate_existing_destination(destination, directory)
     previous = _existing_artifact_bytes(destination, directory)
-    temporary = directory / f".harmonic-context.json.{uuid4().hex}.tmp"
+    temporary = directory / f".{leaf}.{uuid4().hex}.tmp"
     directory_snapshot = _directory_snapshot(directory, job_dir)
     replaced = False
     try:
@@ -265,13 +277,15 @@ def write_harmony_artifact(
 def load_harmony_artifact(
     job_id: str,
     settings: Settings,
+    *,
+    artifact_file_name: str = HARMONY_ARTIFACT_RELATIVE_PATH,
 ) -> dict[str, Any] | None:
-    """Load and revalidate the currently published canonical artifact."""
+    """Load and revalidate one published canonical artifact."""
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=False)
     if directory is None:
         return None
-    destination = directory / "harmonic-context.json"
+    destination = directory / _artifact_leaf(artifact_file_name)
     try:
         destination.lstat()
     except FileNotFoundError:
@@ -298,17 +312,26 @@ def load_harmony_artifact(
         ) from exc
 
 
-def harmony_artifact_path(job_id: str, settings: Settings) -> Path:
-    """Resolve the canonical JSON only if it is stable through validation."""
+def harmony_artifact_path(
+    job_id: str,
+    settings: Settings,
+    *,
+    artifact_file_name: str = HARMONY_ARTIFACT_RELATIVE_PATH,
+) -> Path:
+    """Resolve one canonical JSON file only if it is stable through validation."""
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=False)
     if directory is None:
         raise HarmonyArtifactUnavailableError(
             "Published harmonic context is unavailable."
         )
-    path = directory / "harmonic-context.json"
+    path = directory / _artifact_leaf(artifact_file_name)
     before = _regular_file_snapshot(path, directory, unavailable=True)
-    artifact = load_harmony_artifact(job_id, settings)
+    artifact = load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=artifact_file_name,
+    )
     if artifact is None:
         raise HarmonyArtifactUnavailableError(
             "Published harmonic context is unavailable."
@@ -324,6 +347,22 @@ def harmony_artifact_path(job_id: str, settings: Settings) -> Path:
             "Published harmonic context changed during validation."
         )
     return path.resolve(strict=True)
+
+
+def remove_harmony_artifact(
+    job_id: str,
+    settings: Settings,
+    *,
+    artifact_file_name: str,
+) -> None:
+    """Remove only the explicitly named canonical harmony artifact if present."""
+    job_dir = _secure_job_root(job_id, settings)
+    directory = _artifact_directory(job_dir, create=False)
+    if directory is None:
+        return
+    path = directory / _artifact_leaf(artifact_file_name)
+    _remove_published_artifact(path, directory)
+    _fsync_directory(directory)
 
 
 def _source_transcription(value: Any) -> dict[str, Any]:
@@ -459,7 +498,7 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         "pitchName",
         "confidence",
     }
-    _keys(item, required, set(), label)
+    _keys(item, required, {"warnings"}, label)
     start = _number(item["rawStartSeconds"], f"{label}.rawStartSeconds", minimum=0)
     end = _number(item["rawEndSeconds"], f"{label}.rawEndSeconds", minimum=0)
     if end <= start:
@@ -490,6 +529,11 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         "pitchClass": pitch_class,
         "pitchName": pitch_name,
         "confidence": _confidence(item["confidence"], f"{label}.confidence"),
+        "warnings": _warnings(
+            item.get("warnings", []),
+            f"{label}.warnings",
+            _MAX_RAW_EVENT_WARNINGS,
+        ),
     }
 
 
@@ -1179,6 +1223,19 @@ def _canonical_relative_path(value: Any, expected: str, label: str) -> str:
     return value
 
 
+def _artifact_leaf(value: Any) -> str:
+    if not isinstance(value, str):
+        raise HarmonyArtifactError("Harmony artifact file name is invalid.")
+    if value == HARMONY_ARTIFACT_RELATIVE_PATH:
+        return "harmonic-context.json"
+    if not _ATTEMPT_ARTIFACT.fullmatch(value):
+        raise HarmonyArtifactError("Harmony artifact file name is invalid.")
+    parsed = PurePosixPath(value)
+    if parsed.is_absolute() or parsed.parts != ("harmony", parsed.name):
+        raise HarmonyArtifactError("Harmony artifact file name is invalid.")
+    return parsed.name
+
+
 def _utc_timestamp(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 64:
         raise HarmonyArtifactValidationError(f"{label} must be a UTC timestamp.")
@@ -1378,7 +1435,7 @@ def _restore_publication_state(
         _remove_published_artifact(destination, directory)
         return
 
-    temporary = directory / f".harmonic-context.json.{uuid4().hex}.restore.tmp"
+    temporary = directory / f".{destination.name}.{uuid4().hex}.restore.tmp"
     try:
         _write_exclusive_regular_file(temporary, previous, directory)
         if _directory_snapshot(directory, job_dir) != expected_directory_snapshot:
@@ -1432,16 +1489,26 @@ def _restore_harmony_artifact(
     job_id: str,
     settings: Settings,
     previous: Mapping[str, Any] | None,
+    *,
+    artifact_file_name: str = HARMONY_ARTIFACT_RELATIVE_PATH,
 ) -> None:
-    """Restore the pre-attempt canonical artifact, or remove a first publication."""
+    """Restore the pre-attempt target, or remove a first publication."""
     if previous is not None:
-        write_harmony_artifact(job_id, settings, previous)
+        write_harmony_artifact(
+            job_id,
+            settings,
+            previous,
+            artifact_file_name=artifact_file_name,
+        )
         return
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=False)
     if directory is None:
         return
-    _remove_published_artifact(directory / "harmonic-context.json", directory)
+    _remove_published_artifact(
+        directory / _artifact_leaf(artifact_file_name),
+        directory,
+    )
 
 
 def _remove_temporary(path: Path, directory: Path) -> None:
@@ -1560,7 +1627,9 @@ __all__ = [
     "HarmonyArtifactValidationError",
     "build_harmony_artifact",
     "harmony_artifact_path",
+    "harmony_attempt_artifact_file_name",
     "load_harmony_artifact",
+    "remove_harmony_artifact",
     "validate_harmony_artifact",
     "write_harmony_artifact",
 ]
