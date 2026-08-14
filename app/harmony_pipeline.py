@@ -427,6 +427,37 @@ def _source_event_index(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _load_target(
+    job_id: str,
+    settings: Settings,
+    artifact_file_name: str,
+) -> dict[str, Any] | None:
+    if artifact_file_name == HARMONY_ARTIFACT_RELATIVE_PATH:
+        return load_harmony_artifact(job_id, settings)
+    return load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=artifact_file_name,
+    )
+
+
+def _write_target(
+    job_id: str,
+    settings: Settings,
+    artifact: Mapping[str, Any],
+    artifact_file_name: str,
+) -> None:
+    if artifact_file_name == HARMONY_ARTIFACT_RELATIVE_PATH:
+        write_harmony_artifact(job_id, settings, artifact)
+        return
+    write_harmony_artifact(
+        job_id,
+        settings,
+        artifact,
+        artifact_file_name=artifact_file_name,
+    )
+
+
 def _publish_and_verify(
     job_id: str,
     settings: Settings,
@@ -435,11 +466,7 @@ def _publish_and_verify(
     artifact_file_name: str,
 ) -> dict[str, Any]:
     try:
-        previous = load_harmony_artifact(
-            job_id,
-            settings,
-            artifact_file_name=artifact_file_name,
-        )
+        previous = _load_target(job_id, settings, artifact_file_name)
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError(
             "Existing harmonic context is unreadable or unsafe."
@@ -450,12 +477,7 @@ def _publish_and_verify(
         ) from exc
 
     try:
-        write_harmony_artifact(
-            job_id,
-            settings,
-            artifact,
-            artifact_file_name=artifact_file_name,
-        )
+        _write_target(job_id, settings, artifact, artifact_file_name)
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError(
             "Harmonic context could not be published safely."
@@ -466,11 +488,7 @@ def _publish_and_verify(
         ) from exc
 
     try:
-        reloaded = load_harmony_artifact(
-            job_id,
-            settings,
-            artifact_file_name=artifact_file_name,
-        )
+        reloaded = _load_target(job_id, settings, artifact_file_name)
     except HarmonyArtifactError as exc:
         try:
             _restore_previous(
@@ -518,12 +536,15 @@ def _restore_previous(
     artifact_file_name: str,
 ) -> None:
     try:
-        _restore_harmony_artifact(
-            job_id,
-            settings,
-            previous,
-            artifact_file_name=artifact_file_name,
-        )
+        if artifact_file_name == HARMONY_ARTIFACT_RELATIVE_PATH:
+            _restore_harmony_artifact(job_id, settings, previous)
+        else:
+            _restore_harmony_artifact(
+                job_id,
+                settings,
+                previous,
+                artifact_file_name=artifact_file_name,
+            )
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError(
             "Harmonic context verification failed and the previous publication "
