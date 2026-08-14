@@ -101,6 +101,7 @@ def test_clear_c_major_is_resolved_with_raw_evidence() -> None:
     assert result.raw_evidence[0]["rawEndSeconds"] == 1.0
     assert result.raw_evidence[0]["midiPitch"] == 60.12
     assert result.raw_evidence[0]["sourceKind"] == "vocals"
+    assert result.raw_evidence[0]["warnings"] == []
 
 
 def test_clear_a_minor_is_resolved() -> None:
@@ -305,6 +306,7 @@ def test_single_pitch_remains_unresolved_instead_of_fabricating_chord() -> None:
             "pitchClass": 0,
             "pitchName": "C",
             "confidence": 0.9,
+            "warnings": [],
         },
     )
     assert any("does not support" in warning for warning in first["warnings"])
