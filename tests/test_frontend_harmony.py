@@ -46,7 +46,7 @@ let fetchImpl = async () => ({{ok: true, status: 200, json: async () => []}});
 global.fetch = (...args) => fetchImpl(...args);
 global.setTimeout = () => 1;
 global.clearTimeout = () => {{}};
-const source = fs.readFileSync({app_path}, "utf8") + `
+const source = fs.readFileSync({app_path}, "utf8").replace("updateFilePresentation();loadJobs();","") + `
 ;globalThis.__popexHarmonyTest={{
   renderHarmony,
   renderHarmonyReview,
