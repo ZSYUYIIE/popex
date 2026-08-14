@@ -19,6 +19,7 @@ from app.harmony_artifacts import (
     HARMONY_ARTIFACT_RELATIVE_PATH,
     HarmonyArtifactError,
     HarmonyArtifactValidationError,
+    _restore_harmony_artifact,
     build_harmony_artifact,
     load_harmony_artifact,
     write_harmony_artifact,
@@ -441,12 +442,18 @@ def _publish_and_verify(
     try:
         reloaded = load_harmony_artifact(job_id, settings)
     except HarmonyArtifactError as exc:
-        _restore_previous(job_id, settings, previous)
+        try:
+            _restore_previous(job_id, settings, previous)
+        except HarmonyPipelineError as recovery_exc:
+            raise recovery_exc from exc
         raise HarmonyPipelineError(
             "Published harmonic context could not be verified."
         ) from exc
     except Exception as exc:
-        _restore_previous(job_id, settings, previous)
+        try:
+            _restore_previous(job_id, settings, previous)
+        except HarmonyPipelineError as recovery_exc:
+            raise recovery_exc from exc
         raise HarmonyPipelineError(
             "Harmonic-context verification failed at a protected boundary."
         ) from exc
@@ -463,12 +470,17 @@ def _restore_previous(
     settings: Settings,
     previous: Mapping[str, Any] | None,
 ) -> None:
-    if previous is None:
-        return
     try:
-        write_harmony_artifact(job_id, settings, previous)
-    except Exception:
-        return
+        _restore_harmony_artifact(job_id, settings, previous)
+    except HarmonyArtifactError as exc:
+        raise HarmonyPipelineError(
+            "Harmonic context verification failed and the previous publication "
+            "state could not be restored safely."
+        ) from exc
+    except Exception as exc:
+        raise HarmonyPipelineError(
+            "Harmonic-context restoration failed at a protected boundary."
+        ) from exc
 
 
 def _combined_warnings(*groups: Any) -> list[str]:
