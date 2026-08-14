@@ -71,6 +71,35 @@ old_test_summary = '''        "warnings": artifact["diagnostics"]["warningCount"
 '''
 new_test_summary = '''        "warnings": len(artifact["warnings"]),
 '''
+old_fixture = '''        interpretation_status=interpretation_status,
+        interpretation_stage=interpretation_status,
+        harmony_status=harmony_status,
+        harmony_stage=harmony_status,
+    )
+    if transcribed:
+        write_raw_transcription(job_id, settings, raw_payload())
+    return job_id
+'''
+new_fixture = '''        interpretation_status=interpretation_status,
+        interpretation_stage=interpretation_status,
+    )
+    if transcribed:
+        write_raw_transcription(job_id, settings, raw_payload())
+    if harmony_status == "processing":
+        assert db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+        )
+    elif harmony_status != "not_started":
+        db.update_job(
+            settings.database_path,
+            job_id,
+            harmony_status=harmony_status,
+            harmony_stage=harmony_status,
+        )
+    return job_id
+'''
 
 changed = False
 for target, old, new, label in (
@@ -79,6 +108,7 @@ for target, old, new, label in (
     ("main", old_details_warning, new_details_warning, "details warning count"),
     ("tests", old_test_publish, new_test_publish, "test publish warning count"),
     ("tests", old_test_summary, new_test_summary, "test summary warning count"),
+    ("tests", old_fixture, new_fixture, "active conflict fixture"),
 ):
     current = main if target == "main" else tests
     if old in current:
