@@ -147,6 +147,21 @@ def test_power_interval_keeps_major_minor_ambiguity_explicit() -> None:
     assert any("lacks a third" in warning for warning in first["warnings"])
 
 
+def test_major_third_dyad_remains_unresolved_with_alternatives() -> None:
+    result = infer_harmony(
+        [event("c", 60, source="full_mix"), event("e", 64, source="full_mix")],
+        timing(),
+    )
+    first = segment(result)
+
+    assert first["unresolved"] is True
+    assert first["primaryCandidate"] is None
+    identities = {(candidate["root"], candidate["quality"]) for candidate in first["alternatives"]}
+    assert ("C", "major") in identities
+    assert ("A", "minor") in identities
+    assert result.unresolved_event_ids == ("c", "e")
+
+
 def test_non_chord_tones_remain_visible_and_do_not_disappear() -> None:
     result = infer_harmony(
         [
