@@ -14,6 +14,8 @@ from app.config import Settings
 from app.harmony_artifacts import (
     HARMONY_ARTIFACT_RELATIVE_PATH,
     build_harmony_artifact,
+    harmony_attempt_artifact_file_name,
+    load_harmony_artifact,
     write_harmony_artifact,
 )
 from app.harmony_inference import infer_harmony
@@ -22,7 +24,7 @@ from app.harmony_pipeline import (
     HarmonyPipelineError,
     HarmonyPipelineResult,
 )
-from app.main import create_app
+from app.main import _run_harmony_job, create_app
 from app.transcription_events import (
     RAW_TRANSCRIPTION_RELATIVE_PATH,
     write_raw_transcription,
@@ -195,12 +197,16 @@ def harmony_artifact(*, created_at: str = HARMONY_CREATED_AT) -> dict:
     )
 
 
-def result_from_artifact(payload: dict) -> HarmonyPipelineResult:
+def result_from_artifact(
+    payload: dict,
+    *,
+    artifact_file_name: str = HARMONY_ARTIFACT_RELATIVE_PATH,
+) -> HarmonyPipelineResult:
     diagnostics = payload["diagnostics"]
     warnings = tuple(payload["warnings"])
     return HarmonyPipelineResult(
         version=payload["harmonyVersion"],
-        artifact_file_name=HARMONY_ARTIFACT_RELATIVE_PATH,
+        artifact_file_name=artifact_file_name,
         created_at=payload["createdAt"],
         event_count=diagnostics["eventCount"],
         segment_count=diagnostics["segmentCount"],
@@ -332,7 +338,21 @@ def publish_harmony(
     return payload
 
 
-def successful_processor(job_id, settings, stage_callback):
+def _attempt_target(attempt_id: str | None) -> str:
+    return (
+        HARMONY_ARTIFACT_RELATIVE_PATH
+        if attempt_id is None
+        else harmony_attempt_artifact_file_name(attempt_id)
+    )
+
+
+def successful_processor(
+    job_id,
+    settings,
+    stage_callback,
+    *,
+    attempt_id=None,
+):
     stage_callback(
         "loading_analysis_context",
         "Loading matching timing and tonal evidence.",
@@ -344,16 +364,28 @@ def successful_processor(job_id, settings, stage_callback):
         48,
     )
     payload = harmony_artifact()
-    write_harmony_artifact(job_id, settings, payload)
+    target = _attempt_target(attempt_id)
+    write_harmony_artifact(
+        job_id,
+        settings,
+        payload,
+        artifact_file_name=target,
+    )
     stage_callback(
         "saving_harmonic_context",
         "Saving the canonical harmonic-context artifact.",
         92,
     )
-    return result_from_artifact(payload)
+    return result_from_artifact(payload, artifact_file_name=target)
 
 
-def expected_failure(job_id, settings, stage_callback):
+def expected_failure(
+    job_id,
+    settings,
+    stage_callback,
+    *,
+    attempt_id=None,
+):
     stage_callback(
         "inferring_harmonic_context",
         "Inferring conservative local harmonic candidates.",
@@ -365,7 +397,13 @@ def expected_failure(job_id, settings, stage_callback):
     )
 
 
-def unexpected_failure(job_id, settings, stage_callback):
+def unexpected_failure(
+    job_id,
+    settings,
+    stage_callback,
+    *,
+    attempt_id=None,
+):
     stage_callback(
         "validating_harmonic_context",
         "Validating harmonic evidence.",
@@ -374,10 +412,22 @@ def unexpected_failure(job_id, settings, stage_callback):
     raise RuntimeError(f"private failure at {settings.data_dir / 'secret.txt'}")
 
 
-def invalid_processor(job_id, settings, stage_callback):
+def invalid_processor(
+    job_id,
+    settings,
+    stage_callback,
+    *,
+    attempt_id=None,
+):
     payload = harmony_artifact()
-    write_harmony_artifact(job_id, settings, payload)
-    result = result_from_artifact(payload)
+    target = _attempt_target(attempt_id)
+    write_harmony_artifact(
+        job_id,
+        settings,
+        payload,
+        artifact_file_name=target,
+    )
+    result = result_from_artifact(payload, artifact_file_name=target)
     return HarmonyPipelineResult(
         version=result.version,
         artifact_file_name="harmony/wrong.json",
@@ -510,6 +560,10 @@ def test_start_conflicts_and_force_query_are_strict(tmp_path: Path) -> None:
 
         processing = create_job(settings, harmony_status="processing")
         assert client.post(f"/api/jobs/{processing}/harmonize").status_code == 409
+        forced_processing = client.post(
+            f"/api/jobs/{processing}/harmonize?force=true"
+        )
+        assert forced_processing.status_code == 202
 
         completed = create_job(settings)
         publish_harmony(settings, completed)
@@ -526,9 +580,9 @@ def test_invalid_or_missing_raw_or_analysis_blocks_start(
     settings = make_settings(tmp_path)
     calls: list[tuple] = []
 
-    def processor(*args):
-        calls.append(args)
-        return successful_processor(*args)
+    def processor(*args, **kwargs):
+        calls.append((args, kwargs))
+        return successful_processor(*args, **kwargs)
 
     app = create_app(settings=settings, harmony_processor=processor)
     with TestClient(app) as client:
@@ -578,9 +632,9 @@ def test_atomic_claim_conflict_schedules_no_processor(
     settings = make_settings(tmp_path)
     calls = []
 
-    def processor(*args):
-        calls.append(args)
-        return successful_processor(*args)
+    def processor(*args, **kwargs):
+        calls.append((args, kwargs))
+        return successful_processor(*args, **kwargs)
 
     app = create_app(settings=settings, harmony_processor=processor)
     with TestClient(app) as client:
@@ -598,14 +652,25 @@ def test_successful_background_progress_and_completion_are_durable(
     settings = make_settings(tmp_path)
     observed: list[tuple[str, float]] = []
 
-    def processor(job_id, app_settings, stage_callback):
+    def processor(
+        job_id,
+        app_settings,
+        stage_callback,
+        *,
+        attempt_id=None,
+    ):
         def capture(stage, message, progress):
             stage_callback(stage, message, progress)
             record = db.get_job(app_settings.database_path, job_id)
             assert record is not None
             observed.append((record["harmony_stage"], record["harmony_progress"]))
 
-        return successful_processor(job_id, app_settings, capture)
+        return successful_processor(
+            job_id,
+            app_settings,
+            capture,
+            attempt_id=attempt_id,
+        )
 
     app = create_app(settings=settings, harmony_processor=processor)
     with TestClient(app) as client:
@@ -623,7 +688,16 @@ def test_successful_background_progress_and_completion_are_durable(
     assert record["harmony_status"] == "completed"
     assert record["harmony_progress"] == 100
     assert record["harmony_attempt_id"] is None
-    assert record["harmony_artifact_file_name"] == HARMONY_ARTIFACT_RELATIVE_PATH
+    pointer = record["harmony_artifact_file_name"]
+    assert isinstance(pointer, str)
+    assert pointer.startswith("harmony/harmonic-context.")
+    assert pointer.endswith(".json")
+    assert pointer != HARMONY_ARTIFACT_RELATIVE_PATH
+    assert load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=pointer,
+    ) is not None
     assert record["harmony_segment_count"] == (
         record["harmony_resolved_segment_count"]
         + record["harmony_unresolved_segment_count"]
@@ -730,14 +804,26 @@ def test_stale_source_worker_cannot_complete_or_fail_new_source(
 ) -> None:
     settings = make_settings(tmp_path)
 
-    def stale_processor(job_id, app_settings, stage_callback):
+    def stale_processor(
+        job_id,
+        app_settings,
+        stage_callback,
+        *,
+        attempt_id=None,
+    ):
         stage_callback(
             "inferring_harmonic_context",
             "Inferring conservative local harmonic candidates.",
             48,
         )
         payload = harmony_artifact()
-        write_harmony_artifact(job_id, app_settings, payload)
+        target = _attempt_target(attempt_id)
+        write_harmony_artifact(
+            job_id,
+            app_settings,
+            payload,
+            artifact_file_name=target,
+        )
         db.update_job(
             app_settings.database_path,
             job_id,
@@ -751,7 +837,7 @@ def test_stale_source_worker_cannot_complete_or_fail_new_source(
             percussion_event_count=0,
             aligned_event_count=0,
         )
-        return result_from_artifact(payload)
+        return result_from_artifact(payload, artifact_file_name=target)
 
     app = create_app(settings=settings, harmony_processor=stale_processor)
     with TestClient(app) as client:
@@ -777,11 +863,18 @@ def test_old_worker_cannot_complete_reclaimed_same_version_attempt(
     settings = make_settings(tmp_path)
     attempt_ids: list[str] = []
 
-    def stale_reclaim_processor(job_id, app_settings, stage_callback):
+    def stale_reclaim_processor(
+        job_id,
+        app_settings,
+        stage_callback,
+        *,
+        attempt_id=None,
+    ):
         record = db.get_job(app_settings.database_path, job_id)
         assert record is not None
         old_attempt_id = record["harmony_attempt_id"]
         assert isinstance(old_attempt_id, str)
+        assert old_attempt_id == attempt_id
         attempt_ids.append(old_attempt_id)
         stage_callback(
             "inferring_harmonic_context",
@@ -789,7 +882,13 @@ def test_old_worker_cannot_complete_reclaimed_same_version_attempt(
             48,
         )
         old_payload = harmony_artifact()
-        write_harmony_artifact(job_id, app_settings, old_payload)
+        old_target = harmony_attempt_artifact_file_name(old_attempt_id)
+        write_harmony_artifact(
+            job_id,
+            app_settings,
+            old_payload,
+            artifact_file_name=old_target,
+        )
 
         replacement = raw_payload()
         replacement["transcriptionVersion"] = "raw-transcription-v2"
@@ -818,7 +917,10 @@ def test_old_worker_cannot_complete_reclaimed_same_version_attempt(
         new_attempt_id = reclaimed["harmony_attempt_id"]
         assert isinstance(new_attempt_id, str)
         attempt_ids.append(new_attempt_id)
-        return result_from_artifact(old_payload)
+        return result_from_artifact(
+            old_payload,
+            artifact_file_name=old_target,
+        )
 
     app = create_app(settings=settings, harmony_processor=stale_reclaim_processor)
     with TestClient(app) as client:
@@ -835,6 +937,12 @@ def test_old_worker_cannot_complete_reclaimed_same_version_attempt(
     assert record["harmony_attempt_id"] == attempt_ids[1]
     assert record["harmony_artifact_file_name"] is None
     assert details.status_code == 404
+    old_path = (
+        settings.exports_dir
+        / job_id
+        / harmony_attempt_artifact_file_name(attempt_ids[0])
+    )
+    assert not old_path.exists()
 
 
 def test_summary_full_details_and_download_use_validated_artifact_truth(
@@ -885,6 +993,146 @@ def test_summary_full_details_and_download_use_validated_artifact_truth(
     assert download.headers["content-type"].startswith("application/json")
     assert "harmonic-context.json" in download.headers["content-disposition"]
     assert json.loads(download.content) == artifact
+
+
+def test_raw_event_warnings_survive_default_pipeline_details_and_download(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    app = create_app(settings=settings)
+    warning_list = [
+        "Dominant line only; review this pitch.",
+        "Pitch boundary remains uncertain.",
+    ]
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        payload = raw_payload()
+        payload["pitchedNoteEvents"][0]["warnings"] = warning_list
+        write_raw_transcription(job_id, settings, payload)
+
+        response = client.post(f"/api/jobs/{job_id}/harmonize")
+        full = client.get(f"/api/jobs/{job_id}/harmony?includeSegments=true")
+        download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert response.status_code == 202
+    assert full.status_code == 200
+    evidence = {item["id"]: item for item in full.json()["rawEvidence"]}
+    assert evidence["p_c"]["warnings"] == warning_list
+    assert evidence["p_e"]["warnings"] == []
+    assert evidence["p_g"]["warnings"] == []
+    assert download.status_code == 200
+    downloaded = json.loads(download.content)
+    downloaded_evidence = {item["id"]: item for item in downloaded["rawEvidence"]}
+    assert downloaded_evidence["p_c"]["warnings"] == warning_list
+
+
+def test_late_old_worker_cannot_replace_or_hide_newer_success(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    app = create_app(settings=settings, harmony_processor=successful_processor)
+
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        previous = publish_harmony(settings, job_id)
+        assert db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+            force=True,
+        )
+        old_record = db.get_job(settings.database_path, job_id)
+        assert old_record is not None
+        old_attempt = old_record["harmony_attempt_id"]
+        assert isinstance(old_attempt, str)
+
+        assert db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+            force=True,
+        )
+        new_record = db.get_job(settings.database_path, job_id)
+        assert new_record is not None
+        new_attempt = new_record["harmony_attempt_id"]
+        assert isinstance(new_attempt, str) and new_attempt != old_attempt
+
+        during = client.get(f"/api/jobs/{job_id}/harmony?includeSegments=true")
+        assert during.status_code == 200
+        assert during.json()["createdAt"] == previous["createdAt"]
+
+        def new_processor(
+            worker_job_id,
+            app_settings,
+            _stage_callback,
+            *,
+            attempt_id=None,
+        ):
+            assert attempt_id == new_attempt
+            payload = harmony_artifact(created_at="2026-08-14T04:20:00+00:00")
+            target = harmony_attempt_artifact_file_name(new_attempt)
+            write_harmony_artifact(
+                worker_job_id,
+                app_settings,
+                payload,
+                artifact_file_name=target,
+            )
+            return result_from_artifact(payload, artifact_file_name=target)
+
+        _run_harmony_job(
+            job_id,
+            settings,
+            new_processor,
+            new_attempt,
+        )
+        completed = db.get_job(settings.database_path, job_id)
+        assert completed is not None
+        new_pointer = completed["harmony_artifact_file_name"]
+        assert new_pointer == harmony_attempt_artifact_file_name(new_attempt)
+
+        def old_processor(
+            worker_job_id,
+            app_settings,
+            _stage_callback,
+            *,
+            attempt_id=None,
+        ):
+            assert attempt_id == old_attempt
+            payload = harmony_artifact(created_at="2026-08-14T04:30:00+00:00")
+            target = harmony_attempt_artifact_file_name(old_attempt)
+            write_harmony_artifact(
+                worker_job_id,
+                app_settings,
+                payload,
+                artifact_file_name=target,
+            )
+            return result_from_artifact(payload, artifact_file_name=target)
+
+        _run_harmony_job(
+            job_id,
+            settings,
+            old_processor,
+            old_attempt,
+        )
+        final_record = db.get_job(settings.database_path, job_id)
+        assert final_record is not None
+        assert final_record["harmony_status"] == "completed"
+        assert final_record["harmony_artifact_file_name"] == new_pointer
+        details = client.get(f"/api/jobs/{job_id}/harmony?includeSegments=true")
+        download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert details.status_code == 200
+    assert details.json()["createdAt"] == "2026-08-14T04:20:00+00:00"
+    assert download.status_code == 200
+    assert json.loads(download.content)["createdAt"] == "2026-08-14T04:20:00+00:00"
+    old_path = (
+        settings.exports_dir
+        / job_id
+        / harmony_attempt_artifact_file_name(old_attempt)
+    )
+    new_path = settings.exports_dir / job_id / new_pointer
+    assert not old_path.exists()
+    assert new_path.is_file()
 
 
 def test_same_metadata_raw_evidence_replacement_invalidates_details_and_download(
