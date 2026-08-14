@@ -561,11 +561,20 @@ def _segment_for_window(
     )
     primary = ranked[0] if ranked else None
     alternatives = ranked[1 : 1 + _MAX_ALTERNATIVES] if ranked else []
+    significant_pitch_class_count = sum(
+        weight > total_weight * 0.04 for weight in pitch_class_weights
+    )
+    incomplete_non_power_dyad = (
+        primary is not None
+        and primary["quality"] != "power"
+        and significant_pitch_class_count < 3
+    )
     unresolved = (
         primary is None
         or primary["confidence"] < _MIN_RESOLVED_CONFIDENCE
         or primary["templateCoverage"]
         < (1.0 if primary["quality"] == "power" else 2 / 3)
+        or incomplete_non_power_dyad
     )
     segment_warnings: list[str] = []
     if primary is None:
@@ -574,6 +583,11 @@ def _segment_for_window(
             "Local pitch evidence does not support a baseline chord candidate.",
         )
     else:
+        if incomplete_non_power_dyad:
+            _append_warning(
+                segment_warnings,
+                "Two significant pitch classes do not uniquely support a non-power chord quality; keep alternatives unresolved.",
+            )
         if primary["quality"] == "power":
             _append_warning(
                 segment_warnings,
