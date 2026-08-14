@@ -42,6 +42,9 @@ _HARMONY_ARTIFACT_FILE_NAME = "harmony/harmonic-context.json"
 _RAW_TRANSCRIPTION_ARTIFACT_FILE_NAME = "transcription/raw-events.json"
 _HARMONY_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
 _HARMONY_ATTEMPT_ID_RE = re.compile(r"[a-f0-9]{32}")
+_HARMONY_ATTEMPT_ARTIFACT_RE = re.compile(
+    r"harmony/harmonic-context\.([a-f0-9]{32})\.json"
+)
 _HARMONY_UNSAFE_ERROR_RE = re.compile(
     r"traceback|https?://|(?:^|\s)[A-Za-z]:[\\/]|\\\\|"
     r"(?:^|\s)/(?:[^\s/]+/)+|"
@@ -171,6 +174,11 @@ def utc_now() -> str:
 def connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path, timeout=30)
     connection.row_factory = sqlite3.Row
+    connection.create_function(
+        "is_valid_harmony_artifact",
+        1,
+        lambda value: 1 if _is_valid_harmony_artifact_file_name(value) else 0,
+    )
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
@@ -531,7 +539,7 @@ def init_database(database_path: Path) -> None:
                     OR harmony_version IS NULL
                     OR TRIM(harmony_version) = ''
                     OR harmony_attempt_version != harmony_version
-                    OR harmony_artifact_file_name != 'harmony/harmonic-context.json'
+                    OR is_valid_harmony_artifact(harmony_artifact_file_name) != 1
                     OR harmonized_at IS NULL
                     OR TRIM(harmonized_at) = ''
                     OR harmony_source_transcription_version IS NULL
@@ -926,7 +934,7 @@ def claim_harmony_attempt(
               AND TRIM(transcribed_at) != ''
               AND (
                     harmony_status IN ('not_started', 'failed')
-                    OR (? = 1 AND harmony_status = 'completed')
+                    OR (? = 1 AND harmony_status IN ('completed', 'processing'))
               )
             """,
             (
@@ -1009,8 +1017,10 @@ def complete_harmony_attempt(
     """Atomically replace successful harmony metadata for the active source."""
     successful_version = _validate_harmony_version(harmony_version)
     safe_attempt_id = _validate_harmony_attempt_id(attempt_id)
-    if artifact_file_name != _HARMONY_ARTIFACT_FILE_NAME:
-        raise ValueError("artifact_file_name must be the canonical harmony path.")
+    safe_artifact_file_name = _validate_completion_artifact_file_name(
+        artifact_file_name,
+        safe_attempt_id,
+    )
     safe_timestamp = _validate_harmony_timestamp(harmonized_at)
     safe_message = _validate_harmony_text(message, "harmony message", 500)
     counts = {
@@ -1068,7 +1078,7 @@ def complete_harmony_attempt(
                 safe_message,
                 successful_version,
                 successful_version,
-                artifact_file_name,
+                safe_artifact_file_name,
                 safe_timestamp,
                 event_count,
                 segment_count,
@@ -1264,6 +1274,12 @@ def _validate_harmony_values(values: dict[str, Any]) -> None:
         values["harmony_attempt_id"] = _validate_harmony_attempt_id(
             values["harmony_attempt_id"]
         )
+    if "harmony_artifact_file_name" in values:
+        pointer = values["harmony_artifact_file_name"]
+        if pointer is not None:
+            values["harmony_artifact_file_name"] = _validate_harmony_artifact_pointer(
+                pointer
+            )
     for field in _HARMONY_BOOLEAN_FIELDS:
         if field not in values:
             continue
@@ -1296,6 +1312,38 @@ def _validate_harmony_attempt_id(value: Any) -> str | None:
     if not isinstance(value, str) or not _HARMONY_ATTEMPT_ID_RE.fullmatch(value):
         raise ValueError("harmony_attempt_id is invalid.")
     return value
+
+
+def _is_valid_harmony_artifact_file_name(value: Any) -> bool:
+    return isinstance(value, str) and (
+        value == _HARMONY_ARTIFACT_FILE_NAME
+        or _HARMONY_ATTEMPT_ARTIFACT_RE.fullmatch(value) is not None
+    )
+
+
+def _validate_harmony_artifact_pointer(value: Any) -> str:
+    if not _is_valid_harmony_artifact_file_name(value):
+        raise ValueError("harmony_artifact_file_name is invalid.")
+    return value
+
+
+def _validate_completion_artifact_file_name(
+    value: Any,
+    attempt_id: str | None,
+) -> str:
+    pointer = _validate_harmony_artifact_pointer(value)
+    if attempt_id is None:
+        if pointer != _HARMONY_ARTIFACT_FILE_NAME:
+            raise ValueError(
+                "A no-nonce harmony completion must use the legacy canonical path."
+            )
+        return pointer
+    expected = f"harmony/harmonic-context.{attempt_id}.json"
+    if pointer != expected:
+        raise ValueError(
+            "Harmony completion artifact must match the active attempt identity."
+        )
+    return pointer
 
 
 def _validate_harmony_text(value: Any, label: str, maximum: int) -> str:
