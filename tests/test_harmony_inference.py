@@ -478,6 +478,16 @@ def test_bad_part_evidence_references_and_assignments_fail() -> None:
         )
 
 
+def test_unassigned_event_ids_are_bounded() -> None:
+    events = [event("c", 60)]
+    evidence = {
+        "assignments": [],
+        "unassignedEventIds": ["c"] * 100_001,
+    }
+    with pytest.raises(HarmonyInferenceError, match="Too many unassigned event IDs"):
+        infer_harmony(events, timing(), pitched_part_evidence=evidence)
+
+
 def test_no_final_notation_roman_numeral_or_tab_claims() -> None:
     result = infer_harmony(
         [event("c", 60), event("e", 64), event("g", 67)], timing()
