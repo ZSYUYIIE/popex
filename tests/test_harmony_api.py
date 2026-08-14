@@ -542,6 +542,20 @@ def test_invalid_or_missing_raw_or_analysis_blocks_start(
         raw_path.write_text("{broken", encoding="utf-8")
         assert client.post(f"/api/jobs/{corrupt_raw}/harmonize").status_code == 409
 
+        mismatched_raw = create_job(settings)
+        payload = raw_payload()
+        payload["createdAt"] = "2026-08-14T04:01:00+00:00"
+        write_raw_transcription(mismatched_raw, settings, payload)
+        assert client.post(f"/api/jobs/{mismatched_raw}/harmonize").status_code == 409
+
+        mismatched_counts = create_job(settings)
+        db.update_job(
+            settings.database_path,
+            mismatched_counts,
+            pitched_event_count=999,
+        )
+        assert client.post(f"/api/jobs/{mismatched_counts}/harmonize").status_code == 409
+
         missing_analysis = create_job(settings)
         analysis_path = settings.exports_dir / missing_analysis / ANALYSIS_JSON_RELATIVE_PATH
         analysis_path.unlink()
@@ -608,6 +622,7 @@ def test_successful_background_progress_and_completion_are_durable(
     assert record is not None
     assert record["harmony_status"] == "completed"
     assert record["harmony_progress"] == 100
+    assert record["harmony_attempt_id"] is None
     assert record["harmony_artifact_file_name"] == HARMONY_ARTIFACT_RELATIVE_PATH
     assert record["harmony_segment_count"] == (
         record["harmony_resolved_segment_count"]
@@ -756,6 +771,72 @@ def test_stale_source_worker_cannot_complete_or_fail_new_source(
     assert record["harmony_error"] is None
 
 
+def test_old_worker_cannot_complete_reclaimed_same_version_attempt(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    attempt_ids: list[str] = []
+
+    def stale_reclaim_processor(job_id, app_settings, stage_callback):
+        record = db.get_job(app_settings.database_path, job_id)
+        assert record is not None
+        old_attempt_id = record["harmony_attempt_id"]
+        assert isinstance(old_attempt_id, str)
+        attempt_ids.append(old_attempt_id)
+        stage_callback(
+            "inferring_harmonic_context",
+            "Inferring conservative local harmonic candidates.",
+            48,
+        )
+        old_payload = harmony_artifact()
+        write_harmony_artifact(job_id, app_settings, old_payload)
+
+        replacement = raw_payload()
+        replacement["transcriptionVersion"] = "raw-transcription-v2"
+        replacement["createdAt"] = "2026-08-14T05:00:00+00:00"
+        write_raw_transcription(job_id, app_settings, replacement)
+        db.update_job(
+            app_settings.database_path,
+            job_id,
+            transcription_status="completed",
+            transcription_stage="completed",
+            transcription_progress=100,
+            transcription_version="raw-transcription-v2",
+            transcription_artifact_file_name=RAW_TRANSCRIPTION_RELATIVE_PATH,
+            transcribed_at="2026-08-14T05:00:00+00:00",
+            pitched_event_count=3,
+            percussion_event_count=0,
+            aligned_event_count=0,
+        )
+        assert db.claim_harmony_attempt(
+            app_settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+        )
+        reclaimed = db.get_job(app_settings.database_path, job_id)
+        assert reclaimed is not None
+        new_attempt_id = reclaimed["harmony_attempt_id"]
+        assert isinstance(new_attempt_id, str)
+        attempt_ids.append(new_attempt_id)
+        return result_from_artifact(old_payload)
+
+    app = create_app(settings=settings, harmony_processor=stale_reclaim_processor)
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        response = client.post(f"/api/jobs/{job_id}/harmonize")
+        details = client.get(f"/api/jobs/{job_id}/harmony")
+
+    assert response.status_code == 202
+    assert len(attempt_ids) == 2
+    assert attempt_ids[0] != attempt_ids[1]
+    record = db.get_job(settings.database_path, job_id)
+    assert record is not None
+    assert record["harmony_status"] == "processing"
+    assert record["harmony_attempt_id"] == attempt_ids[1]
+    assert record["harmony_artifact_file_name"] is None
+    assert details.status_code == 404
+
+
 def test_summary_full_details_and_download_use_validated_artifact_truth(
     tmp_path: Path,
 ) -> None:
@@ -804,6 +885,31 @@ def test_summary_full_details_and_download_use_validated_artifact_truth(
     assert download.headers["content-type"].startswith("application/json")
     assert "harmonic-context.json" in download.headers["content-disposition"]
     assert json.loads(download.content) == artifact
+
+
+def test_same_metadata_raw_evidence_replacement_invalidates_details_and_download(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    app = create_app(settings=settings, harmony_processor=successful_processor)
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        publish_harmony(settings, job_id)
+        replacement = raw_payload()
+        replacement["pitchedNoteEvents"][0].update(
+            midiNote=62,
+            midiPitch=62.12,
+            frequencyHz=296.3,
+            noteName="D4",
+        )
+        write_raw_transcription(job_id, settings, replacement)
+        details = client.get(f"/api/jobs/{job_id}/harmony")
+        download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert details.status_code == 500
+    assert download.status_code == 500
+    assert "validated" in details.json()["detail"].lower()
+    assert str(settings.data_dir) not in json.dumps(details.json())
 
 
 def test_unavailable_corrupt_and_metadata_mismatch_are_not_exposed(
@@ -910,6 +1016,7 @@ def test_internal_harmony_columns_and_hostile_values_do_not_leak(
         payload = client.get(f"/api/jobs/{job_id}").json()
 
     assert payload["harmony"]["error"] == "Harmonic-context processing failed."
+    assert "harmony_attempt_id" not in payload
     for key in payload:
         assert not key.startswith("harmony_")
     encoded = json.dumps(payload).lower()
