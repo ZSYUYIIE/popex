@@ -3,31 +3,77 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f4f5f7">
-  <title>PopEx — audio preparation and analysis</title>
+  <meta name="theme-color" content="#f2ead8">
+  <title>PopEx — local music analysis workspace</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to main content</a>
+
   <header class="app-header" role="banner">
     <div class="header-inner">
-      <a class="brand" href="/" aria-label="PopEx home"><span class="brand-mark" aria-hidden="true">P</span><span><strong>PopEx</strong><small>Audio preparation and analysis</small></span></a>
-      <span class="workspace-state"><span aria-hidden="true">●</span> Local workspace</span>
+      <a class="brand" href="/" aria-label="PopEx home">
+        <span class="brand-mark" aria-hidden="true">PX</span>
+        <span class="brand-copy">
+          <strong>PopEx</strong>
+          <small>Local music workspace</small>
+        </span>
+      </a>
+      <div class="header-meta">
+        <span class="workspace-state"><span aria-hidden="true">●</span> Local-first</span>
+        <span class="edition-pill">Pipeline · 03</span>
+      </div>
     </div>
   </header>
+
   <main id="main-content" class="page-shell">
     <section class="intro" aria-labelledby="page-title">
-      <p class="eyebrow">Analysis foundation</p>
-      <h1 id="page-title">Prepare a recording and inspect its first musical estimates.</h1>
-      <p>Upload local audio or video, or import a supported video link. PopEx retains the source, creates analysis-ready WAV audio, and estimates timing and tonal candidates.</p>
-      <p class="scope-note">The eventual product goal is version-specific sheet music, parts, tabs, drums, percussion, and chord symbols. This MVP does not yet generate notation or separated stems.</p>
+      <div class="intro-copy">
+        <p class="eyebrow"><span>Edition 01</span> Audio intelligence</p>
+        <h1 id="page-title">Turn a recording into a <span>working music draft.</span></h1>
+        <p class="intro-lead">Bring in local media or an authorized video link. PopEx preserves the source, prepares analysis-ready audio, estimates musical structure, and can publish four reviewable stems through an optional local runtime.</p>
+        <p class="scope-note"><strong>Current scope.</strong> Source preparation, audio analysis, and optional stem separation are available now. Raw pitched-note, percussion-event, and notation generation are the next product stages.</p>
+        <ul class="hero-facts" aria-label="Product principles">
+          <li><strong>01</strong><span>Private audio stays local</span></li>
+          <li><strong>02</strong><span>Version-specific evidence</span></li>
+          <li><strong>03</strong><span>Review before notation</span></li>
+        </ul>
+      </div>
+      <aside class="signal-card" aria-label="Current pipeline">
+        <p class="signal-label">Signal path</p>
+        <div class="signal-wave" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <ol>
+          <li><span>Capture</span><strong>Source</strong></li>
+          <li><span>Measure</span><strong>Audio</strong></li>
+          <li><span>Separate</span><strong>Stems</strong></li>
+          <li><span>Next</span><strong>Notes</strong></li>
+        </ol>
+        <p class="signal-note">Built for one musician, one local workspace, and inspectable outputs.</p>
+      </aside>
     </section>
-    <section aria-labelledby="source-title">
-      <div class="section-heading"><div><p class="section-kicker">New source</p><h2 id="source-title">Add media</h2><p>Both methods use the same preparation and analysis pipeline.</p></div></div>
+
+    <section class="source-section" aria-labelledby="source-title">
+      <div class="section-heading">
+        <div class="section-number" aria-hidden="true">01</div>
+        <div>
+          <p class="section-kicker">Source desk</p>
+          <h2 id="source-title">Add the recording.</h2>
+          <p>Both entry points flow into the same preparation and analysis pipeline.</p>
+        </div>
+      </div>
+
       <div class="source-grid">
-        <section class="panel" aria-labelledby="upload-title">
-          <h3 id="upload-title">Local file</h3>
+        <section class="panel panel-upload" aria-labelledby="upload-title">
+          <div class="panel-heading">
+            <span class="panel-code" aria-hidden="true">A</span>
+            <div>
+              <p class="panel-kicker">Direct intake</p>
+              <h3 id="upload-title">Local file</h3>
+            </div>
+          </div>
           <form id="upload-form" aria-describedby="upload-guidance upload-message">
             <label id="drop-zone" class="drop-zone" for="media-file">
               <span class="drop-icon" aria-hidden="true">＋</span>
@@ -40,8 +86,15 @@
             <p id="upload-message" class="form-message" role="status" aria-live="polite"></p>
           </form>
         </section>
-        <section class="panel" aria-labelledby="url-title">
-          <h3 id="url-title">Video link</h3>
+
+        <section class="panel panel-link" aria-labelledby="url-title">
+          <div class="panel-heading">
+            <span class="panel-code" aria-hidden="true">B</span>
+            <div>
+              <p class="panel-kicker">Authorized import</p>
+              <h3 id="url-title">Video link</h3>
+            </div>
+          </div>
           <form id="extract-form" aria-describedby="url-guidance form-message">
             <label for="video-url">Supported video URL</label>
             <input id="video-url" name="url" type="url" required autocomplete="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=...">
@@ -49,18 +102,48 @@
             <button id="submit-button" type="submit">Prepare audio</button>
             <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
           </form>
+          <div class="panel-stamp" aria-hidden="true"><span>Local</span><strong>Only</strong></div>
         </section>
       </div>
     </section>
+
     <aside class="panel process-panel" aria-labelledby="process-title">
-      <h2 id="process-title">Current workflow</h2>
-      <ol><li><strong>Prepare source</strong><span>Validate, retain, and normalize the media.</span></li><li><strong>Analyze audio</strong><span>Estimate signal quality, tempo, beats, tuning, and tonal candidates.</span></li><li><strong>Review results</strong><span>Download source artifacts, analysis WAV, metadata, and versioned analysis JSON.</span></li></ol>
+      <div class="process-intro">
+        <p class="section-kicker">Method</p>
+        <h2 id="process-title">A visible pipeline, not a black box.</h2>
+        <p>Each stage leaves a durable local result, so a later failure does not erase completed work.</p>
+      </div>
+      <ol>
+        <li><span class="step-number">01</span><strong>Capture</strong><span>Validate and retain the original media.</span></li>
+        <li><span class="step-number">02</span><strong>Analyze</strong><span>Estimate tempo, beats, tuning, and tonal candidates.</span></li>
+        <li><span class="step-number">03</span><strong>Separate</strong><span>Optionally prepare four local stems after explicit consent.</span></li>
+        <li><span class="step-number">04</span><strong>Review</strong><span>Inspect and download versioned artifacts before transcription.</span></li>
+      </ol>
     </aside>
+
     <section class="jobs-section" aria-labelledby="jobs-title">
-      <div class="section-heading"><div><p class="section-kicker">Workspace</p><h2 id="jobs-title" tabindex="-1">Recent audio</h2><p>Active jobs update automatically. Backend stage, message, and progress are shown directly.</p></div><button id="refresh-button" class="secondary" type="button">Refresh</button></div>
+      <div class="section-heading jobs-heading">
+        <div class="section-number" aria-hidden="true">02</div>
+        <div>
+          <p class="section-kicker">Working archive</p>
+          <h2 id="jobs-title" tabindex="-1">Recent audio</h2>
+          <p>Active jobs update automatically. Backend stage, message, and progress are shown directly.</p>
+        </div>
+        <button id="refresh-button" class="secondary" type="button">Refresh</button>
+      </div>
       <p id="jobs-message" class="form-message" role="status" aria-live="polite"></p>
-      <ol id="jobs" class="job-list" aria-busy="true"><li class="empty-state"><strong>Loading recent audio…</strong></li></ol>
+      <ol id="jobs" class="job-list" aria-busy="true">
+        <li class="empty-state"><strong>Loading recent audio…</strong></li>
+      </ol>
     </section>
   </main>
+
+  <footer class="app-footer">
+    <div>
+      <strong>PopEx</strong>
+      <span>Local-first, version-specific music transcription workspace.</span>
+    </div>
+    <span>Source → Analysis → Stems → Notes</span>
+  </footer>
 </body>
 </html>
