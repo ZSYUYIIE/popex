@@ -427,6 +427,8 @@ def _parse_part_evidence(
         unassigned, (str, bytes, bytearray)
     ):
         raise HarmonyInferenceError("unassignedEventIds must be an array.")
+    if len(unassigned) > _MAX_ASSIGNMENTS:
+        raise HarmonyInferenceError("Too many unassigned event IDs.")
     for event_id in unassigned:
         safe_event_id = _safe_id(event_id, "unassigned event ID")
         if safe_event_id not in event_ids:
