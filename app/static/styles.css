@@ -326,6 +326,22 @@ progress {
   justify-content:space-between;
   gap:1rem
 }
+.harmony-segments>li {
+  display:grid;
+  min-width:0
+}
+.harmony-segments>li>* {
+  min-width:0;
+  overflow-wrap:anywhere
+}
+.harmony-segments .candidate-list li {
+  flex-wrap:wrap;
+  min-width:0
+}
+.harmony-segments .candidate-list li>* {
+  min-width:0;
+  overflow-wrap:anywhere
+}
 .artifacts ul,.stem-list {
   list-style:none;
   padding:0;

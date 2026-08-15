@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JS = ROOT / "app" / "static" / "app.js"
+STYLES_CSS = ROOT / "app" / "static" / "styles.css"
 
 
 def _run_node(body: str) -> dict:
@@ -24,14 +26,17 @@ function element(selector) {{
       value: "",
       files: [],
       disabled: false,
+      focused: false,
       textContent: "",
       innerHTML: "",
       dataset: {{}},
+      attributes: {{}},
       classList: {{add() {{}}, remove() {{}}, toggle() {{}}}},
       addEventListener(type, handler) {{listeners.set(`${{selector}}:${{type}}`, handler);}},
-      setAttribute() {{}},
+      setAttribute(name, value) {{this.attributes[name] = String(value);}},
+      getAttribute(name) {{return this.attributes[name] ?? null;}},
       reportValidity() {{return true;}},
-      focus() {{}},
+      focus() {{this.focused = true;}},
       scrollIntoView() {{}},
     }});
   }}
@@ -43,7 +48,7 @@ let fetchImpl = async () => ({{ok: true, status: 200, json: async () => []}});
 global.fetch = (...args) => fetchImpl(...args);
 global.setTimeout = () => 1;
 global.clearTimeout = () => {{}};
-const source = fs.readFileSync({app_path}, "utf8") + `
+const source = fs.readFileSync({app_path}, "utf8").replace("updateFilePresentation();loadJobs();","") + `
 ;globalThis.__popexHarmonyTest={{
   renderHarmony,
   renderHarmonyReview,
@@ -52,13 +57,26 @@ const source = fs.readFileSync({app_path}, "utf8") + `
   harmonyStageText,
   deriveState,
   safeRelativeUrl,
+  hydrateCompletedAnalyses,
+  hydrateCompletedSeparations,
+  hydrateCompletedTranscriptions,
+  hydrateCompletedInterpretations,
   hydrateCompletedHarmonies,
   loadJobs,
   setDetail:(id,value)=>harmonyCache.set(id,value),
   clearDetails:()=>harmonyCache.clear(),
   setFetch:(value)=>{{fetchImpl=value;}},
   getElement:element,
-  getListener:(selector,type)=>listeners.get(selector+":"+type)
+  getListener:(selector,type)=>listeners.get(selector+":"+type),
+  getRevision:()=>jobsRevision,
+  getPollHandle:()=>pollHandle,
+  getCacheKeys:()=>({{
+    analysis:[...analysisCache.keys()],
+    separation:[...separationCache.keys()],
+    transcription:[...transcriptionCache.keys()],
+    interpretation:[...interpretationCache.keys()],
+    harmony:[...harmonyCache.keys()]
+  }})
 }};`;
 eval(source);
 (async () => {{
@@ -151,7 +169,8 @@ const button = {
     force:"true",retry:"false"
   },
   disabled:false,
-  textContent:"Re-harmonize"
+  textContent:"Re-harmonize",
+  focus(){}
 };
 const listener = t.getListener("#jobs","click");
 await listener({target:{closest:()=>button}});
@@ -174,11 +193,11 @@ t.setFetch(async (url,options={})=>{
   return {ok:true,status:200,json:async()=>[]};
 });
 const listener=t.getListener("#jobs","click");
-const retry={dataset:{action:"harmony",jobId:"retry",startUrl:"/api/jobs/retry/harmonize",force:"false",retry:"true"},disabled:false,textContent:"Retry harmony"};
+const retry={dataset:{action:"harmony",jobId:"retry",startUrl:"/api/jobs/retry/harmonize",force:"false",retry:"true"},disabled:false,textContent:"Retry harmony",focus(){this.focused=true;}};
 await listener({target:{closest:()=>retry}});
-const unsafe={dataset:{action:"harmony",jobId:"unsafe",startUrl:"https://evil.example/harmonize",force:"false",retry:"false"},disabled:false,textContent:"Harmonize"};
+const unsafe={dataset:{action:"harmony",jobId:"unsafe",startUrl:"https://evil.example/harmonize",force:"false",retry:"false"},disabled:false,textContent:"Harmonize",focused:false,focus(){this.focused=true;}};
 await listener({target:{closest:()=>unsafe}});
-console.log(JSON.stringify({requested,retryText:retry.textContent,unsafeText:unsafe.textContent,unsafeDisabled:unsafe.disabled,message:t.getElement("#jobs-message").textContent}));
+console.log(JSON.stringify({requested,retryText:retry.textContent,unsafeText:unsafe.textContent,unsafeDisabled:unsafe.disabled,unsafeFocused:unsafe.focused,message:t.getElement("#jobs-message").textContent}));
 """
     )
     assert result["requested"][0] == {
@@ -189,6 +208,7 @@ console.log(JSON.stringify({requested,retryText:retry.textContent,unsafeText:uns
     assert result["retryText"] == "Started"
     assert result["unsafeText"] == "Harmonize"
     assert result["unsafeDisabled"] is False
+    assert result["unsafeFocused"] is True
     assert "action URL is unavailable" in result["message"]
 
 
@@ -261,7 +281,8 @@ const fallback=t.harmonyCounts(
     unresolvedEventIds:["b"],warnings:["one","two"]
   }
 );
-console.log(JSON.stringify({explicit,fallback}));
+const malformed=t.harmonyCounts({counts:{events:true,segments:"4",resolved:null,unresolved:2.5,unresolvedEvents:-1,warnings:Infinity}},null);
+console.log(JSON.stringify({explicit,fallback,malformed}));
 """
     )
     assert result["explicit"] == {
@@ -279,6 +300,14 @@ console.log(JSON.stringify({explicit,fallback}));
         "unresolved": 1,
         "unresolvedEvents": 1,
         "warnings": 2,
+    }
+    assert result["malformed"] == {
+        "events": 0,
+        "segments": 0,
+        "resolved": 0,
+        "unresolved": 0,
+        "unresolvedEvents": 0,
+        "warnings": 0,
     }
 
 
@@ -505,6 +534,326 @@ console.log(JSON.stringify({processing,completed,failed,unknown}));
     assert result["completed"]["label"] == "Harmonic context ready"
     assert result["failed"]["label"] == "Harmony needs attention"
     assert result["unknown"]["label"] == "Harmony status update"
+
+
+def test_null_numeric_evidence_does_not_invent_zero_precision() -> None:
+    result = _run_node(
+        """
+t.clearDetails();
+t.setDetail("job",{
+  counts:{events:1,segments:1,resolved:1,unresolved:0,unresolvedEvents:0,warnings:0},
+  tonalContext:{displayName:"C major",confidence:null},
+  rawEvidence:[{id:"raw",sourceKind:"other",rawStartSeconds:null,rawEndSeconds:null,midiPitch:null,pitchName:"C",confidence:null}],
+  segments:[{
+    id:"segment",rawStartSeconds:null,rawEndSeconds:null,windowMode:"beat",beatIndex:null,
+    supportingEventIds:["raw"],sourceKinds:["other"],partIds:[],voiceIds:[],unassignedContextEventIds:[],
+    observedPitchClasses:[{pitchName:"C",weightRatio:null}],
+    primaryCandidate:{symbol:"C",root:"C",quality:"major",confidence:null,nonChordToneRatio:null,evidenceEventIds:["raw"]},
+    alternatives:[],unresolved:false,warnings:[]
+  }],warnings:[]
+});
+const html=t.renderHarmony({id:"job",harmony:{status:"completed",available:true,counts:{},fullDetailsUrl:"/api/jobs/job/harmony?includeSegments=true"}});
+console.log(JSON.stringify({html}));
+"""
+    )
+    html = result["html"]
+    assert "raw 0.000 s" not in html
+    assert "MIDI 0.00" not in html
+    assert "0% confidence" not in html
+    assert "Beat 1" not in html
+    assert "raw unresolved" in html
+    assert "MIDI unresolved" in html
+    assert "not available" in html
+
+
+def test_out_of_order_harmony_hydration_does_not_resurrect_disappeared_job() -> None:
+    result = _run_node(
+        """
+t.clearDetails();
+let resolveDetail=null;
+t.setFetch(async url=>{
+  if(url==="/api/jobs")return {ok:true,status:200,json:async()=>[]};
+  if(url==="/api/jobs/old/harmony?includeSegments=true")return await new Promise(resolve=>{resolveDetail=()=>resolve({ok:true,status:200,json:async()=>({counts:{events:1},rawEvidence:[],segments:[]})});});
+  throw new Error("unexpected request "+url);
+});
+const stale=[{id:"old",status:"completed",preparation_status:"completed",files:[],analysis:{status:"completed"},transcription:{status:"completed"},harmony:{status:"completed",available:true,counts:{},fullDetailsUrl:"/api/jobs/old/harmony?includeSegments=true"}}];
+const revision=t.getRevision();
+const pending=t.hydrateCompletedHarmonies(stale,revision);
+await Promise.resolve();
+await t.loadJobs();
+const newer=t.getElement("#jobs").innerHTML;
+resolveDetail();
+await pending;
+const after=t.getElement("#jobs").innerHTML;
+console.log(JSON.stringify({newer,after}));
+"""
+    )
+    assert "No saved audio yet" in result["newer"]
+    assert "No saved audio yet" in result["after"]
+    assert "harmony-old" not in result["after"]
+
+
+def test_new_harmony_artifact_identity_invalidates_success_cache() -> None:
+    result = _run_node(
+        """
+t.clearDetails();
+t.setDetail("job",{
+  harmonyVersion:"v1",createdAt:"2026-08-14T04:00:00+00:00",counts:{events:1,segments:1,resolved:1,unresolved:0,unresolvedEvents:0,warnings:0},
+  rawEvidence:[{id:"old",sourceKind:"other",rawStartSeconds:0,rawEndSeconds:.5,midiPitch:60,pitchName:"C",confidence:.8}],
+  segments:[{id:"old_segment",rawStartSeconds:0,rawEndSeconds:1,windowMode:"absolute_time",supportingEventIds:["old"],sourceKinds:["other"],partIds:[],voiceIds:[],unassignedContextEventIds:[],observedPitchClasses:[{pitchName:"C",weightRatio:1}],primaryCandidate:{symbol:"C",root:"C",quality:"major",confidence:.8,nonChordToneRatio:0,evidenceEventIds:["old"]},alternatives:[],unresolved:false,warnings:[]}],warnings:[]
+});
+const requested=[];
+t.setFetch(async url=>{
+  requested.push(url);
+  if(url==="/api/jobs")return {ok:true,status:200,json:async()=>[{id:"job",status:"completed",preparation_status:"completed",files:[],analysis:{status:"completed"},transcription:{status:"completed"},harmony:{status:"completed",available:true,version:"v2",createdAt:"2026-08-14T05:00:00+00:00",counts:{},fullDetailsUrl:"/api/jobs/job/harmony?includeSegments=true"}}]};
+  if(url==="/api/jobs/job/harmony?includeSegments=true")return {ok:true,status:200,json:async()=>({harmonyVersion:"v2",createdAt:"2026-08-14T05:00:00+00:00",counts:{events:1,segments:1,resolved:1,unresolved:0,unresolvedEvents:0,warnings:0},rawEvidence:[{id:"new",sourceKind:"other",rawStartSeconds:0,rawEndSeconds:.5,midiPitch:62,pitchName:"D",confidence:.8}],segments:[{id:"new_segment",rawStartSeconds:0,rawEndSeconds:1,windowMode:"absolute_time",supportingEventIds:["new"],sourceKinds:["other"],partIds:[],voiceIds:[],unassignedContextEventIds:[],observedPitchClasses:[{pitchName:"D",weightRatio:1}],primaryCandidate:{symbol:"D",root:"D",quality:"major",confidence:.8,nonChordToneRatio:0,evidenceEventIds:["new"]},alternatives:[],unresolved:false,warnings:[]}],warnings:[]})};
+  throw new Error("unexpected request "+url);
+});
+await t.loadJobs();
+const html=t.getElement("#jobs").innerHTML;
+console.log(JSON.stringify({requested,html}));
+"""
+    )
+    assert "/api/jobs/job/harmony?includeSegments=true" in result["requested"]
+    assert "<strong>D</strong>" in result["html"]
+    assert "<strong>C</strong>" not in result["html"]
+
+
+def test_duplicate_harmony_action_is_ignored_while_first_request_is_pending() -> None:
+    result = _run_node(
+        """
+const posts=[];
+const releases=[];
+t.setFetch((url,options={})=>{
+  if(options.method==="POST"){
+    posts.push(url);
+    return new Promise(resolve=>releases.push(()=>resolve({ok:true,status:200,json:async()=>({})})));
+  }
+  return Promise.resolve({ok:true,status:200,json:async()=>[]});
+});
+const button={dataset:{action:"harmony",jobId:"job",startUrl:"/api/jobs/job/harmonize",force:"false",retry:"false"},disabled:false,textContent:"Harmonize",focus(){}};
+const listener=t.getListener("#jobs","click");
+const first=listener({target:{closest:()=>button}});
+await Promise.resolve();
+const second=listener({target:{closest:()=>button}});
+await Promise.resolve();
+const beforeRelease=posts.length;
+for(const release of releases)release();
+await Promise.all([first,second]);
+console.log(JSON.stringify({beforeRelease,posts}));
+"""
+    )
+    assert result["beforeRelease"] == 1
+    assert result["posts"] == ["/api/jobs/job/harmonize"]
+
+
+def test_failed_harmony_request_reenables_action_and_restores_focus() -> None:
+    result = _run_node(
+        """
+t.setFetch(async (url,options={})=>({ok:false,status:500,json:async()=>({detail:"bounded failure"})}));
+const button={dataset:{action:"harmony",jobId:"job",startUrl:"/api/jobs/job/harmonize",force:"false",retry:"false"},disabled:false,focused:false,textContent:"Harmonize",focus(){this.focused=true;}};
+const listener=t.getListener("#jobs","click");
+await listener({target:{closest:()=>button}});
+console.log(JSON.stringify({disabled:button.disabled,focused:button.focused,text:button.textContent,message:t.getElement("#jobs-message").textContent}));
+"""
+    )
+    assert result["disabled"] is False
+    assert result["focused"] is True
+    assert result["text"] == "Harmonize"
+    assert result["message"] == "bounded failure"
+
+
+def test_newer_load_wins_when_older_success_resolves_last() -> None:
+    result = _run_node(
+        """
+const requests=[];
+const timerCalls=[];
+global.setTimeout=(_fn,delay)=>{timerCalls.push(delay);return timerCalls.length;};
+global.clearTimeout=()=>{};
+t.setFetch(url=>{
+  if(url!=="/api/jobs")throw new Error("unexpected request "+url);
+  return new Promise((resolve,reject)=>requests.push({resolve,reject}));
+});
+const older=t.loadJobs({announce:true});
+const newer=t.loadJobs({announce:true});
+requests[1].resolve({ok:true,status:200,json:async()=>[{
+  id:"new",title:"New job",status:"processing",stage:"processing",message:"New work",
+  preparation_status:"processing",files:[]
+}]});
+await newer;
+const snapshot=()=>({
+  html:t.getElement("#jobs").innerHTML,
+  message:t.getElement("#jobs-message").textContent,
+  busy:t.getElement("#jobs").getAttribute("aria-busy"),
+  refreshDisabled:t.getElement("#refresh-button").disabled,
+  poll:t.getPollHandle(),
+  timerCalls:[...timerCalls],
+  caches:t.getCacheKeys()
+});
+const before=snapshot();
+requests[0].resolve({ok:true,status:200,json:async()=>[{
+  id:"old",title:"Old job",status:"completed",stage:"completed",message:"Old work",
+  preparation_status:"completed",files:[],analysis:{status:"not_started"}
+}]});
+await older;
+const after=snapshot();
+console.log(JSON.stringify({before,after}));
+"""
+    )
+    assert result["before"] == result["after"]
+    assert "New job" in result["after"]["html"]
+    assert "Old job" not in result["after"]["html"]
+    assert result["after"]["message"] == "Recent audio is up to date."
+    assert result["after"]["busy"] == "false"
+    assert result["after"]["refreshDisabled"] is False
+    assert result["after"]["timerCalls"] == [1500]
+    assert result["after"]["caches"] == {
+        "analysis": [],
+        "separation": [],
+        "transcription": [],
+        "interpretation": [],
+        "harmony": [],
+    }
+
+
+def test_newer_load_wins_when_older_failure_resolves_last() -> None:
+    result = _run_node(
+        """
+const requests=[];
+const timerCalls=[];
+global.setTimeout=(_fn,delay)=>{timerCalls.push(delay);return timerCalls.length;};
+global.clearTimeout=()=>{};
+t.setFetch(url=>{
+  if(url!=="/api/jobs")throw new Error("unexpected request "+url);
+  return new Promise((resolve,reject)=>requests.push({resolve,reject}));
+});
+const older=t.loadJobs({announce:true});
+const newer=t.loadJobs({announce:true});
+requests[1].resolve({ok:true,status:200,json:async()=>[{
+  id:"new",title:"New job",status:"processing",stage:"processing",message:"New work",
+  preparation_status:"processing",files:[]
+}]});
+await newer;
+const snapshot=()=>({
+  html:t.getElement("#jobs").innerHTML,
+  message:t.getElement("#jobs-message").textContent,
+  busy:t.getElement("#jobs").getAttribute("aria-busy"),
+  refreshDisabled:t.getElement("#refresh-button").disabled,
+  poll:t.getPollHandle(),
+  timerCalls:[...timerCalls],
+  caches:t.getCacheKeys()
+});
+const before=snapshot();
+requests[0].reject(new Error("stale request failed"));
+await older;
+const after=snapshot();
+console.log(JSON.stringify({before,after}));
+"""
+    )
+    assert result["before"] == result["after"]
+    assert "New job" in result["after"]["html"]
+    assert "Recent audio could not be loaded" not in result["after"]["html"]
+    assert "stale request failed" not in result["after"]["message"]
+    assert result["after"]["busy"] == "false"
+    assert result["after"]["refreshDisabled"] is False
+    assert result["after"]["timerCalls"] == [1500]
+
+
+def test_superseded_inflight_hydrators_cannot_cache_or_rerender() -> None:
+    result = _run_node(
+        """
+await t.loadJobs();
+const cases=[
+  {
+    name:"analysis",url:"/detail/analysis",hydrate:t.hydrateCompletedAnalyses,
+    jobs:[{id:"old-analysis",analysis:{status:"completed",endpoint:"/detail/analysis"}}],
+    payload:{warnings:["old analysis"]},cache:"analysis"
+  },
+  {
+    name:"separation",url:"/detail/separation",hydrate:t.hydrateCompletedSeparations,
+    jobs:[{id:"old-separation",separation:{status:"completed",detailsUrl:"/detail/separation"}}],
+    payload:{stems:[]},cache:"separation"
+  },
+  {
+    name:"transcription",url:"/detail/transcription",hydrate:t.hydrateCompletedTranscriptions,
+    jobs:[{id:"old-transcription",transcription:{status:"completed",detailsUrl:"/detail/transcription"}}],
+    payload:{counts:{}},cache:"transcription"
+  },
+  {
+    name:"interpretation",url:"/detail/interpretation",hydrate:t.hydrateCompletedInterpretations,
+    jobs:[{id:"old-interpretation",interpretation:{status:"completed",available:true,fullDetailsUrl:"/detail/interpretation"}}],
+    payload:{counts:{}},cache:"interpretation"
+  },
+  {
+    name:"harmony",url:"/detail/harmony",hydrate:t.hydrateCompletedHarmonies,
+    jobs:[{id:"old-harmony",harmony:{status:"completed",available:true,fullDetailsUrl:"/detail/harmony"}}],
+    payload:{counts:{},rawEvidence:[],segments:[]},cache:"harmony"
+  }
+];
+const results=[];
+for(const item of cases){
+  const revision=t.getRevision();
+  let resolveDetail=null;
+  t.setFetch(url=>{
+    if(url===item.url)return new Promise(resolve=>{resolveDetail=resolve;});
+    if(url==="/api/jobs")return Promise.resolve({ok:true,status:200,json:async()=>[{
+      id:`new-${item.name}`,title:`New ${item.name}`,status:"processing",stage:"processing",message:"New work",
+      preparation_status:"processing",files:[]
+    }]});
+    throw new Error("unexpected request "+url);
+  });
+  const pending=item.hydrate(item.jobs,revision);
+  await Promise.resolve();
+  await t.loadJobs({announce:true});
+  const snapshot=()=>({
+    html:t.getElement("#jobs").innerHTML,
+    message:t.getElement("#jobs-message").textContent,
+    busy:t.getElement("#jobs").getAttribute("aria-busy"),
+    refreshDisabled:t.getElement("#refresh-button").disabled,
+    poll:t.getPollHandle(),
+    caches:t.getCacheKeys()
+  });
+  const before=snapshot();
+  resolveDetail({ok:true,status:200,json:async()=>item.payload});
+  await pending;
+  const after=snapshot();
+  results.push({name:item.name,cache:item.cache,oldId:`old-${item.name}`,before,after});
+}
+console.log(JSON.stringify({results}));
+"""
+    )
+    assert [item["name"] for item in result["results"]] == [
+        "analysis",
+        "separation",
+        "transcription",
+        "interpretation",
+        "harmony",
+    ]
+    for item in result["results"]:
+        assert item["before"] == item["after"]
+        assert f"New {item['name']}" in item["after"]["html"]
+        assert item["oldId"] not in item["after"]["caches"][item["cache"]]
+        assert item["after"]["busy"] == "false"
+        assert item["after"]["refreshDisabled"] is False
+
+
+def test_harmony_segment_css_stacks_and_wraps_for_narrow_reflow() -> None:
+    source = STYLES_CSS.read_text(encoding="utf-8")
+    assert re.search(
+        r"\.harmony-segments\s*>\s*li\s*\{[^}]*display\s*:\s*grid",
+        source,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.harmony-segments\s*>\s*li\s*>\s*\*\s*\{[^}]*overflow-wrap\s*:\s*anywhere",
+        source,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"\.harmony-segments\s+\.candidate-list\s+li\s*\{[^}]*flex-wrap\s*:\s*wrap",
+        source,
+        re.DOTALL,
+    )
 
 
 def test_no_final_score_export_or_voicing_claims() -> None:
