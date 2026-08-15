@@ -219,8 +219,10 @@ def write_harmony_artifact(
     assert directory is not None
     destination = directory / "harmonic-context.json"
     _validate_existing_destination(destination, directory)
+    previous = _existing_artifact_bytes(destination, directory)
     temporary = directory / f".harmonic-context.json.{uuid4().hex}.tmp"
     directory_snapshot = _directory_snapshot(directory, job_dir)
+    replaced = False
     try:
         _write_exclusive_regular_file(temporary, encoded, directory)
         if _directory_snapshot(directory, job_dir) != directory_snapshot:
@@ -228,15 +230,30 @@ def write_harmony_artifact(
                 "Harmony artifact directory changed during publication."
             )
         _replace_atomic(temporary, destination)
+        replaced = True
         if _directory_snapshot(directory, job_dir) != directory_snapshot:
             raise HarmonyArtifactError(
                 "Harmony artifact directory changed during publication."
             )
         _require_regular_file(destination, directory)
         _fsync_directory(directory)
-    except HarmonyArtifactError:
-        raise
-    except OSError as exc:
+    except (HarmonyArtifactError, OSError) as exc:
+        if replaced:
+            try:
+                _restore_publication_state(
+                    destination,
+                    directory,
+                    job_dir,
+                    directory_snapshot,
+                    previous,
+                )
+            except HarmonyArtifactError as recovery_exc:
+                raise HarmonyArtifactError(
+                    "Harmonic context publication failed and the previous artifact "
+                    "could not be restored safely."
+                ) from recovery_exc
+        if isinstance(exc, HarmonyArtifactError):
+            raise
         raise HarmonyArtifactError(
             "Harmonic context could not be published safely."
         ) from exc
@@ -1282,6 +1299,16 @@ def _validate_existing_destination(path: Path, directory: Path) -> None:
     _require_regular_file(path, directory)
 
 
+def _existing_artifact_bytes(path: Path, directory: Path) -> bytes | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarmonyArtifactError("Existing harmonic context is unsafe.") from exc
+    return _read_stable_regular_file(path, directory)
+
+
 def _require_regular_file(path: Path, directory: Path) -> os.stat_result:
     try:
         info = path.lstat()
@@ -1336,6 +1363,87 @@ def _replace_atomic(source: Path, destination: Path) -> None:
         ) from exc
 
 
+def _restore_publication_state(
+    destination: Path,
+    directory: Path,
+    job_dir: Path,
+    expected_directory_snapshot: tuple[int, int, int],
+    previous: bytes | None,
+) -> None:
+    if _directory_snapshot(directory, job_dir) != expected_directory_snapshot:
+        raise HarmonyArtifactError(
+            "Harmony artifact directory changed while restoring publication state."
+        )
+    if previous is None:
+        _remove_published_artifact(destination, directory)
+        return
+
+    temporary = directory / f".harmonic-context.json.{uuid4().hex}.restore.tmp"
+    try:
+        _write_exclusive_regular_file(temporary, previous, directory)
+        if _directory_snapshot(directory, job_dir) != expected_directory_snapshot:
+            raise HarmonyArtifactError(
+                "Harmony artifact directory changed while restoring publication state."
+            )
+        _replace_atomic(temporary, destination)
+        if _directory_snapshot(directory, job_dir) != expected_directory_snapshot:
+            raise HarmonyArtifactError(
+                "Harmony artifact directory changed while restoring publication state."
+            )
+        _require_regular_file(destination, directory)
+        if _read_stable_regular_file(destination, directory) != previous:
+            raise HarmonyArtifactError(
+                "Previous harmonic context could not be restored exactly."
+            )
+    finally:
+        _remove_temporary(temporary, directory)
+
+
+def _remove_published_artifact(path: Path, directory: Path) -> None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Unverified harmonic context could not be removed safely."
+        ) from exc
+    _require_regular_file(path, directory)
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Unverified harmonic context could not be removed safely."
+        ) from exc
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Unverified harmonic context removal could not be verified."
+        ) from exc
+    raise HarmonyArtifactError(
+        "Unverified harmonic context removal could not be verified."
+    )
+
+
+def _restore_harmony_artifact(
+    job_id: str,
+    settings: Settings,
+    previous: Mapping[str, Any] | None,
+) -> None:
+    """Restore the pre-attempt canonical artifact, or remove a first publication."""
+    if previous is not None:
+        write_harmony_artifact(job_id, settings, previous)
+        return
+    job_dir = _secure_job_root(job_id, settings)
+    directory = _artifact_directory(job_dir, create=False)
+    if directory is None:
+        return
+    _remove_published_artifact(directory / "harmonic-context.json", directory)
+
+
 def _remove_temporary(path: Path, directory: Path) -> None:
     try:
         info = path.lstat()
@@ -1350,7 +1458,13 @@ def _remove_temporary(path: Path, directory: Path) -> None:
         return
 
 
+def _directory_fsync_supported() -> bool:
+    return os.name != "nt"
+
+
 def _fsync_directory(directory: Path) -> None:
+    if not _directory_fsync_supported():
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(directory, flags)
