@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 _TRANSCRIPTION_COUNT_FIELDS = frozenset(
@@ -40,6 +41,7 @@ _HARMONY_BOOLEAN_FIELDS = frozenset(
 _HARMONY_ARTIFACT_FILE_NAME = "harmony/harmonic-context.json"
 _RAW_TRANSCRIPTION_ARTIFACT_FILE_NAME = "transcription/raw-events.json"
 _HARMONY_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
+_HARMONY_ATTEMPT_ID_RE = re.compile(r"[a-f0-9]{32}")
 _HARMONY_UNSAFE_ERROR_RE = re.compile(
     r"traceback|https?://|(?:^|\s)[A-Za-z]:[\\/]|\\\\|"
     r"(?:^|\s)/(?:[^\s/]+/)+|"
@@ -125,6 +127,7 @@ NEW_COLUMNS: dict[str, str] = {
         "CHECK (harmony_progress >= 0 AND harmony_progress <= 100)"
     ),
     "harmony_message": "TEXT",
+    "harmony_attempt_id": "TEXT",
     "harmony_attempt_version": "TEXT",
     "harmony_version": "TEXT",
     "harmony_artifact_file_name": "TEXT",
@@ -272,6 +275,7 @@ def init_database(database_path: Path) -> None:
                 harmony_progress REAL NOT NULL DEFAULT 0
                     CHECK (harmony_progress >= 0 AND harmony_progress <= 100),
                 harmony_message TEXT,
+                harmony_attempt_id TEXT,
                 harmony_attempt_version TEXT,
                 harmony_version TEXT,
                 harmony_artifact_file_name TEXT,
@@ -443,6 +447,10 @@ def init_database(database_path: Path) -> None:
                     WHEN harmony_progress > 100 THEN 100
                     ELSE harmony_progress
                 END,
+                harmony_attempt_id = CASE
+                    WHEN harmony_status = 'processing' THEN harmony_attempt_id
+                    ELSE NULL
+                END,
                 harmony_event_count = CASE
                     WHEN harmony_event_count < 0 THEN NULL
                     ELSE harmony_event_count
@@ -514,6 +522,7 @@ def init_database(database_path: Path) -> None:
                     ELSE harmony_progress
                 END,
                 harmony_message = 'Saved harmonic context metadata is incomplete; harmony can be retried.',
+                harmony_attempt_id = NULL,
                 harmony_error = 'Saved harmonic context metadata is incomplete.'
             WHERE harmony_status = 'completed'
               AND (
@@ -714,6 +723,7 @@ def fail_incomplete_jobs(database_path: Path) -> None:
                 harmony_status = 'failed',
                 harmony_stage = 'failed',
                 harmony_message = 'Raw transcription and any previous harmonic context remain available; harmony can be retried.',
+                harmony_attempt_id = NULL,
                 harmony_error = 'Harmonic context was interrupted by a server restart.',
                 updated_at = ?
             WHERE harmony_status = 'processing'
@@ -887,6 +897,7 @@ def claim_harmony_attempt(
 ) -> bool:
     """Atomically claim one harmony attempt while preserving prior success."""
     attempt_version = _validate_harmony_version(harmony_version)
+    attempt_id = uuid4().hex
     safe_message = _validate_harmony_text(message, "harmony message", 500)
     now = utc_now()
     with connect(database_path) as connection:
@@ -897,6 +908,7 @@ def claim_harmony_attempt(
                 harmony_stage = 'loading_raw_transcription',
                 harmony_progress = 1,
                 harmony_message = ?,
+                harmony_attempt_id = ?,
                 harmony_attempt_version = ?,
                 harmony_source_transcription_version = transcription_version,
                 harmony_source_transcription_artifact_file_name = transcription_artifact_file_name,
@@ -919,6 +931,7 @@ def claim_harmony_attempt(
             """,
             (
                 safe_message,
+                attempt_id,
                 attempt_version,
                 now,
                 job_id,
@@ -936,11 +949,13 @@ def update_harmony_progress(
     stage: str,
     progress: float,
     message: str,
+    attempt_id: str | None = None,
 ) -> bool:
     """Advance only the active source-matched harmony attempt monotonically."""
     safe_stage = _validate_harmony_text(stage, "harmony stage", 128)
     safe_message = _validate_harmony_text(message, "harmony message", 500)
     safe_progress = _validate_harmony_progress(progress)
+    safe_attempt_id = _validate_harmony_attempt_id(attempt_id)
     now = utc_now()
     with connect(database_path) as connection:
         cursor = connection.execute(
@@ -952,6 +967,7 @@ def update_harmony_progress(
                 updated_at = ?
             WHERE id = ?
               AND harmony_status = 'processing'
+              AND (? IS NULL OR harmony_attempt_id = ?)
               AND transcription_status = 'completed'
               AND transcription_version IS harmony_source_transcription_version
               AND transcription_artifact_file_name
@@ -965,6 +981,8 @@ def update_harmony_progress(
                 safe_message,
                 now,
                 job_id,
+                safe_attempt_id,
+                safe_attempt_id,
                 safe_progress,
             ),
         )
@@ -986,9 +1004,11 @@ def complete_harmony_attempt(
     warning_count: int,
     used_interpretation_context: bool,
     message: str = "Harmonic context complete.",
+    attempt_id: str | None = None,
 ) -> bool:
     """Atomically replace successful harmony metadata for the active source."""
     successful_version = _validate_harmony_version(harmony_version)
+    safe_attempt_id = _validate_harmony_attempt_id(attempt_id)
     if artifact_file_name != _HARMONY_ARTIFACT_FILE_NAME:
         raise ValueError("artifact_file_name must be the canonical harmony path.")
     safe_timestamp = _validate_harmony_timestamp(harmonized_at)
@@ -1020,6 +1040,7 @@ def complete_harmony_attempt(
                 harmony_stage = 'completed',
                 harmony_progress = 100,
                 harmony_message = ?,
+                harmony_attempt_id = NULL,
                 harmony_attempt_version = ?,
                 harmony_version = ?,
                 harmony_artifact_file_name = ?,
@@ -1035,6 +1056,7 @@ def complete_harmony_attempt(
                 updated_at = ?
             WHERE id = ?
               AND harmony_status = 'processing'
+              AND (? IS NULL OR harmony_attempt_id = ?)
               AND harmony_attempt_version = ?
               AND transcription_status = 'completed'
               AND transcription_version IS harmony_source_transcription_version
@@ -1057,6 +1079,8 @@ def complete_harmony_attempt(
                 int(used_interpretation_context),
                 now,
                 job_id,
+                safe_attempt_id,
+                safe_attempt_id,
                 successful_version,
             ),
         )
@@ -1069,10 +1093,12 @@ def fail_harmony_attempt(
     *,
     error: str,
     message: str = "Harmonic context can be retried.",
+    attempt_id: str | None = None,
 ) -> bool:
     """Fail only the active source-matched attempt and preserve prior success."""
     safe_message = _validate_harmony_text(message, "harmony message", 500)
     safe_error = _sanitize_harmony_error(error)
+    safe_attempt_id = _validate_harmony_attempt_id(attempt_id)
     now = utc_now()
     with connect(database_path) as connection:
         cursor = connection.execute(
@@ -1081,17 +1107,26 @@ def fail_harmony_attempt(
             SET harmony_status = 'failed',
                 harmony_stage = 'failed',
                 harmony_message = ?,
+                harmony_attempt_id = NULL,
                 harmony_error = ?,
                 updated_at = ?
             WHERE id = ?
               AND harmony_status = 'processing'
+              AND (? IS NULL OR harmony_attempt_id = ?)
               AND transcription_status = 'completed'
               AND transcription_version IS harmony_source_transcription_version
               AND transcription_artifact_file_name
                     IS harmony_source_transcription_artifact_file_name
               AND transcribed_at IS harmony_source_transcribed_at
             """,
-            (safe_message, safe_error, now, job_id),
+            (
+                safe_message,
+                safe_error,
+                now,
+                job_id,
+                safe_attempt_id,
+                safe_attempt_id,
+            ),
         )
         return cursor.rowcount == 1
 
@@ -1109,14 +1144,25 @@ def reset_harmony_after_transcription_change(
 def _reset_stale_harmony_in_connection(
     connection: sqlite3.Connection,
     job_id: str,
+    *,
+    force: bool = False,
 ) -> sqlite3.Cursor:
+    source_guard = "" if force else """
+          AND NOT (
+                transcription_version IS harmony_source_transcription_version
+                AND transcription_artifact_file_name
+                    IS harmony_source_transcription_artifact_file_name
+                AND transcribed_at IS harmony_source_transcribed_at
+          )
+    """
     return connection.execute(
-        """
+        f"""
         UPDATE jobs
         SET harmony_status = 'not_started',
             harmony_stage = 'not_started',
             harmony_progress = 0,
             harmony_message = NULL,
+            harmony_attempt_id = NULL,
             harmony_attempt_version = NULL,
             harmony_version = NULL,
             harmony_artifact_file_name = NULL,
@@ -1135,17 +1181,13 @@ def _reset_stale_harmony_in_connection(
             updated_at = ?
         WHERE id = ?
           AND transcription_status = 'completed'
-          AND NOT (
-                transcription_version IS harmony_source_transcription_version
-                AND transcription_artifact_file_name
-                    IS harmony_source_transcription_artifact_file_name
-                AND transcribed_at IS harmony_source_transcribed_at
-          )
+          {source_guard}
           AND (
                 harmony_status != 'not_started'
                 OR harmony_stage != 'not_started'
                 OR harmony_progress != 0
                 OR harmony_message IS NOT NULL
+                OR harmony_attempt_id IS NOT NULL
                 OR harmony_attempt_version IS NOT NULL
                 OR harmony_version IS NOT NULL
                 OR harmony_artifact_file_name IS NOT NULL
@@ -1191,7 +1233,11 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
             parameters,
         )
         if values.get("transcription_status") == "completed":
-            _reset_stale_harmony_in_connection(connection, job_id)
+            _reset_stale_harmony_in_connection(
+                connection,
+                job_id,
+                force=True,
+            )
 
 
 def _validate_nonnegative_counts(values: dict[str, Any]) -> None:
@@ -1208,10 +1254,15 @@ def _validate_nonnegative_counts(values: dict[str, Any]) -> None:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"{field} must be a non-negative integer or None.")
 
+
 def _validate_harmony_values(values: dict[str, Any]) -> None:
     if "harmony_progress" in values:
         values["harmony_progress"] = _validate_harmony_progress(
             values["harmony_progress"]
+        )
+    if "harmony_attempt_id" in values:
+        values["harmony_attempt_id"] = _validate_harmony_attempt_id(
+            values["harmony_attempt_id"]
         )
     for field in _HARMONY_BOOLEAN_FIELDS:
         if field not in values:
@@ -1236,6 +1287,14 @@ def _validate_harmony_progress(value: Any) -> float:
 def _validate_harmony_version(value: Any) -> str:
     if not isinstance(value, str) or not _HARMONY_VERSION_RE.fullmatch(value):
         raise ValueError("harmony_version is invalid.")
+    return value
+
+
+def _validate_harmony_attempt_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _HARMONY_ATTEMPT_ID_RE.fullmatch(value):
+        raise ValueError("harmony_attempt_id is invalid.")
     return value
 
 

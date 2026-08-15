@@ -90,7 +90,11 @@ from app.transcription_artifacts import (
     load_transcription_details,
     transcription_json_path,
 )
-from app.transcription_events import RAW_TRANSCRIPTION_RELATIVE_PATH
+from app.transcription_events import (
+    RAW_TRANSCRIPTION_RELATIVE_PATH,
+    RawTranscriptionError,
+    load_raw_transcription,
+)
 from app.transcription_pipeline import (
     TRANSCRIPTION_VERSION,
     TranscriptionPipelineError,
@@ -141,6 +145,20 @@ ANALYSIS_STAGES = {
 }
 PREPARATION_PROGRESS_LIMIT = 64.0
 ANALYSIS_FAILURE_PROGRESS = 95.0
+_HARMONY_PITCH_CLASS_NAMES = (
+    "C",
+    "C#",
+    "D",
+    "D#",
+    "E",
+    "F",
+    "F#",
+    "G",
+    "G#",
+    "A",
+    "A#",
+    "B",
+)
 _INTERNAL_SEPARATION_FIELDS = frozenset(
     {
         "separation_status",
@@ -195,6 +213,7 @@ _INTERNAL_HARMONY_FIELDS = frozenset(
         "harmony_stage",
         "harmony_progress",
         "harmony_message",
+        "harmony_attempt_id",
         "harmony_attempt_version",
         "harmony_version",
         "harmony_artifact_file_name",
@@ -689,19 +708,19 @@ def create_app(
                     "are required before harmonic context."
                 ),
             )
-        try:
-            transcription_json_path(job_id, app_settings, record)
-        except (
-            TranscriptionArtifactUnavailableError,
-            TranscriptionArtifactError,
-        ):
+        raw_transcription = _load_matching_raw_transcription_for_harmony(
+            job_id,
+            app_settings,
+            record,
+        )
+        if raw_transcription is None:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "A valid published raw transcription is required before "
+                    "A valid matching raw transcription is required before "
                     "harmonic context."
                 ),
-            ) from None
+            )
         try:
             analysis = load_analysis(job_id, app_settings)
         except (AudioAnalysisError, MediaProcessingError):
@@ -749,13 +768,26 @@ def create_app(
                 status_code=409,
                 detail="Harmonic context could not be started in the current state.",
             )
+        current = db.get_job(app_settings.database_path, job_id)
+        attempt_id = current.get("harmony_attempt_id") if current else None
+        if not isinstance(attempt_id, str) or not attempt_id:
+            logging.error("Harmony claim did not persist an attempt ID for %s", job_id)
+            db.fail_harmony_attempt(
+                app_settings.database_path,
+                job_id,
+                error="Harmonic-context attempt could not be tracked.",
+            )
+            raise HTTPException(
+                status_code=500,
+                detail="Harmonic context could not be started safely.",
+            )
         background_tasks.add_task(
             _run_harmony_job,
             job_id,
             app_settings,
             harmony_processor,
+            attempt_id,
         )
-        current = db.get_job(app_settings.database_path, job_id)
         return serialize_job(current or record)
 
 
@@ -1510,6 +1542,7 @@ def _run_harmony_job(
     job_id: str,
     settings: Settings,
     processor: HarmonyProcessor,
+    attempt_id: str | None = None,
 ) -> None:
     last_progress = 1.0
 
@@ -1530,6 +1563,7 @@ def _run_harmony_job(
             stage=stage,
             progress=next_progress,
             message=message,
+            attempt_id=attempt_id,
         )
         if not updated:
             raise HarmonyPipelineError(
@@ -1544,6 +1578,7 @@ def _run_harmony_job(
             settings,
             job_id,
             _safe_harmony_error(str(exc), settings),
+            attempt_id=attempt_id,
         )
     except Exception:
         logging.exception(
@@ -1554,6 +1589,7 @@ def _run_harmony_job(
             settings,
             job_id,
             "Unexpected harmonic-context failure. Check server logs.",
+            attempt_id=attempt_id,
         )
     else:
         if not _validate_harmony_processor_result(
@@ -1569,6 +1605,33 @@ def _run_harmony_job(
                 settings,
                 job_id,
                 "Harmonic context returned an invalid result.",
+                attempt_id=attempt_id,
+            )
+            return
+        current = db.get_job(settings.database_path, job_id)
+        raw_transcription = (
+            _load_matching_raw_transcription_for_harmony(
+                job_id,
+                settings,
+                current,
+            )
+            if current is not None
+            else None
+        )
+        if (
+            raw_transcription is None
+            or result.payload.get("rawEvidence")
+            != _harmony_raw_evidence(raw_transcription)
+        ):
+            logging.warning(
+                "Discarded stale harmonic-context result for job %s",
+                job_id,
+            )
+            _record_harmony_failure(
+                settings,
+                job_id,
+                "Harmonic-context source changed during processing.",
+                attempt_id=attempt_id,
             )
             return
         completed = db.complete_harmony_attempt(
@@ -1584,6 +1647,7 @@ def _run_harmony_job(
             unresolved_event_count=result.unresolved_event_count,
             warning_count=result.warning_count,
             used_interpretation_context=result.used_interpretation_context,
+            attempt_id=attempt_id,
         )
         if not completed:
             logging.warning(
@@ -1676,11 +1740,14 @@ def _record_harmony_failure(
     settings: Settings,
     job_id: str,
     error: str,
+    *,
+    attempt_id: str | None = None,
 ) -> None:
     db.fail_harmony_attempt(
         settings.database_path,
         job_id,
         error=error,
+        attempt_id=attempt_id,
     )
 
 
@@ -2059,6 +2126,72 @@ def _serialize_file(job: dict, path: Path) -> dict:
 
 
 
+def _load_matching_raw_transcription_for_harmony(
+    job_id: str,
+    settings: Settings,
+    record: dict,
+) -> dict[str, Any] | None:
+    try:
+        raw = load_raw_transcription(job_id, settings)
+    except (RawTranscriptionError, MediaProcessingError, OSError, RuntimeError):
+        return None
+    if raw is None:
+        return None
+    source_analysis = raw.get("sourceAnalysis")
+    if not isinstance(source_analysis, dict):
+        return None
+    aligned_count = sum(
+        1
+        for candidate in raw.get("alignmentCandidates", ())
+        if isinstance(candidate, dict) and "alignedTimeSeconds" in candidate
+    )
+    expected_counts = (
+        ("pitched_event_count", len(raw.get("pitchedNoteEvents", ()))),
+        ("percussion_event_count", len(raw.get("percussionEvents", ()))),
+        ("aligned_event_count", aligned_count),
+    )
+    return raw if (
+        raw.get("transcriptionVersion") == record.get("transcription_version")
+        and raw.get("createdAt") == record.get("transcribed_at")
+        and source_analysis.get("fileName") == ANALYSIS_JSON_RELATIVE_PATH
+        and source_analysis.get("analysisVersion") == record.get("analysis_version")
+        and all(
+            record.get(field) == value
+            and isinstance(record.get(field), int)
+            and not isinstance(record.get(field), bool)
+            and value >= 0
+            for field, value in expected_counts
+        )
+    ) else None
+
+
+def _harmony_raw_evidence(
+    raw_transcription: dict[str, Any],
+) -> list[dict[str, Any]]:
+    evidence = [
+        {
+            "id": event["id"],
+            "sourceKind": event["sourceKind"],
+            "rawStartSeconds": event["startSeconds"],
+            "rawEndSeconds": event["endSeconds"],
+            "midiNote": event["midiNote"],
+            "midiPitch": event["midiPitch"],
+            "pitchClass": event["midiNote"] % 12,
+            "pitchName": _HARMONY_PITCH_CLASS_NAMES[event["midiNote"] % 12],
+            "confidence": event["confidence"],
+        }
+        for event in raw_transcription.get("pitchedNoteEvents", ())
+    ]
+    evidence.sort(
+        key=lambda item: (
+            item["rawStartSeconds"],
+            item["rawEndSeconds"],
+            item["id"],
+        )
+    )
+    return evidence
+
+
 def _load_harmony_for_http(
     job_id: str,
     settings: Settings,
@@ -2088,7 +2221,19 @@ def _load_harmony_for_http(
             status_code=404,
             detail="Published harmonic context is unavailable.",
         )
-    if not _harmony_artifact_matches_record(artifact, record):
+    raw_transcription = _load_matching_raw_transcription_for_harmony(
+        job_id,
+        settings,
+        record,
+    )
+    if (
+        raw_transcription is None
+        or not _harmony_artifact_matches_record(
+            artifact,
+            record,
+            raw_transcription,
+        )
+    ):
         logging.error(
             "Published harmonic context metadata mismatch for job %s",
             job_id,
@@ -2103,6 +2248,7 @@ def _load_harmony_for_http(
 def _harmony_artifact_matches_record(
     artifact: dict[str, Any],
     record: dict,
+    raw_transcription: dict[str, Any] | None = None,
 ) -> bool:
     diagnostics = artifact.get("diagnostics")
     transcription = artifact.get("sourceTranscription")
@@ -2155,6 +2301,11 @@ def _harmony_artifact_matches_record(
         and len(artifact.get("warnings", ()))
         == record.get("harmony_warning_count")
         and ("sourceInterpretation" in artifact) == bool(context_value)
+        and (
+            raw_transcription is None
+            or artifact.get("rawEvidence")
+            == _harmony_raw_evidence(raw_transcription)
+        )
     )
 
 
