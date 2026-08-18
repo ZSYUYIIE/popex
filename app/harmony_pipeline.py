@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from app import db
 from app.analysis import (
     ANALYSIS_JSON_RELATIVE_PATH,
     AudioAnalysisError,
@@ -23,6 +24,7 @@ from app.harmony_artifacts import (
     build_harmony_artifact,
     harmony_attempt_artifact_file_name,
     load_harmony_artifact,
+    reconcile_harmony_attempt_artifacts,
     write_harmony_artifact,
 )
 from app.harmony_inference import (
@@ -117,6 +119,9 @@ def infer_harmony_job(
         )
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError("Harmony attempt identity is invalid.") from exc
+
+    if attempt_id is not None:
+        _reconcile_non_durable_attempts(job_id, settings, attempt_id)
 
     _report(
         stage_callback,
@@ -251,6 +256,40 @@ def infer_harmony_job(
         warnings=warnings,
         payload=copy.deepcopy(reloaded),
     )
+
+
+def _reconcile_non_durable_attempts(
+    job_id: str,
+    settings: Settings,
+    attempt_id: str,
+) -> None:
+    try:
+        record = db.get_job(settings.database_path, job_id)
+    except Exception as exc:
+        raise HarmonyPipelineError(
+            "Harmony attempt reconciliation failed at a protected boundary."
+        ) from exc
+    # Direct unit/integration callers may exercise an isolated attempt target without
+    # a durable DB job. Production calls always have the freshly claimed row.
+    if record is None:
+        return
+    if record.get("harmony_attempt_id") != attempt_id:
+        raise HarmonyPipelineError("Harmony attempt is no longer active.")
+    try:
+        reconcile_harmony_attempt_artifacts(
+            job_id,
+            settings,
+            durable_artifact_file_name=record.get("harmony_artifact_file_name"),
+            active_attempt_id=attempt_id,
+        )
+    except HarmonyArtifactError as exc:
+        raise HarmonyPipelineError(
+            "Non-durable harmonic-context artifacts could not be reconciled safely."
+        ) from exc
+    except Exception as exc:
+        raise HarmonyPipelineError(
+            "Harmony attempt reconciliation failed at a protected boundary."
+        ) from exc
 
 
 def _load_raw(job_id: str, settings: Settings) -> dict[str, Any]:
