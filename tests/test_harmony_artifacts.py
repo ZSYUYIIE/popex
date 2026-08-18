@@ -16,7 +16,9 @@ from app.harmony_artifacts import (
     HarmonyArtifactValidationError,
     build_harmony_artifact,
     harmony_artifact_path,
+    harmony_attempt_artifact_file_name,
     load_harmony_artifact,
+    reconcile_harmony_attempt_artifacts,
     validate_harmony_artifact,
     write_harmony_artifact,
 )
@@ -400,6 +402,117 @@ def test_duplicate_and_inconsistent_raw_evidence_is_rejected() -> None:
     payload["rawEvidence"][0]["pitchName"] = "H"
     with pytest.raises(HarmonyArtifactValidationError, match="pitchName"):
         validate_harmony_artifact(payload)
+
+
+def test_raw_evidence_warning_bounds_match_canonical_raw_contract() -> None:
+    payload = artifact_payload()
+    warnings = [f"Review warning {index}." for index in range(128)]
+    warnings[8] = "x" * 500
+    payload["rawEvidence"][0]["warnings"] = warnings
+    validated = validate_harmony_artifact(payload)
+    assert validated["rawEvidence"][0]["warnings"] == warnings
+
+    payload["rawEvidence"][0]["warnings"] = warnings + ["overflow"]
+    with pytest.raises(HarmonyArtifactValidationError, match="too many warnings"):
+        validate_harmony_artifact(payload)
+
+    payload = artifact_payload()
+    payload["rawEvidence"][0]["warnings"] = ["x" * 501]
+    with pytest.raises(HarmonyArtifactValidationError):
+        validate_harmony_artifact(payload)
+
+
+def test_legacy_missing_raw_warning_field_preserves_missingness() -> None:
+    payload = artifact_payload()
+    payload["rawEvidence"][0].pop("warnings")
+    validated = validate_harmony_artifact(payload)
+    assert "warnings" not in validated["rawEvidence"][0]
+    assert validated["rawEvidence"][1]["warnings"] == []
+
+
+def test_attempt_scoped_artifact_requires_explicit_warning_fields(settings: Settings) -> None:
+    payload = artifact_payload()
+    payload["rawEvidence"][0].pop("warnings")
+    legacy_path = write_harmony_artifact(JOB_ID, settings, payload)
+    legacy = load_harmony_artifact(JOB_ID, settings)
+    assert legacy_path.name == "harmonic-context.json"
+    assert legacy is not None and "warnings" not in legacy["rawEvidence"][0]
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    with pytest.raises(HarmonyArtifactValidationError, match="explicit warning"):
+        write_harmony_artifact(
+            JOB_ID,
+            settings,
+            payload,
+            artifact_file_name=target,
+        )
+
+
+def test_reconcile_removes_only_non_durable_non_active_attempt_files(
+    settings: Settings,
+) -> None:
+    legacy = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    durable_name = harmony_attempt_artifact_file_name("a" * 32)
+    active_name = harmony_attempt_artifact_file_name("b" * 32)
+    orphan_one = harmony_attempt_artifact_file_name("c" * 32)
+    orphan_two = harmony_attempt_artifact_file_name("e" * 32)
+    for target in (durable_name, active_name, orphan_one, orphan_two):
+        write_harmony_artifact(
+            JOB_ID,
+            settings,
+            artifact_payload(),
+            artifact_file_name=target,
+        )
+
+    removed = reconcile_harmony_attempt_artifacts(
+        JOB_ID,
+        settings,
+        durable_artifact_file_name=durable_name,
+        active_attempt_id="b" * 32,
+    )
+    directory = legacy.parent
+    assert removed == 2
+    assert legacy.exists()
+    assert (directory / Path(durable_name).name).exists()
+    assert (directory / Path(active_name).name).exists()
+    assert not (directory / Path(orphan_one).name).exists()
+    assert not (directory / Path(orphan_two).name).exists()
+
+
+def test_reconcile_malformed_or_symlink_candidate_fails_closed(
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    directory.mkdir()
+    malformed = directory / "harmonic-context.not-a-nonce.json"
+    malformed.write_text("leave me", encoding="utf-8")
+    with pytest.raises(HarmonyArtifactError, match="reconciled"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id=None,
+        )
+    assert malformed.read_text(encoding="utf-8") == "leave me"
+
+    malformed.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside", encoding="utf-8")
+    candidate = directory / f"harmonic-context.{'f' * 32}.json"
+    try:
+        candidate.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(HarmonyArtifactError, match="reconciled"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id=None,
+        )
+    assert candidate.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
 def test_segment_references_and_derived_sources_are_verified() -> None:
