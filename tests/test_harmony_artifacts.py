@@ -16,6 +16,7 @@ from app.harmony_artifacts import (
     HarmonyArtifactValidationError,
     build_harmony_artifact,
     harmony_artifact_path,
+    harmony_artifact_scope,
     harmony_attempt_artifact_file_name,
     load_harmony_artifact,
     reconcile_harmony_attempt_artifacts,
@@ -269,7 +270,7 @@ def test_pre_replace_failure_preserves_previous_artifact(
     assert not list(path.parent.glob(".*.tmp"))
 
 
-def test_post_replace_failure_preserves_previous_artifact(
+def test_post_replace_failure_restores_previous_and_syncs_recovery(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -280,14 +281,128 @@ def test_post_replace_failure_preserves_previous_artifact(
 
     import app.harmony_artifacts as module
 
-    def fail_directory_sync(_directory: Path) -> None:
-        raise HarmonyArtifactError("simulated post-replace sync failure")
+    calls: list[Path] = []
 
-    monkeypatch.setattr(module, "_fsync_directory", fail_directory_sync)
-    with pytest.raises(HarmonyArtifactError, match="post-replace"):
+    def fail_then_succeed(directory: Path) -> None:
+        calls.append(directory)
+        if len(calls) == 1:
+            raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_then_succeed)
+    with pytest.raises(HarmonyArtifactError, match="publication sync"):
         write_harmony_artifact(JOB_ID, settings, replacement)
+    assert len(calls) == 2
     assert path.read_bytes() == before
     assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_first_publication_sync_failure_removes_and_syncs_recovery(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = settings.exports_dir / JOB_ID / HARMONY_ARTIFACT_RELATIVE_PATH
+    calls: list[Path] = []
+
+    def fail_then_succeed(directory: Path) -> None:
+        calls.append(directory)
+        if len(calls) == 1:
+            raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_then_succeed)
+    with pytest.raises(HarmonyArtifactError, match="publication sync"):
+        write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    assert len(calls) == 2
+    assert not target.exists()
+    assert not list(target.parent.glob(".*.tmp"))
+
+
+def test_recovery_sync_failure_is_not_reported_as_safe_restoration(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+
+    import app.harmony_artifacts as module
+
+    calls = 0
+
+    def fail_sync(_directory: Path) -> None:
+        nonlocal calls
+        calls += 1
+        raise HarmonyArtifactError("simulated sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_sync)
+    with pytest.raises(HarmonyArtifactError, match="could not be restored safely"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+    assert calls == 2
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_restore_none_removal_syncs_directory(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    path = write_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_payload(),
+        artifact_file_name=target,
+    )
+    calls: list[Path] = []
+    monkeypatch.setattr(module, "_fsync_directory", calls.append)
+    module._restore_harmony_artifact(
+        JOB_ID,
+        settings,
+        None,
+        artifact_file_name=target,
+    )
+    assert not path.exists()
+    assert calls == [path.parent]
+
+
+def test_windows_directory_sync_policy_is_explicitly_noop(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    monkeypatch.setattr(module, "_directory_fsync_supported", lambda: False)
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("Windows policy must not open a directory descriptor")
+
+    monkeypatch.setattr(module.os, "open", unexpected_open)
+    module._fsync_directory(settings.exports_dir / JOB_ID)
+
+
+def test_artifact_scope_is_nested_and_resets_after_exception(settings: Settings) -> None:
+    outer = harmony_attempt_artifact_file_name("a" * 32)
+    inner = harmony_attempt_artifact_file_name("b" * 32)
+
+    with harmony_artifact_scope(outer):
+        outer_path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+        with harmony_artifact_scope(inner):
+            inner_path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+        outer_again = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+
+    assert outer_path.name == Path(outer).name
+    assert inner_path.name == Path(inner).name
+    assert outer_again == outer_path
+
+    with pytest.raises(RuntimeError, match="scope reset"):
+        with harmony_artifact_scope(outer):
+            raise RuntimeError("scope reset")
+    legacy_path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    assert legacy_path.name == "harmonic-context.json"
 
 
 def test_corrupt_json_and_schema_are_not_exposed(settings: Settings) -> None:
@@ -663,6 +778,9 @@ def test_json_nan_constants_are_rejected_on_load(settings: Settings) -> None:
         lambda payload: payload["warnings"].append("debug at /home/user/private.json"),
         lambda payload: payload["warnings"].append("<script>alert(1)</script>"),
         lambda payload: payload["warnings"].append("api_key=private-value"),
+        lambda payload: payload["rawEvidence"][0].update(
+            warnings=["api_key=private-value"]
+        ),
         lambda payload: payload["segments"][0]["primaryCandidate"].update(
             symbol="https://bad.invalid/chord"
         ),
