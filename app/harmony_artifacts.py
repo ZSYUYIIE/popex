@@ -1541,6 +1541,7 @@ def _restore_publication_state(
         )
     if previous is None:
         _remove_published_artifact(destination, directory)
+        _fsync_directory(directory)
         return
 
     temporary = directory / f".{destination.name}.{uuid4().hex}.restore.tmp"
@@ -1560,6 +1561,7 @@ def _restore_publication_state(
             raise HarmonyArtifactError(
                 "Previous harmonic context could not be restored exactly."
             )
+        _fsync_directory(directory)
     finally:
         _remove_temporary(temporary, directory)
 
@@ -1621,6 +1623,7 @@ def _restore_harmony_artifact(
         directory / _artifact_leaf(target),
         directory,
     )
+    _fsync_directory(directory)
 
 
 def _remove_temporary(path: Path, directory: Path) -> None:
