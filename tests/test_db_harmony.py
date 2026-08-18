@@ -76,6 +76,18 @@ UPSTREAM_FIELDS = (
 )
 
 
+def attempt_path(attempt_id: str) -> str:
+    return f"harmony/harmonic-context.{attempt_id}.json"
+
+
+def active_attempt_id(database: Path, job_id: str) -> str:
+    record = db.get_job(database, job_id)
+    assert record is not None
+    attempt_id = record["harmony_attempt_id"]
+    assert isinstance(attempt_id, str) and len(attempt_id) == 32
+    return attempt_id
+
+
 def create_transcribed_job(
     database: Path,
     job_id: str,
@@ -173,18 +185,20 @@ def complete_harmony(
         job_id,
         harmony_version=version,
     )
+    attempt_id = active_attempt_id(database, job_id)
     assert db.update_harmony_progress(
         database,
         job_id,
         stage="inferring_harmonic_context",
         progress=55,
         message="Inferring harmonic candidates.",
+        attempt_id=attempt_id,
     )
     assert db.complete_harmony_attempt(
         database,
         job_id,
         harmony_version=version,
-        artifact_file_name=HARMONY_PATH,
+        artifact_file_name=attempt_path(attempt_id),
         harmonized_at="2026-08-04T00:00:00+00:00",
         event_count=8,
         segment_count=3,
@@ -193,6 +207,7 @@ def complete_harmony(
         unresolved_event_count=1,
         warning_count=2,
         used_interpretation_context=used_interpretation_context,
+        attempt_id=attempt_id,
     )
     result = db.get_job(database, job_id)
     assert result is not None
@@ -424,6 +439,31 @@ def test_only_one_concurrent_harmony_claim_wins(tmp_path: Path) -> None:
     assert job["harmony_status"] == "processing"
 
 
+def test_force_cannot_reclaim_processing_harmony_attempt(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "force-processing")
+    assert db.claim_harmony_attempt(
+        database,
+        "force-processing",
+        harmony_version="harmonic-context-v1",
+    )
+    first = db.get_job(database, "force-processing")
+    assert first is not None
+    first_attempt = first["harmony_attempt_id"]
+
+    assert not db.claim_harmony_attempt(
+        database,
+        "force-processing",
+        harmony_version="harmonic-context-v2",
+        force=True,
+    )
+    after = db.get_job(database, "force-processing")
+    assert after is not None
+    assert after["harmony_attempt_id"] == first_attempt
+    assert after["harmony_attempt_version"] == "harmonic-context-v1"
+    assert after["harmony_status"] == "processing"
+
+
 def test_completed_requires_force_and_forced_claim_preserves_last_success(
     tmp_path: Path,
 ) -> None:
@@ -463,10 +503,12 @@ def test_failed_retry_preserves_last_success_until_replacement(
         harmony_version="harmonic-context-v2",
         force=True,
     )
+    retry_attempt = active_attempt_id(database, "retry")
     assert db.fail_harmony_attempt(
         database,
         "retry",
         error="bounded failure",
+        attempt_id=retry_attempt,
     )
 
     failed = db.get_job(database, "retry")
@@ -494,6 +536,7 @@ def test_progress_is_monotonic_and_bound_to_the_claimed_raw_source(
         "progress",
         harmony_version="harmonic-context-v1",
     )
+    attempt_id = active_attempt_id(database, "progress")
 
     assert db.update_harmony_progress(
         database,
@@ -501,6 +544,7 @@ def test_progress_is_monotonic_and_bound_to_the_claimed_raw_source(
         stage="inferring_harmonic_context",
         progress=55,
         message="Inferring harmonic candidates.",
+        attempt_id=attempt_id,
     )
     assert not db.update_harmony_progress(
         database,
@@ -508,6 +552,7 @@ def test_progress_is_monotonic_and_bound_to_the_claimed_raw_source(
         stage="loading_analysis_context",
         progress=25,
         message="Regressive progress.",
+        attempt_id=attempt_id,
     )
     current = db.get_job(database, "progress")
     assert current is not None
@@ -525,7 +570,95 @@ def test_progress_is_monotonic_and_bound_to_the_claimed_raw_source(
         stage="saving_harmonic_context",
         progress=92,
         message="This worker is stale.",
+        attempt_id=attempt_id,
     )
+
+
+def test_nonce_omission_cannot_mutate_nonce_bearing_attempt(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "nonce-required")
+    assert db.claim_harmony_attempt(
+        database,
+        "nonce-required",
+        harmony_version="harmonic-context-v1",
+    )
+    attempt_id = active_attempt_id(database, "nonce-required")
+    before = db.get_job(database, "nonce-required")
+
+    assert not db.update_harmony_progress(
+        database,
+        "nonce-required",
+        stage="saving_harmonic_context",
+        progress=92,
+        message="Missing nonce must not match.",
+        attempt_id=None,
+    )
+    assert not db.fail_harmony_attempt(
+        database,
+        "nonce-required",
+        error="missing nonce",
+        attempt_id=None,
+    )
+    assert not db.complete_harmony_attempt(
+        database,
+        "nonce-required",
+        harmony_version="harmonic-context-v1",
+        artifact_file_name=HARMONY_PATH,
+        harmonized_at="2026-08-04T00:00:00+00:00",
+        event_count=8,
+        segment_count=3,
+        resolved_segment_count=2,
+        unresolved_segment_count=1,
+        unresolved_event_count=1,
+        warning_count=2,
+        used_interpretation_context=False,
+        attempt_id=None,
+    )
+    after = db.get_job(database, "nonce-required")
+    assert after == before
+    assert after is not None and after["harmony_attempt_id"] == attempt_id
+
+
+def test_none_nonce_only_matches_genuine_legacy_null_nonce_row(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "legacy-null-nonce")
+    assert db.claim_harmony_attempt(
+        database,
+        "legacy-null-nonce",
+        harmony_version="harmonic-context-v1",
+    )
+    with db.connect(database) as connection:
+        connection.execute(
+            "UPDATE jobs SET harmony_attempt_id = NULL WHERE id = ?",
+            ("legacy-null-nonce",),
+        )
+    assert db.update_harmony_progress(
+        database,
+        "legacy-null-nonce",
+        stage="inferring_harmonic_context",
+        progress=55,
+        message="Legacy no-nonce progress.",
+        attempt_id=None,
+    )
+    assert db.complete_harmony_attempt(
+        database,
+        "legacy-null-nonce",
+        harmony_version="harmonic-context-v1",
+        artifact_file_name=HARMONY_PATH,
+        harmonized_at="2026-08-04T00:00:00+00:00",
+        event_count=8,
+        segment_count=3,
+        resolved_segment_count=2,
+        unresolved_segment_count=1,
+        unresolved_event_count=1,
+        warning_count=2,
+        used_interpretation_context=False,
+        attempt_id=None,
+    )
+    completed = db.get_job(database, "legacy-null-nonce")
+    assert completed is not None
+    assert completed["harmony_status"] == "completed"
+    assert completed["harmony_artifact_file_name"] == HARMONY_PATH
 
 
 def test_completion_is_atomic_and_validates_artifact_truth_counts(
@@ -538,11 +671,13 @@ def test_completion_is_atomic_and_validates_artifact_truth_counts(
         "complete",
         harmony_version="harmonic-context-v1",
     )
+    attempt_id = active_attempt_id(database, "complete")
+    pointer = attempt_path(attempt_id)
     assert db.complete_harmony_attempt(
         database,
         "complete",
         harmony_version="harmonic-context-v1",
-        artifact_file_name=HARMONY_PATH,
+        artifact_file_name=pointer,
         harmonized_at="2026-08-04T00:00:00+00:00",
         event_count=8,
         segment_count=3,
@@ -551,6 +686,7 @@ def test_completion_is_atomic_and_validates_artifact_truth_counts(
         unresolved_event_count=1,
         warning_count=2,
         used_interpretation_context=False,
+        attempt_id=attempt_id,
     )
     job = db.get_job(database, "complete")
 
@@ -561,7 +697,7 @@ def test_completion_is_atomic_and_validates_artifact_truth_counts(
     assert job["harmony_attempt_id"] is None
     assert job["harmony_attempt_version"] == "harmonic-context-v1"
     assert job["harmony_version"] == "harmonic-context-v1"
-    assert job["harmony_artifact_file_name"] == HARMONY_PATH
+    assert job["harmony_artifact_file_name"] == pointer
     assert job["harmony_event_count"] == 8
     assert job["harmony_segment_count"] == 3
     assert job["harmony_resolved_segment_count"] == 2
@@ -596,9 +732,10 @@ def test_completion_rejects_invalid_counts_boolean_and_path(
         "invalid-completion",
         harmony_version="harmonic-context-v1",
     )
+    attempt_id = active_attempt_id(database, "invalid-completion")
     values = {
         "harmony_version": "harmonic-context-v1",
-        "artifact_file_name": HARMONY_PATH,
+        "artifact_file_name": attempt_path(attempt_id),
         "harmonized_at": "2026-08-04T00:00:00+00:00",
         "event_count": 8,
         "segment_count": 3,
@@ -607,6 +744,7 @@ def test_completion_rejects_invalid_counts_boolean_and_path(
         "unresolved_event_count": 1,
         "warning_count": 2,
         "used_interpretation_context": False,
+        "attempt_id": attempt_id,
     }
     values.update(overrides)
 
@@ -631,8 +769,9 @@ def test_wrong_attempt_version_and_stale_raw_source_cannot_complete(
         "stale",
         harmony_version="harmonic-context-v1",
     )
+    attempt_id = active_attempt_id(database, "stale")
     common = dict(
-        artifact_file_name=HARMONY_PATH,
+        artifact_file_name=attempt_path(attempt_id),
         harmonized_at="2026-08-04T00:00:00+00:00",
         event_count=8,
         segment_count=3,
@@ -641,6 +780,7 @@ def test_wrong_attempt_version_and_stale_raw_source_cannot_complete(
         unresolved_event_count=1,
         warning_count=2,
         used_interpretation_context=False,
+        attempt_id=attempt_id,
     )
     assert not db.complete_harmony_attempt(
         database,
@@ -675,6 +815,7 @@ def test_wrong_attempt_version_and_stale_raw_source_cannot_complete(
         database,
         "stale",
         error="stale worker",
+        attempt_id=attempt_id,
     )
 
 
@@ -690,10 +831,12 @@ def test_failure_sanitizes_error_and_preserves_previous_success(
         harmony_version="harmonic-context-v2",
         force=True,
     )
+    attempt_id = active_attempt_id(database, "failure")
     assert db.fail_harmony_attempt(
         database,
         "failure",
         error="Traceback at C:\\Users\\person\\secret token=private",
+        attempt_id=attempt_id,
     )
     current = db.get_job(database, "failure")
 
@@ -746,7 +889,7 @@ def test_successful_raw_replacement_automatically_invalidates_harmony(
 ) -> None:
     database = tmp_path / "popex.sqlite3"
     create_transcribed_job(database, "upstream-success")
-    complete_harmony(database, "upstream-success")
+    previous = complete_harmony(database, "upstream-success")
 
     assert db.claim_transcription_attempt(
         database,
@@ -757,7 +900,7 @@ def test_successful_raw_replacement_automatically_invalidates_harmony(
     claimed = db.get_job(database, "upstream-success")
     assert claimed is not None
     assert claimed["harmony_status"] == "completed"
-    assert claimed["harmony_artifact_file_name"] == HARMONY_PATH
+    assert claimed["harmony_artifact_file_name"] == previous["harmony_artifact_file_name"]
 
     db.update_job(
         database,
@@ -887,7 +1030,7 @@ def test_old_attempt_cannot_mutate_reclaimed_harmony_attempt(
         database,
         "reclaimed",
         harmony_version="harmonic-context-v1",
-        artifact_file_name=HARMONY_PATH,
+        artifact_file_name=attempt_path(old_attempt_id),
         harmonized_at="2026-08-04T00:00:00+00:00",
         event_count=8,
         segment_count=3,
