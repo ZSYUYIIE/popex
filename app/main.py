@@ -75,8 +75,10 @@ from app.harmony_artifacts import (
     HarmonyArtifactError,
     HarmonyArtifactUnavailableError,
     harmony_artifact_path,
+    harmony_artifact_scope,
     harmony_attempt_artifact_file_name,
     load_harmony_artifact,
+    reconcile_harmony_attempt_artifacts,
     remove_harmony_artifact,
 )
 from app.harmony_pipeline import (
@@ -1570,6 +1572,31 @@ def _run_harmony_job(
         )
         return
 
+    current_before_processor = db.get_job(settings.database_path, job_id)
+    if current_before_processor is None:
+        return
+    try:
+        reconcile_harmony_attempt_artifacts(
+            job_id,
+            settings,
+            durable_artifact_file_name=current_before_processor.get(
+                "harmony_artifact_file_name"
+            ),
+            active_attempt_id=current_before_processor.get("harmony_attempt_id"),
+        )
+    except HarmonyArtifactError:
+        logging.exception(
+            "Harmony attempt artifact reconciliation failed for job %s",
+            job_id,
+        )
+        _record_harmony_failure(
+            settings,
+            job_id,
+            "Harmony attempt artifacts could not be reconciled safely.",
+            attempt_id=attempt_id,
+        )
+        return
+
     def update_stage(stage: str, message: str, progress: float) -> None:
         nonlocal last_progress
         try:
@@ -1596,12 +1623,13 @@ def _run_harmony_job(
         last_progress = next_progress
 
     try:
-        result = processor(
-            job_id,
-            settings,
-            update_stage,
-            attempt_id=attempt_id,
-        )
+        with harmony_artifact_scope(expected_artifact_file_name):
+            result = processor(
+                job_id,
+                settings,
+                update_stage,
+                attempt_id=attempt_id,
+            )
     except HarmonyPipelineError as exc:
         _cleanup_harmony_artifact(
             settings,
@@ -2292,6 +2320,30 @@ def _harmony_raw_evidence(
     return evidence
 
 
+def _harmony_raw_evidence_matches_current(
+    artifact_evidence: object,
+    current_evidence: list[dict[str, Any]],
+    *,
+    allow_legacy_missing_warnings: bool,
+) -> bool:
+    if not isinstance(artifact_evidence, list) or len(artifact_evidence) != len(
+        current_evidence
+    ):
+        return False
+    for artifact_item, current_item in zip(artifact_evidence, current_evidence):
+        if not isinstance(artifact_item, dict):
+            return False
+        if artifact_item == current_item:
+            continue
+        if allow_legacy_missing_warnings and "warnings" not in artifact_item:
+            expected_without_warnings = dict(current_item)
+            expected_without_warnings.pop("warnings", None)
+            if artifact_item == expected_without_warnings:
+                continue
+        return False
+    return True
+
+
 def _is_harmony_artifact_file_name(value: object) -> bool:
     return isinstance(value, str) and _HARMONY_ARTIFACT_FILE_RE.fullmatch(value) is not None
 
@@ -2380,6 +2432,16 @@ def _harmony_artifact_matches_record(
             "harmony_unresolved_event_count"
         ),
     }
+    raw_evidence_matches = True
+    if raw_transcription is not None:
+        raw_evidence_matches = _harmony_raw_evidence_matches_current(
+            artifact.get("rawEvidence"),
+            _harmony_raw_evidence(raw_transcription),
+            allow_legacy_missing_warnings=(
+                record.get("harmony_artifact_file_name")
+                == HARMONY_ARTIFACT_RELATIVE_PATH
+            ),
+        )
     return (
         artifact.get("harmonyVersion") == record.get("harmony_version")
         and artifact.get("createdAt") == record.get("harmonized_at")
@@ -2407,11 +2469,7 @@ def _harmony_artifact_matches_record(
         and len(artifact.get("warnings", ()))
         == record.get("harmony_warning_count")
         and ("sourceInterpretation" in artifact) == bool(context_value)
-        and (
-            raw_transcription is None
-            or artifact.get("rawEvidence")
-            == _harmony_raw_evidence(raw_transcription)
-        )
+        and raw_evidence_matches
     )
 
 
