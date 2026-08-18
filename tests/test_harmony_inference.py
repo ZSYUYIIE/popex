@@ -457,6 +457,31 @@ def test_unsafe_event_warning_text_is_rejected(warning: str) -> None:
         infer_harmony([event("c", 60, warnings=[warning])], timing())
 
 
+def test_raw_warning_bound_matches_canonical_transcription_contract() -> None:
+    warnings = [f"Review warning {index}." for index in range(128)]
+    warnings[8] = "x" * 500
+    result = infer_harmony(
+        [event("c", 60, warnings=warnings), event("e", 64), event("g", 67)],
+        timing(),
+    )
+    assert result.raw_evidence[0]["warnings"] == warnings
+
+    with pytest.raises(HarmonyInferenceError, match="too many warnings"):
+        infer_harmony([event("c", 60, warnings=warnings + ["overflow"])], timing())
+    with pytest.raises(HarmonyInferenceError):
+        infer_harmony([event("c", 60, warnings=["x" * 501])], timing())
+
+
+def test_nine_benign_warnings_and_long_benign_warning_are_preserved() -> None:
+    warnings = [f"Benign warning {index}." for index in range(9)]
+    warnings[-1] = "Review this uncertain pitch boundary carefully. " + "x" * 300
+    result = infer_harmony(
+        [event("c", 60, warnings=warnings), event("e", 64), event("g", 67)],
+        timing(),
+    )
+    assert result.raw_evidence[0]["warnings"] == warnings
+
+
 def test_bad_part_evidence_references_and_assignments_fail() -> None:
     events = [event("c", 60)]
     with pytest.raises(HarmonyInferenceError, match="unknown raw event"):
