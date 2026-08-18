@@ -64,7 +64,7 @@ _SECRET = re.compile(
 
 _MAX_ARTIFACT_BYTES = 24 * 1024 * 1024
 _MAX_RAW_EVENTS = 100_000
-_MAX_RAW_EVENT_WARNINGS = 8
+_MAX_RAW_EVENT_WARNINGS = 128
 _MAX_SEGMENTS = 20_000
 _MAX_ALTERNATIVES = 16
 _MAX_REFERENCES = 100_000
@@ -241,11 +241,18 @@ def write_harmony_artifact(
     artifact_file_name: str | None = None,
 ) -> Path:
     """Validate and atomically publish one canonical harmonic-context artifact."""
-    encoded = _encoded_payload(validate_harmony_artifact(payload))
+    target = _resolve_artifact_file_name(artifact_file_name)
+    validated = validate_harmony_artifact(payload)
+    if target != HARMONY_ARTIFACT_RELATIVE_PATH and any(
+        "warnings" not in item for item in validated["rawEvidence"]
+    ):
+        raise HarmonyArtifactValidationError(
+            "Attempt-scoped raw evidence requires explicit warning lists."
+        )
+    encoded = _encoded_payload(validated)
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=True)
     assert directory is not None
-    target = _resolve_artifact_file_name(artifact_file_name)
     leaf = _artifact_leaf(target)
     destination = directory / leaf
     _validate_existing_destination(destination, directory)
@@ -324,11 +331,18 @@ def load_harmony_artifact(
             "Saved harmonic context is unreadable or corrupted."
         ) from exc
     try:
-        return validate_harmony_artifact(payload)
+        validated = validate_harmony_artifact(payload)
     except HarmonyArtifactValidationError as exc:
         raise HarmonyArtifactError(
             "Saved harmonic context failed schema validation."
         ) from exc
+    if target != HARMONY_ARTIFACT_RELATIVE_PATH and any(
+        "warnings" not in item for item in validated["rawEvidence"]
+    ):
+        raise HarmonyArtifactError(
+            "Saved attempt-scoped harmonic context failed schema validation."
+        )
+    return validated
 
 
 def harmony_artifact_path(
@@ -386,6 +400,61 @@ def remove_harmony_artifact(
     path = directory / _artifact_leaf(artifact_file_name)
     _remove_published_artifact(path, directory)
     _fsync_directory(directory)
+
+
+def reconcile_harmony_attempt_artifacts(
+    job_id: str,
+    settings: Settings,
+    *,
+    durable_artifact_file_name: str | None,
+    active_attempt_id: str | None,
+) -> int:
+    """Remove safe non-durable attempt artifacts while preserving live/durable state."""
+    job_dir = _secure_job_root(job_id, settings)
+    directory = _artifact_directory(job_dir, create=False)
+    if directory is None:
+        return 0
+    snapshot = _directory_snapshot(directory, job_dir)
+    protected: set[str] = {"harmonic-context.json"}
+    if durable_artifact_file_name is not None:
+        protected.add(_artifact_leaf(_canonical_artifact_file_name(durable_artifact_file_name)))
+    if active_attempt_id is not None:
+        protected.add(_artifact_leaf(harmony_attempt_artifact_file_name(active_attempt_id)))
+
+    removed = 0
+    unsafe = False
+    try:
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Harmony attempt artifacts could not be reconciled safely."
+        ) from exc
+    for entry in entries:
+        name = entry.name
+        if name in protected or name.startswith("."):
+            continue
+        if not name.startswith("harmonic-context.") or not name.endswith(".json"):
+            continue
+        relative = f"harmony/{name}"
+        if not _ATTEMPT_ARTIFACT.fullmatch(relative):
+            unsafe = True
+            continue
+        try:
+            _remove_published_artifact(entry, directory)
+            removed += 1
+        except HarmonyArtifactError:
+            unsafe = True
+    if _directory_snapshot(directory, job_dir) != snapshot:
+        raise HarmonyArtifactError(
+            "Harmony artifact directory changed during reconciliation."
+        )
+    if removed:
+        _fsync_directory(directory)
+    if unsafe:
+        raise HarmonyArtifactError(
+            "Harmony attempt artifacts could not be reconciled safely."
+        )
+    return removed
 
 
 def _source_transcription(value: Any) -> dict[str, Any]:
@@ -542,7 +611,7 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         raise HarmonyArtifactValidationError(
             f"{label}.pitchName is inconsistent with pitchClass."
         )
-    return {
+    output = {
         "id": _id(item["id"], f"{label}.id"),
         "sourceKind": _slug(item["sourceKind"], f"{label}.sourceKind"),
         "rawStartSeconds": start,
@@ -552,12 +621,14 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         "pitchClass": pitch_class,
         "pitchName": pitch_name,
         "confidence": _confidence(item["confidence"], f"{label}.confidence"),
-        "warnings": _warnings(
-            item.get("warnings", []),
+    }
+    if "warnings" in item:
+        output["warnings"] = _warnings(
+            item["warnings"],
             f"{label}.warnings",
             _MAX_RAW_EVENT_WARNINGS,
-        ),
-    }
+        )
+    return output
 
 
 def _segments(
@@ -1671,6 +1742,7 @@ __all__ = [
     "harmony_artifact_scope",
     "harmony_attempt_artifact_file_name",
     "load_harmony_artifact",
+    "reconcile_harmony_attempt_artifacts",
     "remove_harmony_artifact",
     "validate_harmony_artifact",
     "write_harmony_artifact",
