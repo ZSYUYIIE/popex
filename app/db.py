@@ -934,7 +934,7 @@ def claim_harmony_attempt(
               AND TRIM(transcribed_at) != ''
               AND (
                     harmony_status IN ('not_started', 'failed')
-                    OR (? = 1 AND harmony_status IN ('completed', 'processing'))
+                    OR (? = 1 AND harmony_status = 'completed')
               )
             """,
             (
@@ -975,7 +975,10 @@ def update_harmony_progress(
                 updated_at = ?
             WHERE id = ?
               AND harmony_status = 'processing'
-              AND (? IS NULL OR harmony_attempt_id = ?)
+              AND (
+                    (? IS NULL AND harmony_attempt_id IS NULL)
+                    OR harmony_attempt_id = ?
+              )
               AND transcription_status = 'completed'
               AND transcription_version IS harmony_source_transcription_version
               AND transcription_artifact_file_name
@@ -1068,7 +1071,10 @@ def complete_harmony_attempt(
                 updated_at = ?
             WHERE id = ?
               AND harmony_status = 'processing'
-              AND (? IS NULL OR harmony_attempt_id = ?)
+              AND (
+                    (? IS NULL AND harmony_attempt_id IS NULL)
+                    OR harmony_attempt_id = ?
+              )
               AND harmony_attempt_version = ?
               AND transcription_status = 'completed'
               AND transcription_version IS harmony_source_transcription_version
@@ -1124,7 +1130,10 @@ def fail_harmony_attempt(
                 updated_at = ?
             WHERE id = ?
               AND harmony_status = 'processing'
-              AND (? IS NULL OR harmony_attempt_id = ?)
+              AND (
+                    (? IS NULL AND harmony_attempt_id IS NULL)
+                    OR harmony_attempt_id = ?
+              )
               AND transcription_status = 'completed'
               AND transcription_version IS harmony_source_transcription_version
               AND transcription_artifact_file_name
