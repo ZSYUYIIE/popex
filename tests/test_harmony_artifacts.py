@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -628,6 +629,56 @@ def test_reconcile_malformed_or_symlink_candidate_fails_closed(
         )
     assert candidate.is_symlink()
     assert outside.read_text(encoding="utf-8") == "outside"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX rename and symlink semantics")
+def test_reconcile_parent_replacement_never_unlinks_external_file(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    write_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_payload(),
+        artifact_file_name=target,
+    )
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    moved_directory = settings.exports_dir / JOB_ID / "harmony-before-swap"
+    outside = tmp_path / "outside-harmony"
+    outside.mkdir()
+    outside_target = outside / Path(target).name
+    outside_target.write_text("external sentinel", encoding="utf-8")
+    original_remove = module._remove_published_artifact
+    swapped = False
+
+    def swap_parent_then_remove(path, expected_directory, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            expected_directory.rename(moved_directory)
+            expected_directory.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_remove(path, expected_directory, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "_remove_published_artifact",
+        swap_parent_then_remove,
+    )
+
+    with pytest.raises(HarmonyArtifactError):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id=None,
+        )
+
+    assert swapped is True
+    assert outside_target.read_text(encoding="utf-8") == "external sentinel"
 
 
 def test_segment_references_and_derived_sources_are_verified() -> None:

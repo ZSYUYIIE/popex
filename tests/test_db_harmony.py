@@ -416,6 +416,22 @@ def test_claim_never_requires_stems_or_interpretation(tmp_path: Path) -> None:
         }
 
 
+def test_claim_returns_the_exact_persisted_attempt_identity(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "claimed-identity")
+
+    claimed_attempt_id = db.claim_harmony_attempt(
+        database,
+        "claimed-identity",
+        harmony_version="harmonic-context-v1",
+    )
+
+    record = db.get_job(database, "claimed-identity")
+    assert record is not None
+    assert isinstance(claimed_attempt_id, str)
+    assert claimed_attempt_id == record["harmony_attempt_id"]
+
+
 def test_only_one_concurrent_harmony_claim_wins(tmp_path: Path) -> None:
     database = tmp_path / "popex.sqlite3"
     create_transcribed_job(database, "concurrent")

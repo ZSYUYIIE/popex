@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import copy
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import db
+from app import main as main_module
 from app.analysis import ANALYSIS_JSON_RELATIVE_PATH
 from app.config import Settings
 from app.harmony_artifacts import (
@@ -646,6 +649,66 @@ def test_atomic_claim_conflict_schedules_no_processor(
     assert calls == []
 
 
+def test_request_schedules_only_the_attempt_identity_returned_by_its_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings(tmp_path)
+    scheduled_attempts: list[str | None] = []
+    claimed_attempts: list[str] = []
+    real_claim = db.claim_harmony_attempt
+
+    def racing_claim(*args, **kwargs):
+        claimed = real_claim(*args, **kwargs)
+        first = db.get_job(settings.database_path, args[1])
+        assert first is not None
+        first_attempt = first["harmony_attempt_id"]
+        assert isinstance(first_attempt, str)
+
+        replacement = raw_payload()
+        write_raw_transcription(args[1], settings, replacement)
+        db.update_job(
+            settings.database_path,
+            args[1],
+            transcription_status="completed",
+            transcription_stage="completed",
+            transcription_progress=100,
+            transcription_message="Replacement raw transcription complete.",
+            transcription_version="raw-transcription-v1",
+            transcription_artifact_file_name=RAW_TRANSCRIPTION_RELATIVE_PATH,
+            transcribed_at=RAW_CREATED_AT,
+            pitched_event_count=3,
+            percussion_event_count=0,
+            aligned_event_count=0,
+            transcription_error=None,
+        )
+        second_claimed = real_claim(*args, **kwargs)
+        second = db.get_job(settings.database_path, args[1])
+        assert second is not None
+        second_attempt = second["harmony_attempt_id"]
+        assert isinstance(second_attempt, str)
+        assert second_attempt != first_attempt
+        assert second_claimed
+        claimed_attempts.extend((first_attempt, second_attempt))
+        return claimed
+
+    def capture_scheduled_attempt(*args, **_kwargs):
+        scheduled_attempts.append(args[-1])
+
+    monkeypatch.setattr(db, "claim_harmony_attempt", racing_claim)
+    monkeypatch.setattr(main_module, "_run_harmony_job", capture_scheduled_attempt)
+    app = create_app(settings=settings, harmony_processor=successful_processor)
+
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        response = client.post(f"/api/jobs/{job_id}/harmonize")
+
+    assert response.status_code == 202
+    assert len(claimed_attempts) == 2
+    assert scheduled_attempts == [claimed_attempts[0]]
+    assert scheduled_attempts != [claimed_attempts[1]]
+
+
 def test_successful_background_progress_and_completion_are_durable(
     tmp_path: Path,
 ) -> None:
@@ -1262,6 +1325,167 @@ def test_late_old_worker_cannot_replace_or_hide_newer_success(
     new_path = settings.exports_dir / job_id / new_pointer
     assert not old_path.exists()
     assert new_path.is_file()
+
+
+def test_late_duplicate_worker_cannot_remove_the_durable_winner(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    processor_calls: list[str | None] = []
+
+    def tracked_processor(*args, attempt_id=None, **kwargs):
+        processor_calls.append(attempt_id)
+        return successful_processor(*args, attempt_id=attempt_id, **kwargs)
+
+    app = create_app(settings=settings, harmony_processor=tracked_processor)
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        claimed_attempt = db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+        )
+        record = db.get_job(settings.database_path, job_id)
+        assert record is not None
+        attempt_id = record["harmony_attempt_id"]
+        assert isinstance(attempt_id, str)
+        assert claimed_attempt
+
+        _run_harmony_job(job_id, settings, tracked_processor, attempt_id)
+        completed = db.get_job(settings.database_path, job_id)
+        assert completed is not None
+        pointer = completed["harmony_artifact_file_name"]
+        assert isinstance(pointer, str)
+        path = settings.exports_dir / job_id / pointer
+        before_bytes = path.read_bytes()
+        before_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        before_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+        _run_harmony_job(job_id, settings, tracked_processor, attempt_id)
+
+        after = db.get_job(settings.database_path, job_id)
+        after_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        after_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert processor_calls == [attempt_id]
+    assert after == completed
+    assert path.read_bytes() == before_bytes
+    assert before_details.status_code == after_details.status_code == 200
+    assert before_details.json() == after_details.json()
+    assert before_download.status_code == after_download.status_code == 200
+    assert before_download.content == after_download.content == before_bytes
+
+
+def test_stale_reconciliation_cannot_remove_a_newer_durable_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings(tmp_path)
+    app = create_app(settings=settings, harmony_processor=successful_processor)
+    entered_reconciliation = Event()
+    release_reconciliation = Event()
+    real_reconcile = main_module.reconcile_harmony_attempt_artifacts
+    old_attempt: str | None = None
+
+    def pause_old_reconciliation(*args, **kwargs):
+        if kwargs.get("active_attempt_id") == old_attempt:
+            entered_reconciliation.set()
+            assert release_reconciliation.wait(5)
+        return real_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        main_module,
+        "reconcile_harmony_attempt_artifacts",
+        pause_old_reconciliation,
+    )
+
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        assert db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+        )
+        old_record = db.get_job(settings.database_path, job_id)
+        assert old_record is not None
+        old_attempt = old_record["harmony_attempt_id"]
+        assert isinstance(old_attempt, str)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            old_worker = executor.submit(
+                _run_harmony_job,
+                job_id,
+                settings,
+                successful_processor,
+                old_attempt,
+            )
+            assert entered_reconciliation.wait(5)
+            try:
+                replacement = raw_payload()
+                write_raw_transcription(job_id, settings, replacement)
+                db.update_job(
+                    settings.database_path,
+                    job_id,
+                    transcription_status="completed",
+                    transcription_stage="completed",
+                    transcription_progress=100,
+                    transcription_message="Replacement raw transcription complete.",
+                    transcription_version="raw-transcription-v1",
+                    transcription_artifact_file_name=RAW_TRANSCRIPTION_RELATIVE_PATH,
+                    transcribed_at=RAW_CREATED_AT,
+                    pitched_event_count=3,
+                    percussion_event_count=0,
+                    aligned_event_count=0,
+                    transcription_error=None,
+                )
+                assert db.claim_harmony_attempt(
+                    settings.database_path,
+                    job_id,
+                    harmony_version=HARMONY_PIPELINE_VERSION,
+                )
+                new_record = db.get_job(settings.database_path, job_id)
+                assert new_record is not None
+                new_attempt = new_record["harmony_attempt_id"]
+                assert isinstance(new_attempt, str) and new_attempt != old_attempt
+
+                _run_harmony_job(
+                    job_id,
+                    settings,
+                    successful_processor,
+                    new_attempt,
+                )
+                completed = db.get_job(settings.database_path, job_id)
+                assert completed is not None
+                pointer = completed["harmony_artifact_file_name"]
+                assert isinstance(pointer, str)
+                path = settings.exports_dir / job_id / pointer
+                before_bytes = path.read_bytes()
+                before_details = client.get(
+                    f"/api/jobs/{job_id}/harmony?includeSegments=true"
+                )
+                before_download = client.get(
+                    f"/api/jobs/{job_id}/harmony/download"
+                )
+            finally:
+                release_reconciliation.set()
+            old_worker.result(timeout=5)
+
+        after = db.get_job(settings.database_path, job_id)
+        after_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        after_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert after == completed
+    assert path.read_bytes() == before_bytes
+    assert before_details.status_code == after_details.status_code == 200
+    assert before_details.json() == after_details.json()
+    assert before_download.status_code == after_download.status_code == 200
+    assert before_download.content == after_download.content == before_bytes
 
 
 def test_worker_reconciles_repeated_crash_orphans_without_deleting_live_or_durable(
