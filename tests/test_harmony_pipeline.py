@@ -724,7 +724,9 @@ def test_first_post_replace_publication_failure_leaves_no_artifact(
     monkeypatch.setattr(artifact_module, "_fsync_directory", fail_directory_sync)
     with pytest.raises(HarmonyPipelineError, match="could not be published safely"):
         infer_harmony_job(JOB_ID, settings, created_at=FIXED_HARMONY_AT)
-    assert not path.exists()
+    assert path.exists() is (
+        not artifact_module._descriptor_relative_cleanup_supported()
+    )
 
 
 def test_reload_failure_restores_previous_valid_artifact(
@@ -766,6 +768,7 @@ def test_reload_failure_without_previous_removes_unverified_artifact(
     _write_inputs(settings)
     path = _artifact_path(settings)
 
+    import app.harmony_artifacts as artifact_module
     import app.harmony_pipeline as pipeline_module
 
     calls = 0
@@ -780,7 +783,9 @@ def test_reload_failure_without_previous_removes_unverified_artifact(
     monkeypatch.setattr(pipeline_module, "load_harmony_artifact", fail_second_load)
     with pytest.raises(HarmonyPipelineError, match="could not be verified"):
         infer_harmony_job(JOB_ID, settings, created_at=FIXED_HARMONY_AT)
-    assert not path.exists()
+    assert path.exists() is (
+        not artifact_module._descriptor_relative_cleanup_supported()
+    )
 
 
 def test_reload_mismatch_restores_previous_valid_artifact(

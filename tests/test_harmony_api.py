@@ -4,13 +4,14 @@ import copy
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import db
+from app import harmony_artifacts as harmony_artifacts_module
 from app import main as main_module
 from app.analysis import ANALYSIS_JSON_RELATIVE_PATH
 from app.config import Settings
@@ -642,7 +643,7 @@ def test_atomic_claim_conflict_schedules_no_processor(
     app = create_app(settings=settings, harmony_processor=processor)
     with TestClient(app) as client:
         job_id = create_job(settings)
-        monkeypatch.setattr(db, "claim_harmony_attempt", lambda *_a, **_k: False)
+        monkeypatch.setattr(db, "claim_harmony_attempt", lambda *_a, **_k: None)
         response = client.post(f"/api/jobs/{job_id}/harmonize")
 
     assert response.status_code == 409
@@ -654,59 +655,118 @@ def test_request_schedules_only_the_attempt_identity_returned_by_its_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = make_settings(tmp_path)
-    scheduled_attempts: list[str | None] = []
+    scheduled_tasks: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
     claimed_attempts: list[str] = []
+    processor_calls: list[str | None] = []
+    first_claimed = Event()
+    release_first = Event()
+    state_lock = Lock()
     real_claim = db.claim_harmony_attempt
 
-    def racing_claim(*args, **kwargs):
+    def paused_first_claim(*args, **kwargs):
         claimed = real_claim(*args, **kwargs)
-        first = db.get_job(settings.database_path, args[1])
-        assert first is not None
-        first_attempt = first["harmony_attempt_id"]
-        assert isinstance(first_attempt, str)
-
-        replacement = raw_payload()
-        write_raw_transcription(args[1], settings, replacement)
-        db.update_job(
-            settings.database_path,
-            args[1],
-            transcription_status="completed",
-            transcription_stage="completed",
-            transcription_progress=100,
-            transcription_message="Replacement raw transcription complete.",
-            transcription_version="raw-transcription-v1",
-            transcription_artifact_file_name=RAW_TRANSCRIPTION_RELATIVE_PATH,
-            transcribed_at=RAW_CREATED_AT,
-            pitched_event_count=3,
-            percussion_event_count=0,
-            aligned_event_count=0,
-            transcription_error=None,
-        )
-        second_claimed = real_claim(*args, **kwargs)
-        second = db.get_job(settings.database_path, args[1])
-        assert second is not None
-        second_attempt = second["harmony_attempt_id"]
-        assert isinstance(second_attempt, str)
-        assert second_attempt != first_attempt
-        assert second_claimed
-        claimed_attempts.extend((first_attempt, second_attempt))
+        assert isinstance(claimed, str)
+        with state_lock:
+            claimed_attempts.append(claimed)
+            is_first = len(claimed_attempts) == 1
+        if is_first:
+            first_claimed.set()
+            assert release_first.wait(5)
         return claimed
 
-    def capture_scheduled_attempt(*args, **_kwargs):
-        scheduled_attempts.append(args[-1])
+    def capture_task(_background_tasks, function, *args, **kwargs):
+        with state_lock:
+            scheduled_tasks.append((function, args, kwargs))
 
-    monkeypatch.setattr(db, "claim_harmony_attempt", racing_claim)
-    monkeypatch.setattr(main_module, "_run_harmony_job", capture_scheduled_attempt)
-    app = create_app(settings=settings, harmony_processor=successful_processor)
+    def tracked_processor(*args, attempt_id=None, **kwargs):
+        processor_calls.append(attempt_id)
+        return successful_processor(
+            *args,
+            attempt_id=attempt_id,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(db, "claim_harmony_attempt", paused_first_claim)
+    monkeypatch.setattr(main_module.BackgroundTasks, "add_task", capture_task)
+    app = create_app(settings=settings, harmony_processor=tracked_processor)
 
     with TestClient(app) as client:
         job_id = create_job(settings)
-        response = client.post(f"/api/jobs/{job_id}/harmonize")
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first_response_future = executor.submit(
+                client.post,
+                f"/api/jobs/{job_id}/harmonize",
+            )
+            assert first_claimed.wait(5)
+            try:
+                replacement = raw_payload()
+                write_raw_transcription(job_id, settings, replacement)
+                db.update_job(
+                    settings.database_path,
+                    job_id,
+                    transcription_status="completed",
+                    transcription_stage="completed",
+                    transcription_progress=100,
+                    transcription_message="Replacement raw transcription complete.",
+                    transcription_version="raw-transcription-v1",
+                    transcription_artifact_file_name=RAW_TRANSCRIPTION_RELATIVE_PATH,
+                    transcribed_at=RAW_CREATED_AT,
+                    pitched_event_count=3,
+                    percussion_event_count=0,
+                    aligned_event_count=0,
+                    transcription_error=None,
+                )
+                second_response = client.post(f"/api/jobs/{job_id}/harmonize")
+            finally:
+                release_first.set()
+            first_response = first_response_future.result(timeout=5)
 
-    assert response.status_code == 202
-    assert len(claimed_attempts) == 2
-    assert scheduled_attempts == [claimed_attempts[0]]
-    assert scheduled_attempts != [claimed_attempts[1]]
+        assert first_response.status_code == second_response.status_code == 202
+        assert len(claimed_attempts) == 2
+        first_attempt, second_attempt = claimed_attempts
+        assert first_attempt != second_attempt
+        assert len(scheduled_tasks) == 2
+        scheduled_attempts = [task[1][-1] for task in scheduled_tasks]
+        assert scheduled_attempts.count(first_attempt) == 1
+        assert scheduled_attempts.count(second_attempt) == 1
+
+        second_task = next(
+            task for task in scheduled_tasks if task[1][-1] == second_attempt
+        )
+        second_task[0](*second_task[1], **second_task[2])
+        completed = db.get_job(settings.database_path, job_id)
+        assert completed is not None
+        pointer = completed["harmony_artifact_file_name"]
+        assert pointer == harmony_attempt_artifact_file_name(second_attempt)
+        path = settings.exports_dir / job_id / pointer
+        before_bytes = path.read_bytes()
+        before_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        before_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+        first_task = next(
+            task for task in scheduled_tasks if task[1][-1] == first_attempt
+        )
+        first_task[0](*first_task[1], **first_task[2])
+        after = db.get_job(settings.database_path, job_id)
+        after_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        after_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert processor_calls == [second_attempt]
+    assert after == completed
+    assert path.read_bytes() == before_bytes
+    assert before_details.status_code == after_details.status_code == 200
+    assert before_details.json() == after_details.json()
+    assert before_download.status_code == after_download.status_code == 200
+    assert before_download.content == after_download.content == before_bytes
+    assert not (
+        settings.exports_dir
+        / job_id
+        / harmony_attempt_artifact_file_name(first_attempt)
+    ).exists()
 
 
 def test_successful_background_progress_and_completion_are_durable(
@@ -1005,7 +1065,7 @@ def test_old_worker_cannot_complete_reclaimed_same_version_attempt(
         / job_id
         / harmony_attempt_artifact_file_name(attempt_ids[0])
     )
-    assert not old_path.exists()
+    assert old_path.is_file()
 
 
 def test_summary_full_details_and_download_use_validated_artifact_truth(
@@ -1208,7 +1268,10 @@ def test_unscoped_injected_processor_is_redirected_and_failed_retry_preserves_le
     assert record["harmony_status"] == "failed"
     assert record["harmony_artifact_file_name"] == HARMONY_ARTIFACT_RELATIVE_PATH
     assert legacy_path.read_bytes() == legacy_bytes
-    assert not (settings.exports_dir / job_id / target).exists()
+    attempt_path = settings.exports_dir / job_id / target
+    assert attempt_path.exists() is (
+        not harmony_artifacts_module._descriptor_relative_cleanup_supported()
+    )
     assert details.status_code == 200
     assert details.json()["createdAt"] == previous["createdAt"]
     assert download.status_code == 200
@@ -1380,6 +1443,97 @@ def test_late_duplicate_worker_cannot_remove_the_durable_winner(
     assert before_download.content == after_download.content == before_bytes
 
 
+def test_only_one_duplicate_worker_can_consume_and_complete_an_attempt(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    app = create_app(settings=settings, harmony_processor=successful_processor)
+    winner_entered = Event()
+    release_winner = Event()
+    processor_calls: list[str] = []
+
+    def paused_winner(
+        worker_job_id,
+        app_settings,
+        stage_callback,
+        *,
+        attempt_id=None,
+    ):
+        assert isinstance(attempt_id, str)
+        processor_calls.append(attempt_id)
+        winner_entered.set()
+        assert release_winner.wait(5)
+        return successful_processor(
+            worker_job_id,
+            app_settings,
+            stage_callback,
+            attempt_id=attempt_id,
+        )
+
+    def forbidden_duplicate(*_args, **_kwargs):
+        raise AssertionError("a duplicate worker must not enter the processor")
+
+    with TestClient(app) as client:
+        job_id = create_job(settings)
+        attempt_id = db.claim_harmony_attempt(
+            settings.database_path,
+            job_id,
+            harmony_version=HARMONY_PIPELINE_VERSION,
+        )
+        assert isinstance(attempt_id, str)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            winner = executor.submit(
+                _run_harmony_job,
+                job_id,
+                settings,
+                paused_winner,
+                attempt_id,
+            )
+            assert winner_entered.wait(5)
+            try:
+                _run_harmony_job(
+                    job_id,
+                    settings,
+                    forbidden_duplicate,
+                    attempt_id,
+                )
+            finally:
+                release_winner.set()
+            winner.result(timeout=5)
+
+        completed = db.get_job(settings.database_path, job_id)
+        assert completed is not None
+        pointer = completed["harmony_artifact_file_name"]
+        assert isinstance(pointer, str)
+        path = settings.exports_dir / job_id / pointer
+        before_bytes = path.read_bytes()
+        before_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        before_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+        _run_harmony_job(
+            job_id,
+            settings,
+            forbidden_duplicate,
+            attempt_id,
+        )
+        after = db.get_job(settings.database_path, job_id)
+        after_details = client.get(
+            f"/api/jobs/{job_id}/harmony?includeSegments=true"
+        )
+        after_download = client.get(f"/api/jobs/{job_id}/harmony/download")
+
+    assert processor_calls == [attempt_id]
+    assert after == completed
+    assert path.read_bytes() == before_bytes
+    assert before_details.status_code == after_details.status_code == 200
+    assert before_details.json() == after_details.json()
+    assert before_download.status_code == after_download.status_code == 200
+    assert before_download.content == after_download.content == before_bytes
+
+
 def test_stale_reconciliation_cannot_remove_a_newer_durable_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1390,11 +1544,28 @@ def test_stale_reconciliation_cannot_remove_a_newer_durable_attempt(
     release_reconciliation = Event()
     real_reconcile = main_module.reconcile_harmony_attempt_artifacts
     old_attempt: str | None = None
+    old_state_reads = 0
 
     def pause_old_reconciliation(*args, **kwargs):
+        nonlocal old_state_reads
         if kwargs.get("active_attempt_id") == old_attempt:
-            entered_reconciliation.set()
-            assert release_reconciliation.wait(5)
+            real_reader = kwargs["protection_state_reader"]
+            first_read = True
+
+            def stale_then_current_state():
+                nonlocal first_read, old_state_reads
+                old_state_reads += 1
+                current = real_reader()
+                if first_read:
+                    first_read = False
+                    entered_reconciliation.set()
+                    assert release_reconciliation.wait(5)
+                return current
+
+            kwargs = {
+                **kwargs,
+                "protection_state_reader": stale_then_current_state,
+            }
         return real_reconcile(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -1486,6 +1657,8 @@ def test_stale_reconciliation_cannot_remove_a_newer_durable_attempt(
     assert before_details.json() == after_details.json()
     assert before_download.status_code == after_download.status_code == 200
     assert before_download.content == after_download.content == before_bytes
+    if harmony_artifacts_module._descriptor_relative_cleanup_supported():
+        assert old_state_reads >= 2
 
 
 def test_worker_reconciles_repeated_crash_orphans_without_deleting_live_or_durable(
@@ -1496,6 +1669,9 @@ def test_worker_reconciles_repeated_crash_orphans_without_deleting_live_or_durab
     publish_harmony(settings, job_id)
     legacy_path = settings.exports_dir / job_id / HARMONY_ARTIFACT_RELATIVE_PATH
     legacy_bytes = legacy_path.read_bytes()
+    cleanup_supported = (
+        harmony_artifacts_module._descriptor_relative_cleanup_supported()
+    )
     orphan_targets: list[str] = []
 
     for cycle in range(3):
@@ -1559,7 +1735,9 @@ def test_worker_reconciles_repeated_crash_orphans_without_deleting_live_or_durab
         assert legacy_path.read_bytes() == legacy_bytes
         assert live_path.is_file()
         for target in orphan_targets:
-            assert not (settings.exports_dir / job_id / target).exists()
+            assert (settings.exports_dir / job_id / target).exists() is (
+                not cleanup_supported
+            )
         return result_from_artifact(
             live_payload,
             artifact_file_name=live_target,
@@ -1572,7 +1750,9 @@ def test_worker_reconciles_repeated_crash_orphans_without_deleting_live_or_durab
     assert completed["harmony_artifact_file_name"] == live_target
     assert live_path.is_file()
     for target in orphan_targets:
-        assert not (settings.exports_dir / job_id / target).exists()
+        assert (settings.exports_dir / job_id / target).exists() is (
+            not cleanup_supported
+        )
 
 
 def test_same_metadata_raw_evidence_replacement_invalidates_details_and_download(

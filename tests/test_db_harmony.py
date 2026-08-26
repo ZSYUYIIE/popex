@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
@@ -437,7 +437,7 @@ def test_only_one_concurrent_harmony_claim_wins(tmp_path: Path) -> None:
     create_transcribed_job(database, "concurrent")
     barrier = Barrier(8)
 
-    def claim() -> bool:
+    def claim() -> str | None:
         barrier.wait()
         return db.claim_harmony_attempt(
             database,
@@ -448,11 +448,208 @@ def test_only_one_concurrent_harmony_claim_wins(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(lambda _: claim(), range(8)))
 
-    assert results.count(True) == 1
-    assert results.count(False) == 7
+    claimed_attempts = [result for result in results if result is not None]
+    assert len(claimed_attempts) == 1
+    assert isinstance(claimed_attempts[0], str)
+    assert results.count(None) == 7
     job = db.get_job(database, "concurrent")
     assert job is not None
     assert job["harmony_status"] == "processing"
+
+
+def test_only_one_concurrent_harmony_worker_start_wins(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "concurrent-start")
+    attempt_id = db.claim_harmony_attempt(
+        database,
+        "concurrent-start",
+        harmony_version="harmonic-context-v1",
+    )
+    assert isinstance(attempt_id, str)
+    barrier = Barrier(8)
+
+    def start() -> bool:
+        barrier.wait()
+        return db.start_harmony_attempt(
+            database,
+            "concurrent-start",
+            attempt_id=attempt_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(lambda _: start(), range(8)))
+
+    assert results.count(True) == 1
+    assert results.count(False) == 7
+    job = db.get_job(database, "concurrent-start")
+    assert job is not None
+    assert job["harmony_status"] == "processing"
+    assert job["harmony_stage"] == "loading_raw_transcription"
+    assert job["harmony_progress"] == 2
+    assert job["harmony_message"] == "Starting harmonic-context processing."
+    assert job["harmony_attempt_id"] == attempt_id
+
+
+def test_started_harmony_attempt_cannot_reopen_the_initial_worker_gate(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "started-gate")
+    attempt_id = db.claim_harmony_attempt(
+        database,
+        "started-gate",
+        harmony_version="harmonic-context-v1",
+    )
+    assert isinstance(attempt_id, str)
+    assert db.start_harmony_attempt(
+        database,
+        "started-gate",
+        attempt_id=attempt_id,
+    )
+    assert db.update_harmony_progress(
+        database,
+        "started-gate",
+        stage="loading_raw_transcription",
+        progress=5,
+        message="Loading canonical raw pitch evidence.",
+        attempt_id=attempt_id,
+    )
+
+    assert not db.start_harmony_attempt(
+        database,
+        "started-gate",
+        attempt_id=attempt_id,
+    )
+    job = db.get_job(database, "started-gate")
+    assert job is not None
+    assert job["harmony_stage"] == "loading_raw_transcription"
+    assert job["harmony_progress"] == 5
+
+
+def test_harmony_cleanup_lease_serializes_state_transitions(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "cleanup-lease")
+    attempt_id = db.claim_harmony_attempt(
+        database,
+        "cleanup-lease",
+        harmony_version="harmonic-context-v1",
+    )
+    assert isinstance(attempt_id, str)
+    transition_entered = Event()
+
+    def advance() -> bool:
+        transition_entered.set()
+        return db.update_harmony_progress(
+            database,
+            "cleanup-lease",
+            stage="loading_raw_transcription",
+            progress=5,
+            message="Advancing after cleanup lease.",
+            attempt_id=attempt_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with db.harmony_cleanup_lease(
+            database,
+            "cleanup-lease",
+            status="processing",
+            durable_artifact_file_name=None,
+            active_attempt_id=attempt_id,
+        ):
+            transition = executor.submit(advance)
+            assert transition_entered.wait(5)
+            assert not transition.done()
+        assert transition.result(timeout=5)
+
+    job = db.get_job(database, "cleanup-lease")
+    assert job is not None
+    assert job["harmony_progress"] == 5
+
+
+def test_harmony_cleanup_lease_rejects_changed_protection_state(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "cleanup-lease-stale")
+    attempt_id = db.claim_harmony_attempt(
+        database,
+        "cleanup-lease-stale",
+        harmony_version="harmonic-context-v1",
+    )
+    assert isinstance(attempt_id, str)
+    assert db.fail_harmony_attempt(
+        database,
+        "cleanup-lease-stale",
+        error="Stopping before cleanup.",
+        attempt_id=attempt_id,
+    )
+
+    with pytest.raises(ValueError, match="changed"):
+        with db.harmony_cleanup_lease(
+            database,
+            "cleanup-lease-stale",
+            status="processing",
+            durable_artifact_file_name=None,
+            active_attempt_id=attempt_id,
+        ):
+            pytest.fail("stale cleanup lease must not be entered")
+
+
+def test_harmony_worker_start_rejects_wrong_or_invalid_nonce(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "invalid-start")
+    attempt_id = db.claim_harmony_attempt(
+        database,
+        "invalid-start",
+        harmony_version="harmonic-context-v1",
+    )
+    assert isinstance(attempt_id, str)
+    before = db.get_job(database, "invalid-start")
+    wrong_attempt_id = (
+        ("0" if attempt_id[0] != "0" else "1") + attempt_id[1:]
+    )
+
+    assert not db.start_harmony_attempt(
+        database,
+        "invalid-start",
+        attempt_id=wrong_attempt_id,
+    )
+    with pytest.raises(ValueError, match="required"):
+        db.start_harmony_attempt(
+            database,
+            "invalid-start",
+            attempt_id=None,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="invalid"):
+        db.start_harmony_attempt(
+            database,
+            "invalid-start",
+            attempt_id="not-a-valid-attempt",
+        )
+
+    assert db.get_job(database, "invalid-start") == before
+
+
+def test_harmony_worker_start_rejects_stale_source_snapshot(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    create_transcribed_job(database, "stale-start")
+    attempt_id = db.claim_harmony_attempt(
+        database,
+        "stale-start",
+        harmony_version="harmonic-context-v1",
+    )
+    assert isinstance(attempt_id, str)
+    with db.connect(database) as connection:
+        connection.execute(
+            "UPDATE jobs SET transcribed_at = ? WHERE id = ?",
+            ("2026-08-09T00:00:00+00:00", "stale-start"),
+        )
+    before = db.get_job(database, "stale-start")
+
+    assert not db.start_harmony_attempt(
+        database,
+        "stale-start",
+        attempt_id=attempt_id,
+    )
+    assert db.get_job(database, "stale-start") == before
 
 
 def test_force_cannot_reclaim_processing_harmony_attempt(tmp_path: Path) -> None:

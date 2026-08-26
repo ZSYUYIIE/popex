@@ -761,30 +761,24 @@ def create_app(
                     "re-harmonize."
                 ),
             )
-        claimed = db.claim_harmony_attempt(
+        attempt_id = db.claim_harmony_attempt(
             app_settings.database_path,
             job_id,
             harmony_version=HARMONY_PIPELINE_VERSION,
             force=force_value,
         )
-        if not claimed:
+        if attempt_id is None:
             raise HTTPException(
                 status_code=409,
                 detail="Harmonic context could not be started in the current state.",
             )
-        current = db.get_job(app_settings.database_path, job_id)
-        attempt_id = current.get("harmony_attempt_id") if current else None
         if not isinstance(attempt_id, str) or not attempt_id:
-            logging.error("Harmony claim did not persist an attempt ID for %s", job_id)
-            db.fail_harmony_attempt(
-                app_settings.database_path,
-                job_id,
-                error="Harmonic-context attempt could not be tracked.",
-            )
+            logging.error("Harmony claim returned an invalid attempt ID for %s", job_id)
             raise HTTPException(
                 status_code=500,
                 detail="Harmonic context could not be started safely.",
             )
+        current = db.get_job(app_settings.database_path, job_id)
         background_tasks.add_task(
             _run_harmony_job,
             job_id,
@@ -1550,31 +1544,93 @@ def _safe_interpretation_error(value: str, settings: Settings) -> str:
     return cleaned[:500]
 
 
+def _harmony_attempt_is_active(
+    record: dict[str, Any] | None,
+    attempt_id: str | None,
+) -> bool:
+    return (
+        record is not None
+        and record.get("harmony_status") == "processing"
+        and record.get("harmony_attempt_id") == attempt_id
+    )
+
+
+def _harmony_protection_state(
+    record: dict[str, Any] | None,
+) -> tuple[str, str | None, str | None] | None:
+    if record is None:
+        return None
+    status = record.get("harmony_status")
+    durable = record.get("harmony_artifact_file_name")
+    active = record.get("harmony_attempt_id")
+    if not isinstance(status, str) or status not in {
+        "not_started",
+        "processing",
+        "completed",
+        "failed",
+    }:
+        return None
+    if durable is not None and not _is_harmony_artifact_file_name(durable):
+        return None
+    if active is not None:
+        try:
+            harmony_attempt_artifact_file_name(active)
+        except HarmonyArtifactError:
+            return None
+    if status != "processing" and active is not None:
+        return None
+    return status, durable, active
+
+
 def _run_harmony_job(
     job_id: str,
     settings: Settings,
     processor: HarmonyProcessor,
     attempt_id: str | None = None,
 ) -> None:
-    last_progress = 1.0
     try:
-        expected_artifact_file_name = (
-            HARMONY_ARTIFACT_RELATIVE_PATH
-            if attempt_id is None
-            else harmony_attempt_artifact_file_name(attempt_id)
-        )
+        expected_artifact_file_name = harmony_attempt_artifact_file_name(attempt_id)
     except HarmonyArtifactError:
-        _record_harmony_failure(
-            settings,
+        logging.error(
+            "Harmony worker received an invalid attempt identity for job %s",
             job_id,
-            "Harmonic-context attempt identity is invalid.",
+        )
+        return
+    try:
+        started = db.start_harmony_attempt(
+            settings.database_path,
+            job_id,
             attempt_id=attempt_id,
         )
+    except ValueError:
+        logging.error(
+            "Harmony worker received an invalid attempt identity for job %s",
+            job_id,
+        )
+        return
+    if not started:
+        return
+    last_progress = 2.0
+    current_before_processor = db.get_job(settings.database_path, job_id)
+    if not _harmony_attempt_is_active(current_before_processor, attempt_id):
         return
 
-    current_before_processor = db.get_job(settings.database_path, job_id)
-    if current_before_processor is None:
-        return
+    def read_protection_state() -> tuple[str, str | None, str | None] | None:
+        return _harmony_protection_state(
+            db.get_job(settings.database_path, job_id)
+        )
+
+    def cleanup_lease():
+        return db.harmony_cleanup_lease(
+            settings.database_path,
+            job_id,
+            status="processing",
+            durable_artifact_file_name=current_before_processor.get(
+                "harmony_artifact_file_name"
+            ),
+            active_attempt_id=attempt_id,
+        )
+
     try:
         reconcile_harmony_attempt_artifacts(
             job_id,
@@ -1582,7 +1638,9 @@ def _run_harmony_job(
             durable_artifact_file_name=current_before_processor.get(
                 "harmony_artifact_file_name"
             ),
-            active_attempt_id=current_before_processor.get("harmony_attempt_id"),
+            active_attempt_id=attempt_id,
+            protection_state_reader=read_protection_state,
+            cleanup_lease=cleanup_lease,
         )
     except HarmonyArtifactError:
         logging.exception(
@@ -1595,6 +1653,11 @@ def _run_harmony_job(
             "Harmony attempt artifacts could not be reconciled safely.",
             attempt_id=attempt_id,
         )
+        return
+    if not _harmony_attempt_is_active(
+        db.get_job(settings.database_path, job_id),
+        attempt_id,
+    ):
         return
 
     def update_stage(stage: str, message: str, progress: float) -> None:
@@ -1631,33 +1694,35 @@ def _run_harmony_job(
                 attempt_id=attempt_id,
             )
     except HarmonyPipelineError as exc:
-        _cleanup_harmony_artifact(
-            settings,
-            job_id,
-            expected_artifact_file_name,
-        )
-        _record_harmony_failure(
+        failed = _record_harmony_failure(
             settings,
             job_id,
             _safe_harmony_error(str(exc), settings),
             attempt_id=attempt_id,
         )
+        if failed and attempt_id is not None:
+            _cleanup_harmony_artifact(
+                settings,
+                job_id,
+                expected_artifact_file_name,
+            )
     except Exception:
         logging.exception(
             "Unexpected harmonic-context failure for job %s",
             job_id,
         )
-        _cleanup_harmony_artifact(
-            settings,
-            job_id,
-            expected_artifact_file_name,
-        )
-        _record_harmony_failure(
+        failed = _record_harmony_failure(
             settings,
             job_id,
             "Unexpected harmonic-context failure. Check server logs.",
             attempt_id=attempt_id,
         )
+        if failed and attempt_id is not None:
+            _cleanup_harmony_artifact(
+                settings,
+                job_id,
+                expected_artifact_file_name,
+            )
     else:
         if not _validate_harmony_processor_result(
             job_id,
@@ -1669,17 +1734,18 @@ def _run_harmony_job(
                 "Harmony processor returned an invalid result for %s",
                 job_id,
             )
-            _cleanup_harmony_artifact(
-                settings,
-                job_id,
-                expected_artifact_file_name,
-            )
-            _record_harmony_failure(
+            failed = _record_harmony_failure(
                 settings,
                 job_id,
                 "Harmonic context returned an invalid result.",
                 attempt_id=attempt_id,
             )
+            if failed and attempt_id is not None:
+                _cleanup_harmony_artifact(
+                    settings,
+                    job_id,
+                    expected_artifact_file_name,
+                )
             return
         current = db.get_job(settings.database_path, job_id)
         raw_transcription = (
@@ -1700,17 +1766,18 @@ def _run_harmony_job(
                 "Discarded stale harmonic-context result for job %s",
                 job_id,
             )
-            _cleanup_harmony_artifact(
-                settings,
-                job_id,
-                expected_artifact_file_name,
-            )
-            _record_harmony_failure(
+            failed = _record_harmony_failure(
                 settings,
                 job_id,
                 "Harmonic-context source changed during processing.",
                 attempt_id=attempt_id,
             )
+            if failed and attempt_id is not None:
+                _cleanup_harmony_artifact(
+                    settings,
+                    job_id,
+                    expected_artifact_file_name,
+                )
             return
         previous_artifact_file_name = (
             current.get("harmony_artifact_file_name")
@@ -1736,11 +1803,6 @@ def _run_harmony_job(
             logging.warning(
                 "Discarded stale harmonic-context completion for job %s",
                 job_id,
-            )
-            _cleanup_harmony_artifact(
-                settings,
-                job_id,
-                expected_artifact_file_name,
             )
             return
         if (
@@ -1854,11 +1916,42 @@ def _cleanup_harmony_artifact(
     job_id: str,
     artifact_file_name: str,
 ) -> None:
+    def authorize_cleanup() -> None:
+        state = _harmony_protection_state(
+            db.get_job(settings.database_path, job_id)
+        )
+        if state is None:
+            raise HarmonyArtifactError(
+                "Harmony cleanup state could not be verified."
+            )
+        status, durable_artifact_file_name, active_attempt_id = state
+        if durable_artifact_file_name == artifact_file_name:
+            raise HarmonyArtifactError(
+                "The durable harmony artifact cannot be removed."
+            )
+        if status == "processing":
+            try:
+                active_artifact_file_name = (
+                    HARMONY_ARTIFACT_RELATIVE_PATH
+                    if active_attempt_id is None
+                    else harmony_attempt_artifact_file_name(active_attempt_id)
+                )
+            except HarmonyArtifactError as exc:
+                raise HarmonyArtifactError(
+                    "Harmony cleanup state could not be verified."
+                ) from exc
+            if active_artifact_file_name == artifact_file_name:
+                raise HarmonyArtifactError(
+                    "The active harmony artifact cannot be removed."
+                )
+
     try:
+        authorize_cleanup()
         remove_harmony_artifact(
             job_id,
             settings,
             artifact_file_name=artifact_file_name,
+            cleanup_authorizer=authorize_cleanup,
         )
     except HarmonyArtifactError:
         logging.warning(
@@ -1873,8 +1966,8 @@ def _record_harmony_failure(
     error: str,
     *,
     attempt_id: str | None = None,
-) -> None:
-    db.fail_harmony_attempt(
+) -> bool:
+    return db.fail_harmony_attempt(
         settings.database_path,
         job_id,
         error=error,
@@ -1886,11 +1979,11 @@ def _safe_harmony_error(value: str, settings: Settings) -> str:
     text = str(value)
     lowered = text.lower()
     if "traceback (most recent call last)" in lowered or "stack trace" in lowered:
-        return "Harmonic-context processing failed."
+        return "Harmony processing failed."
     try:
         cleaned = friendly_error(text, settings=settings)
     except (OSError, RuntimeError, ValueError):
-        return "Harmonic-context processing failed."
+        return "Harmony processing failed."
     cleaned = re.sub(
         r"(?i)\b(?:https?|file)://[^\s]+",
         "<external location>",
@@ -1905,7 +1998,7 @@ def _safe_harmony_error(value: str, settings: Settings) -> str:
     cleaned = re.sub(r"(?i)0x[0-9a-f]{6,}", "<address>", cleaned)
     cleaned = " ".join(cleaned.replace("\x00", "").split()).strip()
     if not cleaned or "/" in cleaned or "\\" in cleaned:
-        return "Harmonic-context processing failed."
+        return "Harmony processing failed."
     return cleaned[:500]
 
 

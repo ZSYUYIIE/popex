@@ -273,14 +273,44 @@ def _reconcile_non_durable_attempts(
     # a durable DB job. Production calls always have the freshly claimed row.
     if record is None:
         return
-    if record.get("harmony_attempt_id") != attempt_id:
+    if (
+        record.get("harmony_status") != "processing"
+        or record.get("harmony_attempt_id") != attempt_id
+    ):
         raise HarmonyPipelineError("Harmony attempt is no longer active.")
+
+    def read_protection_state() -> tuple[str, str | None, str | None] | None:
+        current = db.get_job(settings.database_path, job_id)
+        if current is None:
+            return None
+        status = current.get("harmony_status")
+        durable = current.get("harmony_artifact_file_name")
+        active = current.get("harmony_attempt_id")
+        if not isinstance(status, str):
+            return None
+        if durable is not None and not isinstance(durable, str):
+            return None
+        if active is not None and not isinstance(active, str):
+            return None
+        return status, durable, active
+
+    def cleanup_lease():
+        return db.harmony_cleanup_lease(
+            settings.database_path,
+            job_id,
+            status="processing",
+            durable_artifact_file_name=record.get("harmony_artifact_file_name"),
+            active_attempt_id=attempt_id,
+        )
+
     try:
         reconcile_harmony_attempt_artifacts(
             job_id,
             settings,
             durable_artifact_file_name=record.get("harmony_artifact_file_name"),
             active_attempt_id=attempt_id,
+            protection_state_reader=read_protection_state,
+            cleanup_lease=cleanup_lease,
         )
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError(

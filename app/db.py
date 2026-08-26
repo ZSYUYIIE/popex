@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -902,8 +904,8 @@ def claim_harmony_attempt(
     harmony_version: str,
     force: bool = False,
     message: str = "Loading canonical raw pitch evidence.",
-) -> bool:
-    """Atomically claim one harmony attempt while preserving prior success."""
+) -> str | None:
+    """Atomically claim one harmony attempt and return its exact identity."""
     attempt_version = _validate_harmony_version(harmony_version)
     attempt_id = uuid4().hex
     safe_message = _validate_harmony_text(message, "harmony message", 500)
@@ -947,7 +949,94 @@ def claim_harmony_attempt(
                 int(bool(force)),
             ),
         )
+        return attempt_id if cursor.rowcount == 1 else None
+
+
+def start_harmony_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    attempt_id: str,
+    message: str = "Starting harmonic-context processing.",
+) -> bool:
+    """Atomically consume one claimed harmony attempt for worker execution."""
+    safe_attempt_id = _validate_harmony_attempt_id(attempt_id)
+    if safe_attempt_id is None:
+        raise ValueError("harmony_attempt_id is required.")
+    safe_message = _validate_harmony_text(message, "harmony message", 500)
+    now = utc_now()
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET harmony_stage = 'loading_raw_transcription',
+                harmony_progress = 2,
+                harmony_message = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND harmony_status = 'processing'
+              AND harmony_stage = 'loading_raw_transcription'
+              AND harmony_progress = 1
+              AND harmony_attempt_id = ?
+              AND transcription_status = 'completed'
+              AND transcription_version IS harmony_source_transcription_version
+              AND transcription_artifact_file_name
+                    IS harmony_source_transcription_artifact_file_name
+              AND transcribed_at IS harmony_source_transcribed_at
+            """,
+            (
+                safe_message,
+                now,
+                job_id,
+                safe_attempt_id,
+            ),
+        )
         return cursor.rowcount == 1
+
+
+@contextmanager
+def harmony_cleanup_lease(
+    database_path: Path,
+    job_id: str,
+    *,
+    status: str,
+    durable_artifact_file_name: str | None,
+    active_attempt_id: str | None,
+) -> Iterator[None]:
+    """Hold the job's SQLite write lease while one orphan is removed safely."""
+    safe_active_attempt_id = _validate_harmony_attempt_id(active_attempt_id)
+    if active_attempt_id is not None and safe_active_attempt_id is None:
+        raise ValueError("harmony_attempt_id is invalid.")
+    if status not in {"not_started", "processing", "completed", "failed"}:
+        raise ValueError("harmony status is invalid.")
+    if (
+        durable_artifact_file_name is not None
+        and not _is_valid_harmony_artifact_file_name(durable_artifact_file_name)
+    ):
+        raise ValueError("harmony artifact file name is invalid.")
+    expected = (status, durable_artifact_file_name, safe_active_attempt_id)
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT harmony_status, harmony_artifact_file_name, harmony_attempt_id
+            FROM jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+        current = (
+            None
+            if row is None
+            else (
+                row["harmony_status"],
+                row["harmony_artifact_file_name"],
+                row["harmony_attempt_id"],
+            )
+        )
+        if current != expected:
+            raise ValueError("harmony cleanup state changed.")
+        yield
 
 
 def update_harmony_progress(
