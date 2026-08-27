@@ -1,0 +1,219 @@
+<!-- popex-agent-handoff:v1 -->
+```json
+{
+  "schemaVersion": 1,
+  "agent": "Agent 2 – cycle6-harmony-crosslayer-closure owner",
+  "cycle": "cycle-6-independent-audit-closure",
+  "status": "ready_for_review",
+  "branch": "agent/cycle6-harmony-crosslayer-closure",
+  "baseSha": "a6dc2c29a0b7366c2d29826f55f4126afde6dab7",
+  "headSha": "68e6bd69b1094396f24949d74e225e2ba754460b",
+  "pr": 103,
+  "ownedPaths": [
+    "app/harmony_inference.py",
+    "tests/test_harmony_inference.py",
+    "app/harmony_artifacts.py",
+    "tests/test_harmony_artifacts.py",
+    "app/harmony_pipeline.py",
+    "tests/test_harmony_pipeline.py",
+    "app/db.py",
+    "tests/test_db_harmony.py",
+    "app/main.py",
+    "tests/test_harmony_api.py"
+  ],
+  "unauthorizedFilesChanged": false,
+  "ci": {
+    "status": "passed",
+    "run": 378
+  },
+  "mergeRecommendation": "hold"
+}
+```
+
+## Scope
+
+Close issue #102's two Cycle 6 cross-layer blockers and the independently accepted remediation findings without advancing to Cycle 7:
+
+1. preserve each accepted canonical raw pitched-event warning list end-to-end; and
+2. make harmony publication attempt-isolated so a stale or failed worker cannot overwrite, restore over, delete, fail, or hide a newer durable result.
+
+This branch integrates ***PR #99 exact head `a5d1485be1ff073a4d773f1e1c48e6ca794f2d39`*** and ***PR #101 exact head `05ae601388311683b4e0e8251101f8df9433ca85`***, retains merged PR #98 harmony-inference behavior, and is current with exact ***`main@a6dc2c29a0b7366c2d29826f55f4126afde6dab7`***. The current-main delta is PR #100's frontend-only hardening; those frontend blobs are inherited unchanged and ***no frontend file differs in PR #103 versus current main***.
+
+## Files changed
+
+Only the ten issue #102-owned backend/test files differ from current main:
+
+- `app/harmony_inference.py`, `tests/test_harmony_inference.py`
+- `app/harmony_artifacts.py`, `tests/test_harmony_artifacts.py`
+- `app/harmony_pipeline.py`, `tests/test_harmony_pipeline.py`
+- `app/db.py`, `tests/test_db_harmony.py`
+- `app/main.py`, `tests/test_harmony_api.py`
+
+No frontend, dependency, workflow, README, analysis, raw-transcription, interpretation, or unrelated test file is modified.
+
+## Public or integration contract
+
+### Canonical per-event warnings
+
+Canonical raw pitched events accept up to ***128 warnings per event, each up to 500 characters***. Harmony inference and artifact validation now accept that same safe envelope and preserve warning order, duplicates, empty lists, and text exactly while retaining hostile path/URL/credential/control/HTML rejection.
+
+For newly generated harmony the path is:
+
+```
+canonical raw pitched warnings
+… infer_harmony(...).raw_evidence[].warnings
+… schema-1 rawEvidence[].warnings
+… attempt-scoped publication + reload
+… API freshness comparison
+… full details + JSON download
+```
+
+### Genuine legacy schema-1 warning compatibility
+
+For the durable legacy pointer ***`harmony/harmonic-context.json` only***, a `rawEvidence` item that physically lacks the `warnings` field means the old schema-1 artifact did not persist warning provenance. The loader preserves that missingness rather than fabricating `[]`; HTTP freshness compares every other canonical field exactly and may serve the validated legacy artifact even when the current raw has warnings.
+
+An explicitly stored `warnings: []` is different from a missing field. If current raw contains warnings, explicit empty does not match. For every new attempt-scoped artifact, every event must contain an explicit warning array and it must match current raw exactly; a warning-only current-raw mutation invalidates details/download.
+
+### Exact nonce and one-winner claims
+
+Every modern harmony claim receives a durable 32-lowercase-hex `harmony_attempt_id`. Progress, failure, and completion require the exact stored nonce. Omitting `attempt_id` matches only a genuinelegacy processing row whose stored nonce is NULL; omission is not a wildcard for a nonce-bearing attempt.
+
+`force=true` is valid for completed … computation on processing only. A second request while already processing conflicts and schedules no second worker.
+
+### Attempt-scoped publication and processor-isolated isolation
+
+Modern attempts publish only to:
+
+```
+harmony/harmonic-context.<32-lowercase-hex-attempt-id>.json
+```
+
+The durable exposed pointer may be either that strict attempt path or the backward-compatible legacy `harmony/harmonic-context.json`.
+
+`_run_harmony_job()` executes the ***entire injected processor call*** inside `harmony_artifact_scope(expected_artifact_file_name)` while still passing the explicit `attempt_id`. Therefore an injected nonce-agnostic processor that internally calls `write_harmony_artifact(job_id, settings, payload)` without an explicit target is redirected to its own attempt file and cannot overwrite a previous legacy success. Nested scopes restore the outer target, and the ContextVar is reset on normal return and every exception. No guarantee depends on propagation into arbitrary child threads.
+
+The default pipeline still explicitly selects its attempt-scoped filename, so isolation exists at both the generic worker boundary and built-in pipeline boundary.
+
+### Durable pointer promotion and old/new worker interleaving
+
+Only the exact active nonce may promote its matching attempt filename into durable job state. The permanent interleaving regression now uses a legitimate transition:
+
+1. claim old attempt A;
+2. successfully replace the canonical raw-transcription source, invalidating A and returning harmony to a claimable state;
+3. claim newer attempt B;
+4. B publishes and automatically promotes its nonce-matched target;
+5. A finishes late.
+
+The late A worker cannot mutate B's progress/status, promote a pointer, restore over B, delete B, fail B, or hide B. Its own non-durable target is cleaned and the complete durable B record remains unchanged; details/download continue to return B.
+
+### Previous-result availability
+
+A forced computation preserves the prior durable pointer. During computation and after failed/stale retries, summary/details/download continue to expose the prior validated success. Only after a newer success is automatically promoted may the superseded success file be removed best-effort; cleanup failure cannot change the new pointer.
+
+### Post-replace rollback and crash durability
+
+PR #99's exact-byte rollback remains target-scoped. If publication fails after `os.replace`, the writer restores the exact previous bytes or removes a first-unverified publication for that target.
+
+Under the existing platform policy, ***every directory-entry mutation is now followed by directory fsync when supported***:
+
+- recovery replace … directory fsync;
+- first-publication recovery unlink … directory fsync;
+- `_restore_harmony_artifact(previous=None)` unlink … directory fsync.
+
+If the recovery directory sync fails, recovery failure is surfaced instead of reporting safe restoration. Temporary files remain best-effort cleaned. Windows retains the explicit no-directory-fsync policy; that limitation remains a declared residual rather than a stronger durability claim.
+
+### Generic worker orphan reconciliation
+
+Before ***any injected harmony processor*** runs, `_run_harmony_job()` reconciles the harmony directory using the database's durable artifact pointer and the database's exact current active attempt nonce.
+
+It preserves:
+
+- the legacy durable file;
+- the durable current attempt file, if different;
+- the exact live attempt target.
+
+It removes only strict, contained, regular, non-durable, non-active `harmonic-context.<nonce>.json` files. Malformed attempt-looking names, symlinks, non-regular files, directory replacement, containment changes, and path races fail closed. The default pipeline reconciliation remains idempotent.
+
+The repeated crash/restart/retry regression creates multiple pre-promotion attempt files, clears their nonces through restart recovery, then starts a live attempt. At the generic worker boundary the old orphans are reclaimed while the durable previous result and live attempt are preserved; no orphan accumulation survives the next worker execution.
+
+### Legacy canonical path
+
+Existing completed jobs that durably point to `harmony/harmonic-context.json` remain readable and downloadable through the same validation/storage contract. Modern nonce-bound attempts cannot promote that shared legacy filename.
+
+## Validation
+
+### Initial reproduce-first checkpoint
+
+Exact checkpoint head `8332e61dbf21abc4f2861204b263059363e5c23e` "Agent 2 – **CI #354**":
+
+- run ID `3177896670`
+- job ID `94700352332`
+- ***2 failed, 1292 passed, 1 warning***
+- failures proved dropped raw warnings and absence of attempt-scoped publication.
+
+### Independent-remediation red checkpoint
+
+Exact remediation head `d60f05f2d3b8575c78228960e98e0b368acec57a` "Agent 2 – **CI #373**":
+
+- run ID `32098716884`
+- job ID `95594967577`
+- ***2 failed, 1313 passed***
+- the only failures were stale API tests that still expected force-on-processing and constructed two concurrent force winners; production was intentionally not weakened.
+
+Those tests were corrected to require HTTP 409 and a legitimate source-invalidation A→B interleaving.
+
+### Exact final head
+
+***`68e6bd69b1094396f24949d74e225e2ba754460b`***
+
+GitHub Actions ***CI #378***:
+
+- run ID `32104325136`
+- job ID `95610703549`
+- Ubuntu 24.04.4 / CPython 3.13.15
+- `pytest`: ***1326 passed, 1 warning in 48.96s***
+- `python -m compileall -q app tests`: ***passed***
+- `node --check app/static/app.js`: ***passed***
+- existing warning only: Starlette/FastAPI test-client deprecation for future `httpx2` migration
+- existing Actions warning only: Node 20-targeted checkout/setup-python actions are forced to Node 24.
+
+The canonical full test run executes every issue-owned focused suite: `tests/test_harmony_inference.py`, `tests/test_harmony_artifacts.py`, `tests/test_harmony_pipeline.py`, `tests/test_db_harmony.py`, and `tests/test_harmony_api.py`, together with all permanent repository regressions. The repository does not expose a separate targeted-suite Actions workflow, so no unexecuted focused-only job ID is claimed.
+
+Automatic ***Demucs model lifecycle fault validation #66*** on the same exact head:
+
+- run ID `32104325135`
+- job ID `95610703512`
+- ***passed***, including deterministic offline fault characterization, compile, browser-JS check, no-real-model/cache assertion, and cleanup.
+
+The canonical handoff validator is triggered by this PR-body update on the unchanged tested head. Earlier handoff #445 is stale by construction because the body still named the pre-remediation head; it is not final evidence.
+
+## Integration notes
+
+- Original issue #102 base: `1eea32e37c307d531cc4bffaa17da45553fc2ae18`.
+- Exact audited PR #99 head integrated: `a5d1485be1ff073a4d773f1e1c48e6ca794f2d39`.
+- Exact audited PR #101 head integrated: `05ae601388311683b4e0e8251101f8df9433ca85`.
+- Exact current main integrated: `a6dc2c29a0b7366c2d29826f55f4126afde6dab7`.
+- Final compare is ***0 commits behind main*** and contains exactly the ten issue #102-owned files.
+- PR #100 frontend behavior is inherited unchanged; no frontend file appears in this PR's diff versus current main.
+- PR #98 ambiguity behavior, PR #99 rollback safety, and PR #101 freshness/nonce behavior remain covered by permanent regressions.
+- No dependency, workflow, global app lock, retry removal, or Cycle 7 behavior was added.
+
+## Risks and blockers
+
+No known issue #102 closure defect remains on the exact final head; ***merge remains intentionally blocked pending independent re-review by Agents/issues #104, #105, and #106***.
+
+Residual platform/architecture risks:
+
+1. Final CI is real Linux/Ubuntu execution. No real Windows harmony concurrency/crash run was executed.
+2. Windows intentionally skips directory fsync, so crash durability for directory-entry metadata remains weaker there by explicit policy.
+3. No real macOS power-loss/concurrency runner was executed; non-Windows directory-fsync logic is covered functionally but hardware crash behavior is not claimed.
+4. `O_NOFOLLOW`/`O_DIRECTORY` availability varies by platform; containment and regular-file checks remain the portable safety layer.
+5. Earlier issue #95 analysis-artifact same-version identity/hardening residual remains outside issue #102 ownership.
+6. Harmony download validates the durable pointer/path before returning `FileResponse`; a same-user replacement between validation and Starlette opening the path remains a declared TOCTOU residual requiring a broader pinned-descriptor serving contract.
+7. ContextVar isolation is scoped to the current execution context and is not relied on for arbitrary child-thread propagation.
+
+## Final recommendation
+
+`READY FOR INDEPENDENT RE-REVIEW` "hold, draft, unmerged".
+
+Issue #102's accepted closure/remediation findings are repaired on exact head `68e6bd69b1094396f24949d74e225e2ba754460b`, full CI and lifecycle validation are green, and the canonical handoff is being revalidated from this body. Do not merge until #104/#105/#106 independently re-review this exact head. Do not start Cycle 7.
