@@ -572,7 +572,7 @@ def test_rollback_parent_replacement_never_writes_external_files(
     monkeypatch.setattr(module, "_replace_atomic", swap_only_rollback)
     monkeypatch.setattr(module, "_fsync_directory", fail_sync)
 
-    with pytest.raises(HarmonyArtifactError, match="could not be restored safely"):
+    with pytest.raises(HarmonyArtifactError, match="simulated publication sync"):
         write_harmony_artifact(JOB_ID, settings, replacement)
 
     assert replace_calls == 2
