@@ -1688,10 +1688,18 @@ def _descriptor_relative_cleanup_supported() -> bool:
 
 
 def _descriptor_relative_publication_supported() -> bool:
-    """Return whether publication can stay confined to a pinned directory."""
+    """Return whether publication can stay confined to a pinned directory.
+
+    ``os.replace`` is not registered in ``os.supports_dir_fd`` by CPython even
+    though it accepts ``src_dir_fd``/``dst_dir_fd``: it is defined as
+    ``os.replace = os.rename`` in ``Lib/os.py`` and both share
+    ``internal_rename()``, so the renameat-based dir_fd capability is gated by
+    ``HAVE_RENAMEAT`` and registered on ``os.rename`` only. Check the shared
+    primitive instead of the unregistered alias.
+    """
     return (
         _descriptor_relative_cleanup_supported()
-        and os.replace in getattr(os, "supports_dir_fd", set())
+        and os.rename in getattr(os, "supports_dir_fd", set())
         and os.link in getattr(os, "supports_dir_fd", set())
         and os.link in getattr(os, "supports_follow_symlinks", set())
     )
