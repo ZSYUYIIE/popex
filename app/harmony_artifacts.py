@@ -373,10 +373,8 @@ def _publish_harmony_artifact(
                     installed_identity=installed_identity,
                 )
             except HarmonyArtifactError as recovery_exc:
-                raise HarmonyArtifactError(
-                    "Harmonic context publication failed and the previous artifact "
-                    "could not be restored safely."
-                ) from recovery_exc
+                # Preserve the original publication error during rollback
+                raise recovery_exc
         if isinstance(exc, HarmonyArtifactError):
             raise
         raise HarmonyArtifactError(
@@ -613,14 +611,13 @@ def reconcile_harmony_attempt_artifacts(
         candidates: list[tuple[str, HarmonyFileSnapshot]] = []
         unsafe = False
         for name in names:
-            if not isinstance(name, str) or name in protected or name.startswith("."):
+            if not isinstance(name, str) or name.startswith("."):
                 continue
             if not name.startswith("harmonic-context."):
                 continue
-            relative = f"harmony/{name}"
-            if not _ATTEMPT_ARTIFACT.fullmatch(relative):
-                unsafe = True
-                continue
+            
+            # First, check if this is a regular file. This catches symlinks and
+            # other non-regular files regardless of whether they're protected.
             try:
                 file_snapshot = _relative_regular_file_snapshot(descriptor, name)
             except HarmonyArtifactError:
@@ -628,7 +625,23 @@ def reconcile_harmony_attempt_artifacts(
                 continue
             if file_snapshot is None:
                 continue
+            if not stat.S_ISREG(file_snapshot[2]):
+                unsafe = True
+                continue
+            
+            # Protected files (active attempt, durable artifact) are validated
+            # but not removed. They will be protected by state checks.
+            if name in protected:
+                continue
+            
+            # Only attempt artifacts need to match the regex
+            relative = f"harmony/{name}"
+            if not _ATTEMPT_ARTIFACT.fullmatch(relative):
+                unsafe = True
+                continue
+            
             candidates.append((name, file_snapshot))
+        
         if unsafe:
             raise HarmonyArtifactError(
                 "Harmony attempt artifacts could not be reconciled safely."
@@ -636,6 +649,8 @@ def reconcile_harmony_attempt_artifacts(
 
         removed = 0
         for name, file_snapshot in candidates:
+            # Revalidate protection state before each removal
+            authorize_cleanup()
             try:
                 with cleanup_lease():
                     if _remove_published_artifact(
@@ -656,6 +671,7 @@ def reconcile_harmony_attempt_artifacts(
                     "Harmony cleanup protection state could not be verified."
                 ) from exc
 
+        # Final state validation
         authorize_cleanup()
         _assert_cleanup_directory_current(
             descriptor,
