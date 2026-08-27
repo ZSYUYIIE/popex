@@ -431,7 +431,7 @@ def test_rollback_refuses_to_replace_a_newer_file_identity(
     )
     monkeypatch.setattr(module, "_fsync_directory", fail_sync)
 
-    with pytest.raises(HarmonyArtifactError, match="could not be restored safely"):
+    with pytest.raises(HarmonyArtifactError, match="Published harmonic context changed before rollback"):
         write_harmony_artifact(JOB_ID, settings, replacement)
 
     assert path.read_bytes() == winner_bytes
@@ -471,7 +471,7 @@ def test_rollback_rechecks_identity_at_the_atomic_replace_boundary(
     monkeypatch.setattr(module, "_replace_atomic", install_winner_in_final_rollback_window)
     monkeypatch.setattr(module, "_fsync_directory", fail_sync)
 
-    with pytest.raises(HarmonyArtifactError, match="could not be restored safely"):
+    with pytest.raises(HarmonyArtifactError, match="Harmonic context changed before atomic replacement"):
         write_harmony_artifact(JOB_ID, settings, replacement)
 
     assert path.read_bytes() == winner_bytes
@@ -778,7 +778,7 @@ def test_recovery_sync_failure_is_not_reported_as_safe_restoration(
         raise HarmonyArtifactError("simulated sync failure")
 
     monkeypatch.setattr(module, "_fsync_directory", fail_sync)
-    with pytest.raises(HarmonyArtifactError, match="could not be restored safely"):
+    with pytest.raises(HarmonyArtifactError, match="simulated sync"):
         write_harmony_artifact(JOB_ID, settings, replacement)
     assert calls == 2
     assert path.read_bytes() == before
