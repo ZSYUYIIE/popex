@@ -373,8 +373,10 @@ def _publish_harmony_artifact(
                     installed_identity=installed_identity,
                 )
             except HarmonyArtifactError as recovery_exc:
-                # Preserve the original publication error during rollback
-                raise recovery_exc
+                raise HarmonyArtifactError(
+                    "Harmonic context publication failed and the previous artifact "
+                    "could not be restored safely."
+                ) from recovery_exc
         if isinstance(exc, HarmonyArtifactError):
             raise
         raise HarmonyArtifactError(
