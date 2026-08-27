@@ -24,7 +24,6 @@ from app.harmony_artifacts import (
     build_harmony_artifact,
     harmony_attempt_artifact_file_name,
     load_harmony_artifact,
-    reconcile_harmony_attempt_artifacts,
     write_harmony_artifact,
 )
 from app.harmony_inference import (
@@ -304,6 +303,7 @@ def _reconcile_non_durable_attempts(
         )
 
     try:
+        from app.harmony_artifacts import reconcile_harmony_attempt_artifacts
         reconcile_harmony_attempt_artifacts(
             job_id,
             settings,
