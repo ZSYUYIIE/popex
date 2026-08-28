@@ -3,10 +3,16 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
+import stat
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from pathlib import Path
+from threading import Barrier, Event
 
 import pytest
 
+import app.harmony_artifacts as harmony_artifacts_module
 from app.config import Settings
 from app.harmony_artifacts import (
     HARMONY_ARTIFACT_RELATIVE_PATH,
@@ -16,7 +22,10 @@ from app.harmony_artifacts import (
     HarmonyArtifactValidationError,
     build_harmony_artifact,
     harmony_artifact_path,
+    harmony_artifact_scope,
+    harmony_attempt_artifact_file_name,
     load_harmony_artifact,
+    reconcile_harmony_attempt_artifacts,
     validate_harmony_artifact,
     write_harmony_artifact,
 )
@@ -246,6 +255,427 @@ def test_invalid_replacement_does_not_touch_previous_artifact(
     assert path.read_bytes() == before
 
 
+def test_attempt_publication_is_idempotent_and_never_replaces_content(
+    settings: Settings,
+) -> None:
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    payload = artifact_payload()
+    path = write_harmony_artifact(
+        JOB_ID,
+        settings,
+        payload,
+        artifact_file_name=target,
+    )
+    before = path.read_bytes()
+    before_info = path.stat()
+
+    repeated = write_harmony_artifact(
+        JOB_ID,
+        settings,
+        copy.deepcopy(payload),
+        artifact_file_name=target,
+    )
+
+    assert repeated == path
+    assert path.read_bytes() == before
+    assert (path.stat().st_dev, path.stat().st_ino) == (
+        before_info.st_dev,
+        before_info.st_ino,
+    )
+
+    different = artifact_payload()
+    different["harmonyVersion"] = "harmonic-context-v2"
+    with pytest.raises(HarmonyArtifactError, match="different content"):
+        write_harmony_artifact(
+            JOB_ID,
+            settings,
+            different,
+            artifact_file_name=target,
+        )
+    assert path.read_bytes() == before
+    assert (path.stat().st_dev, path.stat().st_ino) == (
+        before_info.st_dev,
+        before_info.st_ino,
+    )
+
+
+def test_idempotent_attempt_winner_survives_first_publishers_sync_failure(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    payload = artifact_payload()
+    sync_entered = Event()
+    release_sync = Event()
+    sync_calls = 0
+    real_sync = module._fsync_directory
+
+    def fail_only_first_install(directory: Path) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls == 1:
+            sync_entered.set()
+            assert release_sync.wait(5)
+            raise HarmonyArtifactError("simulated post-link durability failure")
+        real_sync(directory)
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_only_first_install)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(
+            write_harmony_artifact,
+            JOB_ID,
+            settings,
+            payload,
+            artifact_file_name=target,
+        )
+        assert sync_entered.wait(5)
+        try:
+            winner = write_harmony_artifact(
+                JOB_ID,
+                settings,
+                copy.deepcopy(payload),
+                artifact_file_name=target,
+            )
+            winner_bytes = winner.read_bytes()
+        finally:
+            release_sync.set()
+        with pytest.raises(HarmonyArtifactError, match="post-link durability"):
+            first.result(timeout=5)
+
+    assert winner.is_file()
+    assert sync_calls == 2
+    assert winner.read_bytes() == winner_bytes
+    assert load_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_file_name=target,
+    ) == payload
+
+
+def test_concurrent_attempt_publications_cannot_overwrite_each_other(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    first_payload = artifact_payload()
+    second_payload = artifact_payload()
+    second_payload["harmonyVersion"] = "harmonic-context-v2"
+    publication_barrier = Barrier(2)
+    real_link = module._link_atomic
+
+    def synchronized_link(source: Path, destination: Path) -> None:
+        publication_barrier.wait()
+        real_link(source, destination)
+
+    def publish(payload: dict) -> tuple[str, object]:
+        try:
+            return (
+                "published",
+                write_harmony_artifact(
+                    JOB_ID,
+                    settings,
+                    payload,
+                    artifact_file_name=target,
+                ),
+            )
+        except HarmonyArtifactError as exc:
+            return "conflict", exc
+
+    monkeypatch.setattr(module, "_link_atomic", synchronized_link)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(publish, (first_payload, second_payload)))
+
+    assert [status for status, _value in results].count("published") == 1
+    assert [status for status, _value in results].count("conflict") == 1
+    stored = load_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_file_name=target,
+    )
+    assert stored in (first_payload, second_payload)
+
+
+def test_rollback_refuses_to_replace_a_newer_file_identity(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+    winner = artifact_payload()
+    winner["harmonyVersion"] = "harmonic-context-v3"
+    winner_bytes = module._encoded_payload(
+        module.validate_harmony_artifact(winner)
+    )
+    real_restore = module._restore_publication_state
+
+    def install_winner_before_rollback(destination, *args, **kwargs):
+        concurrent = destination.with_name(f".{destination.name}.winner.tmp")
+        concurrent.write_bytes(winner_bytes)
+        os.replace(concurrent, destination)
+        return real_restore(destination, *args, **kwargs)
+
+    def fail_sync(_directory: Path) -> None:
+        raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(
+        module,
+        "_restore_publication_state",
+        install_winner_before_rollback,
+    )
+    monkeypatch.setattr(module, "_fsync_directory", fail_sync)
+
+    with pytest.raises(HarmonyArtifactError, match="Published harmonic context changed before rollback"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+
+    assert path.read_bytes() == winner_bytes
+
+
+def test_rollback_rechecks_identity_at_the_atomic_replace_boundary(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+    winner = artifact_payload()
+    winner["harmonyVersion"] = "harmonic-context-v3"
+    winner_bytes = module._encoded_payload(
+        module.validate_harmony_artifact(winner)
+    )
+    real_replace = module._replace_atomic
+
+    def install_winner_in_final_rollback_window(
+        source: Path,
+        destination: Path,
+    ) -> None:
+        if source.name.endswith(".restore.tmp"):
+            concurrent = destination.with_name(
+                f".{destination.name}.winner-window.tmp"
+            )
+            concurrent.write_bytes(winner_bytes)
+            os.replace(concurrent, destination)
+        real_replace(source, destination)
+
+    def fail_sync(_directory: Path) -> None:
+        raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(module, "_replace_atomic", install_winner_in_final_rollback_window)
+    monkeypatch.setattr(module, "_fsync_directory", fail_sync)
+
+    with pytest.raises(HarmonyArtifactError, match="Harmonic context changed before atomic replacement"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+
+    assert path.read_bytes() == winner_bytes
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="requires POSIX rename and symlink semantics",
+)
+def test_publication_parent_replacement_never_writes_external_files(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    if not module._descriptor_relative_publication_supported():
+        pytest.skip("descriptor-relative publication is unavailable")
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+    directory = path.parent
+    moved_directory = directory.with_name("harmony-before-publication-swap")
+    outside = tmp_path / "outside-publication"
+    outside.mkdir()
+    outside_target = outside / path.name
+    outside_target.write_text("external destination sentinel", encoding="utf-8")
+    outside_temporary: Path | None = None
+    real_replace = module._replace_atomic
+
+    def swap_parent_then_replace(source: Path, destination: Path) -> None:
+        nonlocal outside_temporary
+        destination.parent.rename(moved_directory)
+        destination.parent.symlink_to(outside, target_is_directory=True)
+        outside_temporary = outside / source.name
+        outside_temporary.write_text("external temporary sentinel", encoding="utf-8")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(module, "_replace_atomic", swap_parent_then_replace)
+
+    with pytest.raises(HarmonyArtifactError):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+
+    assert outside_target.read_text(encoding="utf-8") == (
+        "external destination sentinel"
+    )
+    assert outside_temporary is not None
+    assert outside_temporary.read_text(encoding="utf-8") == (
+        "external temporary sentinel"
+    )
+    assert (moved_directory / path.name).read_bytes() == before
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="requires POSIX rename and symlink semantics",
+)
+def test_rollback_parent_replacement_never_writes_external_files(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    if not module._descriptor_relative_publication_supported():
+        pytest.skip("descriptor-relative publication is unavailable")
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+    directory = path.parent
+    moved_directory = directory.with_name("harmony-before-rollback-swap")
+    outside = tmp_path / "outside-rollback"
+    outside.mkdir()
+    outside_target = outside / path.name
+    outside_target.write_text("external destination sentinel", encoding="utf-8")
+    outside_temporary: Path | None = None
+    replace_calls = 0
+    real_replace = module._replace_atomic
+
+    def swap_only_rollback(source: Path, destination: Path) -> None:
+        nonlocal outside_temporary, replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            destination.parent.rename(moved_directory)
+            destination.parent.symlink_to(outside, target_is_directory=True)
+            outside_temporary = outside / source.name
+            outside_temporary.write_text(
+                "external restoration sentinel",
+                encoding="utf-8",
+            )
+        real_replace(source, destination)
+
+    def fail_sync(_directory: Path) -> None:
+        raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(module, "_replace_atomic", swap_only_rollback)
+    monkeypatch.setattr(module, "_fsync_directory", fail_sync)
+
+    with pytest.raises(HarmonyArtifactError, match="simulated publication sync"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+
+    assert replace_calls == 2
+    assert outside_target.read_text(encoding="utf-8") == (
+        "external destination sentinel"
+    )
+    assert outside_temporary is not None
+    assert outside_temporary.read_text(encoding="utf-8") == (
+        "external restoration sentinel"
+    )
+    assert (moved_directory / path.name).read_bytes() == before
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="requires POSIX descriptor-relative publication",
+)
+def test_post_replace_parent_swap_restores_the_pinned_previous_artifact(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    if not module._descriptor_relative_publication_supported():
+        pytest.skip("descriptor-relative publication is unavailable")
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+    directory = path.parent
+    moved_directory = directory.with_name("harmony-after-replace-swap")
+    outside = tmp_path / "outside-after-replace"
+    outside.mkdir()
+    outside_target = outside / path.name
+    outside_target.write_text("external destination sentinel", encoding="utf-8")
+    real_replace = module.os.replace
+    swapped = False
+
+    def replace_then_swap(source, destination, *args, **kwargs):
+        nonlocal swapped
+        result = real_replace(source, destination, *args, **kwargs)
+        if not swapped and destination == path.name:
+            directory.rename(moved_directory)
+            directory.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(module.os, "replace", replace_then_swap)
+
+    with pytest.raises(HarmonyArtifactError):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+
+    assert swapped is True
+    assert outside_target.read_text(encoding="utf-8") == (
+        "external destination sentinel"
+    )
+    assert (moved_directory / path.name).read_bytes() == before
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="requires POSIX descriptor-relative publication",
+)
+def test_post_replace_parent_swap_removes_first_publication_from_pinned_directory(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    if not module._descriptor_relative_publication_supported():
+        pytest.skip("descriptor-relative publication is unavailable")
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    moved_directory = directory.with_name("harmony-first-publication-swap")
+    outside = tmp_path / "outside-first-publication"
+    outside.mkdir()
+    outside_target = outside / "harmonic-context.json"
+    outside_target.write_text("external destination sentinel", encoding="utf-8")
+    real_replace = module.os.replace
+    swapped = False
+
+    def replace_then_swap(source, destination, *args, **kwargs):
+        nonlocal swapped
+        result = real_replace(source, destination, *args, **kwargs)
+        if not swapped and destination == "harmonic-context.json":
+            directory.rename(moved_directory)
+            directory.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(module.os, "replace", replace_then_swap)
+
+    with pytest.raises(HarmonyArtifactError):
+        write_harmony_artifact(JOB_ID, settings, artifact_payload())
+
+    assert swapped is True
+    assert outside_target.read_text(encoding="utf-8") == (
+        "external destination sentinel"
+    )
+    assert not (moved_directory / "harmonic-context.json").exists()
+
+
 def test_pre_replace_failure_preserves_previous_artifact(
     settings: Settings,
     monkeypatch: pytest.MonkeyPatch,
@@ -264,7 +694,161 @@ def test_pre_replace_failure_preserves_previous_artifact(
     with pytest.raises(HarmonyArtifactError, match="simulated"):
         write_harmony_artifact(JOB_ID, settings, replacement)
     assert path.read_bytes() == before
+    temporary_files = list(path.parent.glob(".*.tmp"))
+    assert bool(temporary_files) is (
+        not module._descriptor_relative_cleanup_supported()
+    )
+
+
+def test_post_replace_failure_restores_previous_and_syncs_recovery(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+
+    import app.harmony_artifacts as module
+
+    calls: list[Path] = []
+
+    def fail_then_succeed(directory: Path) -> None:
+        calls.append(directory)
+        if len(calls) == 1:
+            raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_then_succeed)
+    with pytest.raises(HarmonyArtifactError, match="publication sync"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+    assert len(calls) == 2
+    assert path.read_bytes() == before
     assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_first_publication_sync_failure_removes_and_syncs_recovery(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = settings.exports_dir / JOB_ID / HARMONY_ARTIFACT_RELATIVE_PATH
+    calls: list[Path] = []
+    descriptor_calls: list[int] = []
+
+    def fail_then_succeed(directory: Path) -> None:
+        calls.append(directory)
+        if len(calls) == 1:
+            raise HarmonyArtifactError("simulated publication sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_then_succeed)
+    monkeypatch.setattr(
+        module,
+        "_fsync_directory_descriptor",
+        descriptor_calls.append,
+    )
+    cleanup_supported = module._descriptor_relative_cleanup_supported()
+    expected_error = (
+        "publication sync" if cleanup_supported else "could not be restored safely"
+    )
+    with pytest.raises(HarmonyArtifactError, match=expected_error):
+        write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    assert len(calls) == 1
+    assert len(descriptor_calls) == int(cleanup_supported)
+    assert target.exists() is (not cleanup_supported)
+    assert not list(target.parent.glob(".*.tmp"))
+
+
+def test_recovery_sync_failure_is_not_reported_as_safe_restoration(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    before = path.read_bytes()
+    replacement = artifact_payload()
+    replacement["harmonyVersion"] = "harmonic-context-v2"
+
+    import app.harmony_artifacts as module
+
+    calls = 0
+
+    def fail_sync(_directory: Path) -> None:
+        nonlocal calls
+        calls += 1
+        raise HarmonyArtifactError("simulated sync failure")
+
+    monkeypatch.setattr(module, "_fsync_directory", fail_sync)
+    with pytest.raises(HarmonyArtifactError, match="simulated sync"):
+        write_harmony_artifact(JOB_ID, settings, replacement)
+    assert calls == 2
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_restore_none_removal_syncs_directory(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    path = write_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_payload(),
+        artifact_file_name=target,
+    )
+    descriptor_calls: list[int] = []
+    monkeypatch.setattr(
+        module,
+        "_fsync_directory_descriptor",
+        descriptor_calls.append,
+    )
+    module._restore_harmony_artifact(
+        JOB_ID,
+        settings,
+        None,
+        artifact_file_name=target,
+    )
+    cleanup_supported = module._descriptor_relative_cleanup_supported()
+    assert path.exists() is (not cleanup_supported)
+    assert len(descriptor_calls) == int(cleanup_supported)
+
+
+def test_windows_directory_sync_policy_is_explicitly_noop(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    monkeypatch.setattr(module, "_directory_fsync_supported", lambda: False)
+
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("Windows policy must not open a directory descriptor")
+
+    monkeypatch.setattr(module.os, "open", unexpected_open)
+    module._fsync_directory(settings.exports_dir / JOB_ID)
+
+
+def test_artifact_scope_is_nested_and_resets_after_exception(settings: Settings) -> None:
+    outer = harmony_attempt_artifact_file_name("a" * 32)
+    inner = harmony_attempt_artifact_file_name("b" * 32)
+
+    with harmony_artifact_scope(outer):
+        outer_path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+        with harmony_artifact_scope(inner):
+            inner_path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+        outer_again = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+
+    assert outer_path.name == Path(outer).name
+    assert inner_path.name == Path(inner).name
+    assert outer_again == outer_path
+
+    with pytest.raises(RuntimeError, match="scope reset"):
+        with harmony_artifact_scope(outer):
+            raise RuntimeError("scope reset")
+    legacy_path = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    assert legacy_path.name == "harmonic-context.json"
 
 
 def test_corrupt_json_and_schema_are_not_exposed(settings: Settings) -> None:
@@ -379,6 +963,341 @@ def test_duplicate_and_inconsistent_raw_evidence_is_rejected() -> None:
     payload["rawEvidence"][0]["pitchName"] = "H"
     with pytest.raises(HarmonyArtifactValidationError, match="pitchName"):
         validate_harmony_artifact(payload)
+
+
+def test_raw_evidence_warning_bounds_match_canonical_raw_contract() -> None:
+    payload = artifact_payload()
+    warnings = [f"Review warning {index}." for index in range(128)]
+    warnings[8] = "x" * 500
+    payload["rawEvidence"][0]["warnings"] = warnings
+    validated = validate_harmony_artifact(payload)
+    assert validated["rawEvidence"][0]["warnings"] == warnings
+
+    payload["rawEvidence"][0]["warnings"] = warnings + ["overflow"]
+    with pytest.raises(HarmonyArtifactValidationError, match="too many warnings"):
+        validate_harmony_artifact(payload)
+
+    payload = artifact_payload()
+    payload["rawEvidence"][0]["warnings"] = ["x" * 501]
+    with pytest.raises(HarmonyArtifactValidationError):
+        validate_harmony_artifact(payload)
+
+
+def test_legacy_missing_raw_warning_field_preserves_missingness() -> None:
+    payload = artifact_payload()
+    payload["rawEvidence"][0].pop("warnings")
+    validated = validate_harmony_artifact(payload)
+    assert "warnings" not in validated["rawEvidence"][0]
+    assert validated["rawEvidence"][1]["warnings"] == []
+
+
+def test_attempt_scoped_artifact_requires_explicit_warning_fields(settings: Settings) -> None:
+    payload = artifact_payload()
+    payload["rawEvidence"][0].pop("warnings")
+    legacy_path = write_harmony_artifact(JOB_ID, settings, payload)
+    legacy = load_harmony_artifact(JOB_ID, settings)
+    assert legacy_path.name == "harmonic-context.json"
+    assert legacy is not None and "warnings" not in legacy["rawEvidence"][0]
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    with pytest.raises(HarmonyArtifactValidationError, match="explicit warning"):
+        write_harmony_artifact(
+            JOB_ID,
+            settings,
+            payload,
+            artifact_file_name=target,
+        )
+
+
+def test_reconcile_removes_only_non_durable_non_active_attempt_files(
+    settings: Settings,
+) -> None:
+    if not harmony_artifacts_module._descriptor_relative_cleanup_supported():
+        pytest.skip("descriptor-relative cleanup is unavailable")
+    legacy = write_harmony_artifact(JOB_ID, settings, artifact_payload())
+    durable_name = harmony_attempt_artifact_file_name("a" * 32)
+    active_name = harmony_attempt_artifact_file_name("b" * 32)
+    orphan_one = harmony_attempt_artifact_file_name("c" * 32)
+    orphan_two = harmony_attempt_artifact_file_name("e" * 32)
+    for target in (durable_name, active_name, orphan_one, orphan_two):
+        write_harmony_artifact(
+            JOB_ID,
+            settings,
+            artifact_payload(),
+            artifact_file_name=target,
+        )
+
+    removed = reconcile_harmony_attempt_artifacts(
+        JOB_ID,
+        settings,
+        durable_artifact_file_name=durable_name,
+        active_attempt_id="b" * 32,
+        protection_state_reader=lambda: (
+            "processing",
+            durable_name,
+            "b" * 32,
+        ),
+        cleanup_lease=lambda: nullcontext(),
+    )
+    directory = legacy.parent
+    assert removed == 2
+    assert legacy.exists()
+    assert (directory / Path(durable_name).name).exists()
+    assert (directory / Path(active_name).name).exists()
+    assert not (directory / Path(orphan_one).name).exists()
+    assert not (directory / Path(orphan_two).name).exists()
+
+
+def test_reconcile_malformed_or_symlink_candidate_fails_closed(
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    if not harmony_artifacts_module._descriptor_relative_cleanup_supported():
+        pytest.skip("descriptor-relative cleanup is unavailable")
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    directory.mkdir()
+    valid_orphan = directory / f"harmonic-context.{'a' * 32}.json"
+    valid_orphan.write_text("leave me too", encoding="utf-8")
+    malformed = directory / "harmonic-context.not-a-nonce.json"
+    malformed.write_text("leave me", encoding="utf-8")
+    state_reader = lambda: ("processing", None, "f" * 32)
+    with pytest.raises(HarmonyArtifactError, match="reconciled"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id="f" * 32,
+            protection_state_reader=state_reader,
+            cleanup_lease=lambda: nullcontext(),
+        )
+    assert malformed.read_text(encoding="utf-8") == "leave me"
+    assert valid_orphan.read_text(encoding="utf-8") == "leave me too"
+
+    malformed.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text("outside", encoding="utf-8")
+    candidate = directory / f"harmonic-context.{'f' * 32}.json"
+    try:
+        candidate.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(HarmonyArtifactError, match="reconciled"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id="f" * 32,
+            protection_state_reader=state_reader,
+            cleanup_lease=lambda: nullcontext(),
+        )
+    assert candidate.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "outside"
+    assert valid_orphan.read_text(encoding="utf-8") == "leave me too"
+
+
+def test_reconcile_skips_cleanup_without_descriptor_relative_support(
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    path = write_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_payload(),
+        artifact_file_name=target,
+    )
+    monkeypatch.setattr(
+        harmony_artifacts_module,
+        "_descriptor_relative_cleanup_supported",
+        lambda: False,
+    )
+
+    def forbidden_remove(*_args, **_kwargs):
+        raise AssertionError("lexical cleanup fallback must not run")
+
+    monkeypatch.setattr(
+        harmony_artifacts_module,
+        "_remove_published_artifact",
+        forbidden_remove,
+    )
+    state_reads = 0
+
+    def state_reader():
+        nonlocal state_reads
+        state_reads += 1
+        return "processing", None, "b" * 32
+
+    removed = reconcile_harmony_attempt_artifacts(
+        JOB_ID,
+        settings,
+        durable_artifact_file_name=None,
+        active_attempt_id="b" * 32,
+        protection_state_reader=state_reader,
+    )
+
+    assert removed == 0
+    assert state_reads == 1
+    assert path.is_file()
+    harmony_artifacts_module.remove_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_file_name=target,
+    )
+    assert path.is_file()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX special files")
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_reconcile_non_regular_candidate_fails_before_deleting_peer(
+    settings: Settings,
+    kind: str,
+) -> None:
+    if not harmony_artifacts_module._descriptor_relative_cleanup_supported():
+        pytest.skip("descriptor-relative cleanup is unavailable")
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    directory.mkdir()
+    valid = directory / f"harmonic-context.{'a' * 32}.json"
+    valid.write_text("keep", encoding="utf-8")
+    unsafe = directory / f"harmonic-context.{'c' * 32}.json"
+    if kind == "directory":
+        unsafe.mkdir()
+    else:
+        os.mkfifo(unsafe)
+
+    with pytest.raises(HarmonyArtifactError, match="reconciled"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id="f" * 32,
+            protection_state_reader=lambda: ("processing", None, "f" * 32),
+            cleanup_lease=lambda: nullcontext(),
+        )
+
+    assert valid.read_text(encoding="utf-8") == "keep"
+    assert unsafe.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX device nodes")
+def test_reconcile_device_candidate_fails_before_deleting_peer(
+    settings: Settings,
+) -> None:
+    if not harmony_artifacts_module._descriptor_relative_cleanup_supported():
+        pytest.skip("descriptor-relative cleanup is unavailable")
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    directory.mkdir()
+    valid = directory / f"harmonic-context.{'a' * 32}.json"
+    valid.write_text("keep", encoding="utf-8")
+    unsafe = directory / f"harmonic-context.{'c' * 32}.json"
+    try:
+        os.mknod(unsafe, 0o600 | stat.S_IFCHR, os.makedev(1, 3))
+    except (AttributeError, OSError, PermissionError):
+        pytest.skip("device-node creation is unavailable")
+
+    with pytest.raises(HarmonyArtifactError, match="reconciled"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id="f" * 32,
+            protection_state_reader=lambda: ("processing", None, "f" * 32),
+            cleanup_lease=lambda: nullcontext(),
+        )
+
+    assert valid.read_text(encoding="utf-8") == "keep"
+    assert unsafe.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX descriptor cleanup")
+def test_reconcile_rechecks_protection_state_for_each_deletion(
+    settings: Settings,
+) -> None:
+    if not harmony_artifacts_module._descriptor_relative_cleanup_supported():
+        pytest.skip("descriptor-relative cleanup is unavailable")
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    path = write_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_payload(),
+        artifact_file_name=target,
+    )
+    reads = 0
+
+    def state_reader():
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return "processing", None, "b" * 32
+        return "completed", target, None
+
+    with pytest.raises(HarmonyArtifactError, match="protection state changed"):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id="b" * 32,
+            protection_state_reader=state_reader,
+            cleanup_lease=lambda: nullcontext(),
+        )
+
+    assert reads == 2
+    assert path.is_file()
+
+
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="requires POSIX rename and symlink semantics",
+)
+def test_reconcile_parent_replacement_never_unlinks_external_file(
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.harmony_artifacts as module
+
+    target = harmony_attempt_artifact_file_name("a" * 32)
+    write_harmony_artifact(
+        JOB_ID,
+        settings,
+        artifact_payload(),
+        artifact_file_name=target,
+    )
+    directory = settings.exports_dir / JOB_ID / "harmony"
+    moved_directory = settings.exports_dir / JOB_ID / "harmony-before-swap"
+    outside = tmp_path / "outside-harmony"
+    outside.mkdir()
+    outside_target = outside / Path(target).name
+    outside_target.write_text("external sentinel", encoding="utf-8")
+    original_remove = module._remove_published_artifact
+    swapped = False
+
+    def swap_parent_then_remove(path, expected_directory, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            expected_directory.rename(moved_directory)
+            expected_directory.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_remove(path, expected_directory, **kwargs)
+
+    monkeypatch.setattr(
+        module,
+        "_remove_published_artifact",
+        swap_parent_then_remove,
+    )
+
+    with pytest.raises(HarmonyArtifactError):
+        reconcile_harmony_attempt_artifacts(
+            JOB_ID,
+            settings,
+            durable_artifact_file_name=None,
+            active_attempt_id="b" * 32,
+            protection_state_reader=lambda: ("processing", None, "b" * 32),
+            cleanup_lease=lambda: nullcontext(),
+        )
+
+    assert swapped is True
+    assert outside_target.read_text(encoding="utf-8") == "external sentinel"
+    assert (moved_directory / Path(target).name).is_file()
 
 
 def test_segment_references_and_derived_sources_are_verified() -> None:
@@ -529,6 +1448,9 @@ def test_json_nan_constants_are_rejected_on_load(settings: Settings) -> None:
         lambda payload: payload["warnings"].append("debug at /home/user/private.json"),
         lambda payload: payload["warnings"].append("<script>alert(1)</script>"),
         lambda payload: payload["warnings"].append("api_key=private-value"),
+        lambda payload: payload["rawEvidence"][0].update(
+            warnings=["api_key=private-value"]
+        ),
         lambda payload: payload["segments"][0]["primaryCandidate"].update(
             symbol="https://bad.invalid/chord"
         ),

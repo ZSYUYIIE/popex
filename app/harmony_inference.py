@@ -75,8 +75,8 @@ _MAX_EVENTS = 100_000
 _MAX_WINDOWS = 20_000
 _MAX_ALTERNATIVES = 3
 _MAX_WARNINGS = 32
-_MAX_EVENT_WARNINGS = 8
-_MAX_WARNING_LENGTH = 240
+_MAX_EVENT_WARNINGS = 128
+_MAX_WARNING_LENGTH = 500
 _MAX_ASSIGNMENTS = 100_000
 _FALLBACK_WINDOW_SECONDS = 1.0
 _MIN_BEAT_CONFIDENCE = 0.25
@@ -115,6 +115,7 @@ class _Event:
     midi_note: int
     midi_pitch: float
     confidence: float
+    warnings: tuple[str, ...]
 
     @property
     def pitch_class(self) -> int:
@@ -265,6 +266,7 @@ def _raw_event_payload(event: _Event) -> dict[str, Any]:
         "pitchClass": event.pitch_class,
         "pitchName": PITCH_CLASS_NAMES[event.pitch_class],
         "confidence": event.confidence,
+        "warnings": list(event.warnings),
     }
 
 
@@ -296,7 +298,7 @@ def _parse_events(values: object) -> tuple[_Event, ...]:
                 f"{label} fractional pitch is inconsistent with midiNote."
             )
         confidence = _confidence(value.get("confidence"), f"{label} confidence")
-        _validate_warnings(value.get("warnings", []), f"{label} warnings")
+        warnings = _validate_warnings(value.get("warnings", []), f"{label} warnings")
         events.append(
             _Event(
                 event_id=event_id,
@@ -306,6 +308,7 @@ def _parse_events(values: object) -> tuple[_Event, ...]:
                 midi_note=midi_note,
                 midi_pitch=midi_pitch,
                 confidence=confidence,
+                warnings=warnings,
             )
         )
     events.sort(key=lambda event: (event.start, event.end, event.event_id))
@@ -878,13 +881,14 @@ def _confidence(value: object, label: str) -> float:
     return number
 
 
-def _validate_warnings(value: object, label: str) -> None:
+def _validate_warnings(value: object, label: str) -> tuple[str, ...]:
     if value is None:
-        return
+        return ()
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         raise HarmonyInferenceError(f"{label} must be an array.")
     if len(value) > _MAX_EVENT_WARNINGS:
         raise HarmonyInferenceError(f"{label} contains too many warnings.")
+    output: list[str] = []
     for warning in value:
         if (
             not isinstance(warning, str)
@@ -897,6 +901,8 @@ def _validate_warnings(value: object, label: str) -> None:
             or any(ord(character) < 32 or ord(character) == 127 for character in warning)
         ):
             raise HarmonyInferenceError(f"{label} contains unsafe text.")
+        output.append(warning)
+    return tuple(output)
 
 
 def _append_warning(warnings: list[str], warning: str) -> None:

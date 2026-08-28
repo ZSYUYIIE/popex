@@ -6,7 +6,9 @@ import math
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -45,6 +47,7 @@ _PITCH_CLASS_NAMES = (
 )
 
 _JOB_ID = re.compile(r"[a-f0-9]{32}")
+_ATTEMPT_ARTIFACT = re.compile(r"harmony/harmonic-context\.([a-f0-9]{32})\.json")
 _ID = re.compile(r"[a-z][a-z0-9_-]{0,95}")
 _SLUG = re.compile(r"[a-z0-9][a-z0-9_-]{0,95}")
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}")
@@ -61,6 +64,7 @@ _SECRET = re.compile(
 
 _MAX_ARTIFACT_BYTES = 24 * 1024 * 1024
 _MAX_RAW_EVENTS = 100_000
+_MAX_RAW_EVENT_WARNINGS = 128
 _MAX_SEGMENTS = 20_000
 _MAX_ALTERNATIVES = 16
 _MAX_REFERENCES = 100_000
@@ -69,6 +73,10 @@ _MAX_WARNING_LENGTH = 500
 _MAX_TEXT_LENGTH = 512
 _MAX_ALGORITHMS = 128
 _MAX_VOCABULARY = 128
+_ARTIFACT_SCOPE: ContextVar[str | None] = ContextVar(
+    "harmony_artifact_scope",
+    default=None,
+)
 
 
 class HarmonyArtifactError(RuntimeError):
@@ -81,6 +89,52 @@ class HarmonyArtifactValidationError(HarmonyArtifactError, ValueError):
 
 class HarmonyArtifactUnavailableError(HarmonyArtifactError):
     """Raised when no canonical harmonic-context artifact is available."""
+
+
+HarmonyProtectionState = tuple[str, str | None, str | None]
+HarmonyProtectionStateReader = Callable[[], HarmonyProtectionState | None]
+HarmonyCleanupAuthorizer = Callable[[], None]
+HarmonyCleanupLease = Callable[[], AbstractContextManager[None]]
+HarmonyDirectorySnapshot = tuple[int, int, int]
+HarmonyFileSnapshot = tuple[int, int, int, int, int, int]
+HarmonyFileIdentity = tuple[int, int, int]
+HarmonyPublicationContext = tuple[
+    int,
+    Path,
+    Path,
+    HarmonyDirectorySnapshot,
+]
+_PUBLICATION_DIRECTORY: ContextVar[HarmonyPublicationContext | None] = ContextVar(
+    "harmony_publication_directory",
+    default=None,
+)
+_ANY_DESTINATION_IDENTITY = object()
+_EXPECTED_REPLACE_DESTINATION: ContextVar[object] = ContextVar(
+    "harmony_expected_replace_destination",
+    default=_ANY_DESTINATION_IDENTITY,
+)
+_PUBLICATION_RECOVERY: ContextVar[bool] = ContextVar(
+    "harmony_publication_recovery",
+    default=False,
+)
+
+
+def harmony_attempt_artifact_file_name(attempt_id: str) -> str:
+    """Return the isolated canonical relative artifact name for one attempt."""
+    if not isinstance(attempt_id, str) or not _JOB_ID.fullmatch(attempt_id):
+        raise HarmonyArtifactError("Harmony attempt identity is invalid.")
+    return f"harmony/harmonic-context.{attempt_id}.json"
+
+
+@contextmanager
+def harmony_artifact_scope(artifact_file_name: str) -> Iterator[None]:
+    """Make legacy artifact calls resolve to one isolated attempt target."""
+    canonical = _canonical_artifact_file_name(artifact_file_name)
+    token = _ARTIFACT_SCOPE.set(canonical)
+    try:
+        yield
+    finally:
+        _ARTIFACT_SCOPE.reset(token)
 
 
 def build_harmony_artifact(
@@ -211,50 +265,181 @@ def write_harmony_artifact(
     job_id: str,
     settings: Settings,
     payload: Mapping[str, Any],
+    *,
+    artifact_file_name: str | None = None,
 ) -> Path:
-    """Validate and atomically publish the canonical harmonic-context artifact."""
-    encoded = _encoded_payload(validate_harmony_artifact(payload))
+    """Validate and atomically publish one canonical harmonic-context artifact."""
+    target = _resolve_artifact_file_name(artifact_file_name)
+    validated = validate_harmony_artifact(payload)
+    if target != HARMONY_ARTIFACT_RELATIVE_PATH and any(
+        "warnings" not in item for item in validated["rawEvidence"]
+    ):
+        raise HarmonyArtifactValidationError(
+            "Attempt-scoped raw evidence requires explicit warning lists."
+        )
+    encoded = _encoded_payload(validated)
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=True)
     assert directory is not None
-    destination = directory / "harmonic-context.json"
-    _validate_existing_destination(destination, directory)
-    temporary = directory / f".harmonic-context.json.{uuid4().hex}.tmp"
+    leaf = _artifact_leaf(target)
+    destination = directory / leaf
+    with _publication_directory_scope(directory, job_dir):
+        return _publish_harmony_artifact(
+            destination,
+            directory,
+            job_dir,
+            encoded,
+            immutable=target != HARMONY_ARTIFACT_RELATIVE_PATH,
+        )
+
+
+def _publish_harmony_artifact(
+    destination: Path,
+    directory: Path,
+    job_dir: Path,
+    encoded: bytes,
+    *,
+    immutable: bool,
+) -> Path:
     directory_snapshot = _directory_snapshot(directory, job_dir)
+    _validate_existing_destination(destination, directory)
+    previous = _existing_artifact_bytes(destination, directory)
+    previous_identity = (
+        _published_file_identity(destination, directory)
+        if previous is not None
+        else None
+    )
+    if immutable and previous is not None:
+        return _accept_existing_immutable_artifact(
+            destination,
+            directory,
+            job_dir,
+            directory_snapshot,
+            encoded,
+        )
+
+    temporary = directory / f".{destination.name}.{uuid4().hex}.tmp"
+    installed = False
+    installed_identity: HarmonyFileIdentity | None = None
     try:
-        _write_exclusive_regular_file(temporary, encoded, directory)
-        if _directory_snapshot(directory, job_dir) != directory_snapshot:
-            raise HarmonyArtifactError(
-                "Harmony artifact directory changed during publication."
+        temporary_identity = _write_exclusive_regular_file(
+            temporary,
+            encoded,
+            directory,
+        )
+        _assert_publication_directory_current(
+            directory,
+            job_dir,
+            directory_snapshot,
+        )
+        if immutable:
+            try:
+                _link_atomic(temporary, destination)
+            except FileExistsError:
+                return _accept_existing_immutable_artifact(
+                    destination,
+                    directory,
+                    job_dir,
+                    directory_snapshot,
+                    encoded,
+                )
+        else:
+            _replace_if_destination(
+                temporary,
+                destination,
+                expected_destination_identity=previous_identity,
             )
-        _replace_atomic(temporary, destination)
-        if _directory_snapshot(directory, job_dir) != directory_snapshot:
+        installed = True
+        installed_identity = temporary_identity
+        _assert_publication_directory_current(
+            directory,
+            job_dir,
+            directory_snapshot,
+        )
+        if _published_file_identity(destination, directory) != installed_identity:
             raise HarmonyArtifactError(
-                "Harmony artifact directory changed during publication."
+                "Published harmonic context changed during publication."
             )
-        _require_regular_file(destination, directory)
         _fsync_directory(directory)
-    except HarmonyArtifactError:
-        raise
-    except OSError as exc:
+    except (HarmonyArtifactError, OSError) as exc:
+        if installed and not immutable and installed_identity is not None:
+            try:
+                _restore_publication_state(
+                    destination,
+                    directory,
+                    job_dir,
+                    directory_snapshot,
+                    previous,
+                    installed_identity=installed_identity,
+                )
+            except HarmonyArtifactError as recovery_exc:
+                raise recovery_exc
+        if isinstance(exc, HarmonyArtifactError):
+            raise
         raise HarmonyArtifactError(
             "Harmonic context could not be published safely."
         ) from exc
     finally:
-        _remove_temporary(temporary, directory)
+        _remove_temporary(temporary, directory, job_dir)
+    _assert_publication_directory_current(
+        directory,
+        job_dir,
+        directory_snapshot,
+    )
+    return destination.resolve(strict=True)
+
+
+def _accept_existing_immutable_artifact(
+    destination: Path,
+    directory: Path,
+    job_dir: Path,
+    expected_directory_snapshot: HarmonyDirectorySnapshot,
+    encoded: bytes,
+) -> Path:
+    _assert_publication_directory_current(
+        directory,
+        job_dir,
+        expected_directory_snapshot,
+    )
+    before_identity = _published_file_identity(destination, directory)
+    if _existing_artifact_bytes(destination, directory) != encoded:
+        raise HarmonyArtifactError(
+            "An attempt-scoped harmonic context is already published with "
+            "different content."
+        )
+    if _published_file_identity(destination, directory) != before_identity:
+        raise HarmonyArtifactError(
+            "Attempt-scoped harmonic context changed while being accepted."
+        )
+    _fsync_directory(directory)
+    _assert_publication_directory_current(
+        directory,
+        job_dir,
+        expected_directory_snapshot,
+    )
+    if (
+        _published_file_identity(destination, directory) != before_identity
+        or _existing_artifact_bytes(destination, directory) != encoded
+    ):
+        raise HarmonyArtifactError(
+            "Attempt-scoped harmonic context changed while being accepted."
+        )
     return destination.resolve(strict=True)
 
 
 def load_harmony_artifact(
     job_id: str,
     settings: Settings,
+    *,
+    artifact_file_name: str | None = None,
 ) -> dict[str, Any] | None:
-    """Load and revalidate the currently published canonical artifact."""
+    """Load and revalidate one published canonical artifact."""
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=False)
     if directory is None:
         return None
-    destination = directory / "harmonic-context.json"
+    target = _resolve_artifact_file_name(artifact_file_name)
+    destination = directory / _artifact_leaf(target)
     try:
         destination.lstat()
     except FileNotFoundError:
@@ -274,24 +459,44 @@ def load_harmony_artifact(
             "Saved harmonic context is unreadable or corrupted."
         ) from exc
     try:
-        return validate_harmony_artifact(payload)
+        validated = validate_harmony_artifact(payload)
     except HarmonyArtifactValidationError as exc:
         raise HarmonyArtifactError(
             "Saved harmonic context failed schema validation."
         ) from exc
+    if target != HARMONY_ARTIFACT_RELATIVE_PATH and any(
+        "warnings" not in item for item in validated["rawEvidence"]
+    ):
+        raise HarmonyArtifactError(
+            "Saved attempt-scoped harmonic context failed schema validation."
+        )
+    return validated
 
 
-def harmony_artifact_path(job_id: str, settings: Settings) -> Path:
-    """Resolve the canonical JSON only if it is stable through validation."""
+def harmony_artifact_path(
+    job_id: str,
+    settings: Settings,
+    *,
+    artifact_file_name: str | None = None,
+) -> Path:
+    """Resolve one canonical JSON file only if it is stable through validation."""
     job_dir = _secure_job_root(job_id, settings)
     directory = _artifact_directory(job_dir, create=False)
     if directory is None:
         raise HarmonyArtifactUnavailableError(
             "Published harmonic context is unavailable."
         )
-    path = directory / "harmonic-context.json"
+    target = _resolve_artifact_file_name(artifact_file_name)
+    path = directory / _artifact_leaf(target)
     before = _regular_file_snapshot(path, directory, unavailable=True)
-    artifact = load_harmony_artifact(job_id, settings)
+    if target == HARMONY_ARTIFACT_RELATIVE_PATH and _ARTIFACT_SCOPE.get() is None:
+        artifact = load_harmony_artifact(job_id, settings)
+    else:
+        artifact = load_harmony_artifact(
+            job_id,
+            settings,
+            artifact_file_name=target,
+        )
     if artifact is None:
         raise HarmonyArtifactUnavailableError(
             "Published harmonic context is unavailable."
@@ -307,6 +512,183 @@ def harmony_artifact_path(job_id: str, settings: Settings) -> Path:
             "Published harmonic context changed during validation."
         )
     return path.resolve(strict=True)
+
+
+def remove_harmony_artifact(
+    job_id: str,
+    settings: Settings,
+    *,
+    artifact_file_name: str,
+    cleanup_authorizer: HarmonyCleanupAuthorizer | None = None,
+) -> None:
+    """Remove one canonical artifact only through a pinned directory handle."""
+    leaf_name = _artifact_leaf(artifact_file_name)
+    job_dir = _secure_job_root(job_id, settings)
+    directory = _artifact_directory(job_dir, create=False)
+    if directory is None or not _descriptor_relative_cleanup_supported():
+        return
+    descriptor, snapshot = _open_cleanup_directory(directory, job_dir)
+    try:
+        removed = _remove_published_artifact(
+            directory / leaf_name,
+            directory,
+            directory_descriptor=descriptor,
+            expected_directory_snapshot=snapshot,
+            job_dir=job_dir,
+            leaf_name=leaf_name,
+            cleanup_authorizer=cleanup_authorizer,
+        )
+        if removed:
+            _fsync_directory_descriptor(descriptor)
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            snapshot,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def reconcile_harmony_attempt_artifacts(
+    job_id: str,
+    settings: Settings,
+    *,
+    durable_artifact_file_name: str | None,
+    active_attempt_id: str | None,
+    protection_state_reader: HarmonyProtectionStateReader | None = None,
+    cleanup_lease: HarmonyCleanupLease | None = None,
+) -> int:
+    """Remove orphan attempts using current DB protection and a pinned directory."""
+    job_dir = _secure_job_root(job_id, settings)
+    expected_state: HarmonyProtectionState = (
+        "processing",
+        durable_artifact_file_name,
+        active_attempt_id,
+    )
+    if protection_state_reader is None:
+        return 0
+
+    def authorize_cleanup() -> None:
+        _require_current_protection_state(protection_state_reader, expected_state)
+
+    authorize_cleanup()
+    protected: set[str] = {"harmonic-context.json"}
+    if durable_artifact_file_name is not None:
+        protected.add(
+            _artifact_leaf(_canonical_artifact_file_name(durable_artifact_file_name))
+        )
+    if (
+        active_attempt_id is None
+        or cleanup_lease is None
+        or not _descriptor_relative_cleanup_supported()
+    ):
+        return 0
+    protected.add(
+        _artifact_leaf(harmony_attempt_artifact_file_name(active_attempt_id))
+    )
+
+    directory = _artifact_directory(job_dir, create=False)
+    if directory is None:
+        return 0
+
+    descriptor, snapshot = _open_cleanup_directory(directory, job_dir)
+    try:
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            snapshot,
+        )
+        try:
+            names = sorted(os.listdir(descriptor))
+        except (OSError, TypeError, ValueError) as exc:
+            raise HarmonyArtifactError(
+                "Harmony attempt artifacts could not be reconciled safely."
+            ) from exc
+
+        candidates: list[tuple[str, HarmonyFileSnapshot]] = []
+        unsafe = False
+        for name in names:
+            if not isinstance(name, str) or name.startswith("."):
+                continue
+            if not name.startswith("harmonic-context."):
+                continue
+            
+            # First, check if this is a regular file. This catches symlinks and
+            # other non-regular files regardless of whether they're protected.
+            try:
+                file_snapshot = _relative_regular_file_snapshot(descriptor, name)
+            except HarmonyArtifactError:
+                unsafe = True
+                continue
+            if file_snapshot is None:
+                continue
+            if not stat.S_ISREG(file_snapshot[2]):
+                unsafe = True
+                continue
+            
+            # Protected files (active attempt, durable artifact) are validated
+            # but not removed. They will be protected by state checks.
+            if name in protected:
+                continue
+            
+            # Only attempt artifacts need to match the regex
+            relative = f"harmony/{name}"
+            if not _ATTEMPT_ARTIFACT.fullmatch(relative):
+                unsafe = True
+                continue
+            
+            candidates.append((name, file_snapshot))
+        
+        if unsafe:
+            raise HarmonyArtifactError(
+                "Harmony attempt artifacts could not be reconciled safely."
+            )
+
+        removed = 0
+        for name, file_snapshot in candidates:
+            # Revalidate protection state before each removal
+            authorize_cleanup()
+            try:
+                with cleanup_lease():
+                    if _remove_published_artifact(
+                        directory / name,
+                        directory,
+                        directory_descriptor=descriptor,
+                        expected_directory_snapshot=snapshot,
+                        job_dir=job_dir,
+                        leaf_name=name,
+                        expected_file_snapshot=file_snapshot,
+                        cleanup_authorizer=authorize_cleanup,
+                    ):
+                        removed += 1
+            except HarmonyArtifactError:
+                raise
+            except Exception as exc:
+                raise HarmonyArtifactError(
+                    "Harmony cleanup protection state could not be verified."
+                ) from exc
+
+        # Final state validation
+        authorize_cleanup()
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            snapshot,
+        )
+        if removed:
+            _fsync_directory_descriptor(descriptor)
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            snapshot,
+        )
+        return removed
+    finally:
+        os.close(descriptor)
 
 
 def _source_transcription(value: Any) -> dict[str, Any]:
@@ -442,7 +824,7 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         "pitchName",
         "confidence",
     }
-    _keys(item, required, set(), label)
+    _keys(item, required, {"warnings"}, label)
     start = _number(item["rawStartSeconds"], f"{label}.rawStartSeconds", minimum=0)
     end = _number(item["rawEndSeconds"], f"{label}.rawEndSeconds", minimum=0)
     if end <= start:
@@ -463,7 +845,7 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         raise HarmonyArtifactValidationError(
             f"{label}.pitchName is inconsistent with pitchClass."
         )
-    return {
+    output = {
         "id": _id(item["id"], f"{label}.id"),
         "sourceKind": _slug(item["sourceKind"], f"{label}.sourceKind"),
         "rawStartSeconds": start,
@@ -474,6 +856,13 @@ def _raw_event(value: Any, index: int) -> dict[str, Any]:
         "pitchName": pitch_name,
         "confidence": _confidence(item["confidence"], f"{label}.confidence"),
     }
+    if "warnings" in item:
+        output["warnings"] = _warnings(
+            item["warnings"],
+            f"{label}.warnings",
+            _MAX_RAW_EVENT_WARNINGS,
+        )
+    return output
 
 
 def _segments(
@@ -1162,6 +1551,33 @@ def _canonical_relative_path(value: Any, expected: str, label: str) -> str:
     return value
 
 
+def _canonical_artifact_file_name(value: Any) -> str:
+    leaf = _artifact_leaf(value)
+    return f"harmony/{leaf}"
+
+
+def _resolve_artifact_file_name(value: str | None) -> str:
+    if value is not None:
+        return _canonical_artifact_file_name(value)
+    scoped = _ARTIFACT_SCOPE.get()
+    if scoped is not None:
+        return scoped
+    return HARMONY_ARTIFACT_RELATIVE_PATH
+
+
+def _artifact_leaf(value: Any) -> str:
+    if not isinstance(value, str):
+        raise HarmonyArtifactError("Harmony artifact file name is invalid.")
+    if value == HARMONY_ARTIFACT_RELATIVE_PATH:
+        return "harmonic-context.json"
+    if not _ATTEMPT_ARTIFACT.fullmatch(value):
+        raise HarmonyArtifactError("Harmony artifact file name is invalid.")
+    parsed = PurePosixPath(value)
+    if parsed.is_absolute() or parsed.parts != ("harmony", parsed.name):
+        raise HarmonyArtifactError("Harmony artifact file name is invalid.")
+    return parsed.name
+
+
 def _utc_timestamp(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 64:
         raise HarmonyArtifactValidationError(f"{label} must be a UTC timestamp.")
@@ -1258,7 +1674,7 @@ def _artifact_directory(job_dir: Path, *, create: bool) -> Path | None:
     return directory
 
 
-def _directory_snapshot(directory: Path, job_dir: Path) -> tuple[int, int, int]:
+def _directory_snapshot(directory: Path, job_dir: Path) -> HarmonyDirectorySnapshot:
     try:
         info = directory.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
@@ -1272,7 +1688,407 @@ def _directory_snapshot(directory: Path, job_dir: Path) -> tuple[int, int, int]:
         raise HarmonyArtifactError("Harmony artifact directory is unsafe.") from exc
 
 
+def _descriptor_relative_cleanup_supported() -> bool:
+    """Return whether cleanup can stay confined to a pinned directory handle."""
+    return (
+        os.name == "posix"
+        and bool(getattr(os, "O_DIRECTORY", 0))
+        and bool(getattr(os, "O_NOFOLLOW", 0))
+        and os.listdir in getattr(os, "supports_fd", set())
+        and os.open in getattr(os, "supports_dir_fd", set())
+        and os.stat in getattr(os, "supports_dir_fd", set())
+        and os.stat in getattr(os, "supports_follow_symlinks", set())
+        and os.unlink in getattr(os, "supports_dir_fd", set())
+    )
+
+
+def _descriptor_relative_publication_supported() -> bool:
+    """Return whether publication can stay confined to a pinned directory.
+
+    ``os.replace`` is not registered in ``os.supports_dir_fd`` by CPython even
+    though it accepts ``src_dir_fd``/``dst_dir_fd``: it is defined as
+    ``os.replace = os.rename`` in ``Lib/os.py`` and both share
+    ``internal_rename()``, so the renameat-based dir_fd capability is gated by
+    ``HAVE_RENAMEAT`` and registered on ``os.rename`` only. Check the shared
+    primitive instead of the unregistered alias.
+    """
+    return (
+        _descriptor_relative_cleanup_supported()
+        and os.rename in getattr(os, "supports_dir_fd", set())
+        and os.link in getattr(os, "supports_dir_fd", set())
+        and os.link in getattr(os, "supports_follow_symlinks", set())
+    )
+
+
+@contextmanager
+def _publication_directory_scope(
+    directory: Path,
+    job_dir: Path,
+) -> Iterator[HarmonyPublicationContext | None]:
+    """Pin a publication directory when the platform exposes safe primitives."""
+    if not _descriptor_relative_publication_supported():
+        if os.name == "posix":
+            raise HarmonyArtifactError(
+                "Harmony publication requires descriptor-relative filesystem support."
+            )
+        yield None
+        return
+    descriptor, snapshot = _open_cleanup_directory(directory, job_dir)
+    context: HarmonyPublicationContext = (
+        descriptor,
+        directory,
+        job_dir,
+        snapshot,
+    )
+    token = _PUBLICATION_DIRECTORY.set(context)
+    try:
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            snapshot,
+        )
+        yield context
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            snapshot,
+        )
+    finally:
+        _PUBLICATION_DIRECTORY.reset(token)
+        os.close(descriptor)
+
+
+def _active_publication_directory(
+    directory: Path,
+) -> HarmonyPublicationContext | None:
+    context = _PUBLICATION_DIRECTORY.get()
+    if context is None:
+        return None
+    descriptor, expected_directory, job_dir, snapshot = context
+    if expected_directory != directory:
+        raise HarmonyArtifactError("Harmony publication directory is inconsistent.")
+    _assert_pinned_publication_directory(descriptor, snapshot)
+    if not _PUBLICATION_RECOVERY.get():
+        _assert_cleanup_directory_current(
+            descriptor,
+            expected_directory,
+            job_dir,
+            snapshot,
+        )
+    return context
+
+
+def _assert_pinned_publication_directory(
+    descriptor: int,
+    expected: HarmonyDirectorySnapshot,
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Harmony artifact directory could not be verified safely."
+        ) from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or opened.st_ino <= 0
+        or (opened.st_dev, opened.st_ino, opened.st_mode) != expected
+    ):
+        raise HarmonyArtifactError(
+            "Harmony artifact directory changed during publication."
+        )
+
+
+def _assert_publication_directory_current(
+    directory: Path,
+    job_dir: Path,
+    expected: HarmonyDirectorySnapshot,
+) -> None:
+    context = _active_publication_directory(directory)
+    if context is not None:
+        if context[3] != expected:
+            raise HarmonyArtifactError(
+                "Harmony artifact directory changed during publication."
+            )
+        return
+    if _directory_snapshot(directory, job_dir) != expected:
+        raise HarmonyArtifactError(
+            "Harmony artifact directory changed during publication."
+        )
+
+
+def _published_file_identity(
+    path: Path,
+    directory: Path,
+) -> HarmonyFileIdentity:
+    context = _active_publication_directory(directory)
+    if context is not None:
+        if path.parent != directory:
+            raise HarmonyArtifactError("Harmonic context file is unsafe.")
+        snapshot = _relative_regular_file_snapshot(context[0], path.name)
+        if snapshot is None:
+            raise HarmonyArtifactError("Harmonic context file is unsafe.")
+        return _harmony_file_identity(snapshot)
+    info = _require_regular_file(path, directory)
+    return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+def _current_published_file_identity(
+    path: Path,
+    directory: Path,
+) -> HarmonyFileIdentity | None:
+    context = _active_publication_directory(directory)
+    if context is not None:
+        if path.parent != directory:
+            raise HarmonyArtifactError("Harmonic context file is unsafe.")
+        snapshot = _relative_regular_file_snapshot(context[0], path.name)
+        return None if snapshot is None else _harmony_file_identity(snapshot)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarmonyArtifactError("Harmonic context file is unsafe.") from exc
+    return _published_file_identity(path, directory)
+
+
+def _open_cleanup_directory(
+    directory: Path,
+    job_dir: Path,
+) -> tuple[int, HarmonyDirectorySnapshot]:
+    if directory.parent != job_dir or directory.name != "harmony":
+        raise HarmonyArtifactError("Harmony artifact directory is unsafe.")
+    expected = _directory_snapshot(directory, job_dir)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        job_info = job_dir.lstat()
+        if stat.S_ISLNK(job_info.st_mode) or not stat.S_ISDIR(job_info.st_mode):
+            raise HarmonyArtifactError("Harmonic-context job directory is unsafe.")
+        expected_job = (job_info.st_dev, job_info.st_ino, job_info.st_mode)
+        job_descriptor = os.open(job_dir, flags)
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Harmonic-context job directory could not be pinned safely."
+        ) from exc
+    descriptor: int | None = None
+    try:
+        try:
+            opened_job = os.fstat(job_descriptor)
+            if (
+                not stat.S_ISDIR(opened_job.st_mode)
+                or opened_job.st_ino <= 0
+                or (opened_job.st_dev, opened_job.st_ino, opened_job.st_mode)
+                != expected_job
+            ):
+                raise HarmonyArtifactError(
+                    "Harmonic-context job directory changed during cleanup."
+                )
+            descriptor = os.open("harmony", flags, dir_fd=job_descriptor)
+        except HarmonyArtifactError:
+            raise
+        except OSError as exc:
+            raise HarmonyArtifactError(
+                "Harmony artifact directory could not be pinned safely."
+            ) from exc
+    finally:
+        os.close(job_descriptor)
+    assert descriptor is not None
+    try:
+        _assert_cleanup_directory_current(
+            descriptor,
+            directory,
+            job_dir,
+            expected,
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return descriptor, expected
+
+
+def _assert_cleanup_directory_current(
+    descriptor: int,
+    directory: Path,
+    job_dir: Path,
+    expected: HarmonyDirectorySnapshot,
+) -> None:
+    try:
+        opened = os.fstat(descriptor)
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Harmony artifact directory could not be verified safely."
+        ) from exc
+    opened_snapshot = (opened.st_dev, opened.st_ino, opened.st_mode)
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or opened.st_ino <= 0
+        or opened_snapshot != expected
+        or _directory_snapshot(directory, job_dir) != expected
+    ):
+        raise HarmonyArtifactError(
+            "Harmony artifact directory changed during cleanup."
+        )
+
+
+def _assert_removal_directory_current(
+    descriptor: int,
+    directory: Path,
+    job_dir: Path,
+    expected: HarmonyDirectorySnapshot,
+) -> None:
+    """Permit rollback only against the exact pinned publication directory."""
+    context = _PUBLICATION_DIRECTORY.get()
+    if (
+        _PUBLICATION_RECOVERY.get()
+        and context is not None
+        and context == (descriptor, directory, job_dir, expected)
+    ):
+        _assert_pinned_publication_directory(descriptor, expected)
+        return
+    _assert_cleanup_directory_current(
+        descriptor,
+        directory,
+        job_dir,
+        expected,
+    )
+
+
+def _relative_regular_file_snapshot(
+    directory_descriptor: int,
+    leaf_name: str,
+) -> HarmonyFileSnapshot | None:
+    if not isinstance(leaf_name, str) or Path(leaf_name).name != leaf_name:
+        raise HarmonyArtifactError("Harmony cleanup target is invalid.")
+    try:
+        info = os.stat(
+            leaf_name,
+            dir_fd=directory_descriptor,
+            follow_symlinks=False,
+        )
+    except FileNotFoundError:
+        return None
+    except (NotImplementedError, OSError, TypeError, ValueError) as exc:
+        raise HarmonyArtifactError(
+            "Harmony cleanup target could not be inspected safely."
+        ) from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_ino <= 0:
+        raise HarmonyArtifactError("Harmony cleanup target is not a regular file.")
+    return _harmony_file_snapshot(info)
+
+
+def _harmony_file_snapshot(info: os.stat_result) -> HarmonyFileSnapshot:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _harmony_file_identity(snapshot: HarmonyFileSnapshot) -> HarmonyFileIdentity:
+    return snapshot[0], snapshot[1], stat.S_IFMT(snapshot[2])
+
+
+def _harmony_content_snapshot(
+    snapshot: HarmonyFileSnapshot,
+) -> tuple[int, int, int, int, int]:
+    return (
+        snapshot[0],
+        snapshot[1],
+        stat.S_IFMT(snapshot[2]),
+        snapshot[3],
+        snapshot[4],
+    )
+
+
+def _read_stable_regular_file_at(
+    directory_descriptor: int,
+    leaf_name: str,
+) -> bytes:
+    before = _relative_regular_file_snapshot(directory_descriptor, leaf_name)
+    if before is None:
+        raise HarmonyArtifactError("Saved harmonic context is unavailable.")
+    if before[3] > _MAX_ARTIFACT_BYTES:
+        raise HarmonyArtifactError("Saved harmonic context is too large.")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(leaf_name, flags, dir_fd=directory_descriptor)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HarmonyArtifactError("Saved harmonic context is unavailable.") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _harmony_content_snapshot(_harmony_file_snapshot(opened))
+            != _harmony_content_snapshot(before)
+        ):
+            raise HarmonyArtifactError(
+                "Saved harmonic context changed during validation."
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, _MAX_ARTIFACT_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > _MAX_ARTIFACT_BYTES:
+                raise HarmonyArtifactError("Saved harmonic context is too large.")
+        if (
+            _harmony_content_snapshot(_harmony_file_snapshot(os.fstat(descriptor)))
+            != _harmony_content_snapshot(before)
+        ):
+            raise HarmonyArtifactError(
+                "Saved harmonic context changed during validation."
+            )
+    except HarmonyArtifactError:
+        raise
+    except OSError as exc:
+        raise HarmonyArtifactError("Saved harmonic context is unavailable.") from exc
+    finally:
+        os.close(descriptor)
+    after = _relative_regular_file_snapshot(directory_descriptor, leaf_name)
+    if (
+        after is None
+        or _harmony_content_snapshot(after) != _harmony_content_snapshot(before)
+    ):
+        raise HarmonyArtifactError(
+            "Saved harmonic context changed during validation."
+        )
+    return b"".join(chunks)
+
+
+def _require_current_protection_state(
+    reader: HarmonyProtectionStateReader,
+    expected: HarmonyProtectionState,
+) -> None:
+    try:
+        current = reader()
+    except Exception as exc:
+        raise HarmonyArtifactError(
+            "Harmony cleanup protection state could not be verified."
+        ) from exc
+    if current != expected:
+        raise HarmonyArtifactError(
+            "Harmony cleanup protection state changed during reconciliation."
+        )
+
+
 def _validate_existing_destination(path: Path, directory: Path) -> None:
+    context = _active_publication_directory(directory)
+    if context is not None:
+        if path.parent != directory:
+            raise HarmonyArtifactError("Existing harmonic context is unsafe.")
+        _relative_regular_file_snapshot(context[0], path.name)
+        return
     try:
         path.lstat()
     except FileNotFoundError:
@@ -1280,6 +2096,23 @@ def _validate_existing_destination(path: Path, directory: Path) -> None:
     except OSError as exc:
         raise HarmonyArtifactError("Existing harmonic context is unsafe.") from exc
     _require_regular_file(path, directory)
+
+
+def _existing_artifact_bytes(path: Path, directory: Path) -> bytes | None:
+    context = _active_publication_directory(directory)
+    if context is not None:
+        if path.parent != directory:
+            raise HarmonyArtifactError("Existing harmonic context is unsafe.")
+        if _relative_regular_file_snapshot(context[0], path.name) is None:
+            return None
+        return _read_stable_regular_file_at(context[0], path.name)
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HarmonyArtifactError("Existing harmonic context is unsafe.") from exc
+    return _read_stable_regular_file(path, directory)
 
 
 def _require_regular_file(path: Path, directory: Path) -> os.stat_result:
@@ -1296,11 +2129,22 @@ def _require_regular_file(path: Path, directory: Path) -> os.stat_result:
         raise HarmonyArtifactError("Harmonic context file is unsafe.") from exc
 
 
-def _write_exclusive_regular_file(path: Path, data: bytes, directory: Path) -> None:
+def _write_exclusive_regular_file(
+    path: Path,
+    data: bytes,
+    directory: Path,
+) -> HarmonyFileIdentity:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_NOFOLLOW", 0)
+    context = _active_publication_directory(directory)
+    if context is not None and path.parent != directory:
+        raise HarmonyArtifactError("Temporary harmonic-context file is unsafe.")
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = (
+            os.open(path.name, flags, 0o600, dir_fd=context[0])
+            if context is not None
+            else os.open(path, flags, 0o600)
+        )
     except OSError as exc:
         raise HarmonyArtifactError(
             "Temporary harmonic-context file could not be created safely."
@@ -1313,7 +2157,22 @@ def _write_exclusive_regular_file(path: Path, data: bytes, directory: Path) -> N
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        _require_regular_file(path, directory)
+        written = os.fstat(descriptor)
+        if not stat.S_ISREG(written.st_mode) or written.st_ino <= 0:
+            raise HarmonyArtifactError("Temporary harmonic-context file is unsafe.")
+        if context is not None:
+            snapshot = _relative_regular_file_snapshot(context[0], path.name)
+            if snapshot is None or _harmony_file_identity(snapshot) != (
+                written.st_dev,
+                written.st_ino,
+                stat.S_IFMT(written.st_mode),
+            ):
+                raise HarmonyArtifactError(
+                    "Temporary harmonic-context file changed during publication."
+                )
+        else:
+            _require_regular_file(path, directory)
+        return written.st_dev, written.st_ino, stat.S_IFMT(written.st_mode)
     except HarmonyArtifactError:
         raise
     except OSError as exc:
@@ -1327,7 +2186,49 @@ def _write_exclusive_regular_file(path: Path, data: bytes, directory: Path) -> N
             pass
 
 
+def _replace_if_destination(
+    source: Path,
+    destination: Path,
+    *,
+    expected_destination_identity: HarmonyFileIdentity | None,
+) -> None:
+    token = _EXPECTED_REPLACE_DESTINATION.set(expected_destination_identity)
+    try:
+        _replace_atomic(source, destination)
+    finally:
+        _EXPECTED_REPLACE_DESTINATION.reset(token)
+
+
 def _replace_atomic(source: Path, destination: Path) -> None:
+    context = _active_publication_directory(source.parent)
+    expected_destination_identity = _EXPECTED_REPLACE_DESTINATION.get()
+    if context is not None:
+        if destination.parent != source.parent:
+            raise HarmonyArtifactError("Harmony publication target is unsafe.")
+        if expected_destination_identity is not _ANY_DESTINATION_IDENTITY:
+            current = _current_published_file_identity(destination, source.parent)
+            if current != expected_destination_identity:
+                raise HarmonyArtifactError(
+                    "Harmonic context changed before atomic replacement."
+                )
+        try:
+            os.replace(
+                source.name,
+                destination.name,
+                src_dir_fd=context[0],
+                dst_dir_fd=context[0],
+            )
+        except OSError as exc:
+            raise HarmonyArtifactError(
+                "Harmonic context could not be published atomically."
+            ) from exc
+        return
+    if expected_destination_identity is not _ANY_DESTINATION_IDENTITY:
+        current = _current_published_file_identity(destination, source.parent)
+        if current != expected_destination_identity:
+            raise HarmonyArtifactError(
+                "Harmonic context changed before atomic replacement."
+            )
     try:
         os.replace(source, destination)
     except OSError as exc:
@@ -1336,21 +2237,315 @@ def _replace_atomic(source: Path, destination: Path) -> None:
         ) from exc
 
 
-def _remove_temporary(path: Path, directory: Path) -> None:
+def _link_atomic(source: Path, destination: Path) -> None:
+    context = _active_publication_directory(source.parent)
+    if destination.parent != source.parent:
+        raise HarmonyArtifactError("Harmony publication target is unsafe.")
     try:
-        info = path.lstat()
+        if context is not None:
+            os.link(
+                source.name,
+                destination.name,
+                src_dir_fd=context[0],
+                dst_dir_fd=context[0],
+                follow_symlinks=False,
+            )
+        else:
+            os.link(source, destination, follow_symlinks=False)
+    except FileExistsError:
+        raise
+    except (NotImplementedError, OSError, TypeError, ValueError) as exc:
+        raise HarmonyArtifactError(
+            "Harmonic context could not be published without replacement."
+        ) from exc
+
+
+@contextmanager
+def _publication_recovery_scope() -> Iterator[None]:
+    token = _PUBLICATION_RECOVERY.set(True)
+    try:
+        yield
+    finally:
+        _PUBLICATION_RECOVERY.reset(token)
+
+
+def _restore_publication_state(
+    destination: Path,
+    directory: Path,
+    job_dir: Path,
+    expected_directory_snapshot: HarmonyDirectorySnapshot,
+    previous: bytes | None,
+    *,
+    installed_identity: HarmonyFileIdentity,
+) -> None:
+    with _publication_recovery_scope():
+        _restore_publication_state_in_scope(
+            destination,
+            directory,
+            job_dir,
+            expected_directory_snapshot,
+            previous,
+            installed_identity=installed_identity,
+        )
+
+
+def _restore_publication_state_in_scope(
+    destination: Path,
+    directory: Path,
+    job_dir: Path,
+    expected_directory_snapshot: HarmonyDirectorySnapshot,
+    previous: bytes | None,
+    *,
+    installed_identity: HarmonyFileIdentity,
+) -> None:
+    _assert_publication_directory_current(
+        directory,
+        job_dir,
+        expected_directory_snapshot,
+    )
+    context = _active_publication_directory(directory)
+    current_snapshot = (
+        _relative_regular_file_snapshot(context[0], destination.name)
+        if context is not None
+        else None
+    )
+    if context is not None:
+        if (
+            current_snapshot is None
+            or _harmony_file_identity(current_snapshot) != installed_identity
+        ):
+            raise HarmonyArtifactError(
+                "Published harmonic context changed before rollback."
+            )
+    elif _published_file_identity(destination, directory) != installed_identity:
+        raise HarmonyArtifactError(
+            "Published harmonic context changed before rollback."
+        )
+    if previous is None:
+        if not _descriptor_relative_cleanup_supported():
+            raise HarmonyArtifactError(
+                "Harmony publication rollback requires confined cleanup support."
+            )
+        owns_descriptor = context is None
+        if context is None:
+            descriptor, snapshot = _open_cleanup_directory(directory, job_dir)
+        else:
+            descriptor, snapshot = context[0], context[3]
+        try:
+            if snapshot != expected_directory_snapshot:
+                raise HarmonyArtifactError(
+                    "Harmony artifact directory changed while restoring publication state."
+                )
+            baseline = _relative_regular_file_snapshot(
+                descriptor,
+                destination.name,
+            )
+            if (
+                baseline is None
+                or _harmony_file_identity(baseline) != installed_identity
+            ):
+                raise HarmonyArtifactError(
+                    "Published harmonic context changed before rollback."
+                )
+            removed = _remove_published_artifact(
+                destination,
+                directory,
+                directory_descriptor=descriptor,
+                expected_directory_snapshot=snapshot,
+                job_dir=job_dir,
+                leaf_name=destination.name,
+                expected_file_snapshot=baseline,
+            )
+            if removed:
+                _fsync_directory_descriptor(descriptor)
+        finally:
+            if owns_descriptor:
+                os.close(descriptor)
+        return
+
+    temporary = directory / f".{destination.name}.{uuid4().hex}.restore.tmp"
+    try:
+        _write_exclusive_regular_file(temporary, previous, directory)
+        _assert_publication_directory_current(
+            directory,
+            job_dir,
+            expected_directory_snapshot,
+        )
+        if _published_file_identity(destination, directory) != installed_identity:
+            raise HarmonyArtifactError(
+                "Published harmonic context changed before rollback."
+            )
+        _replace_if_destination(
+            temporary,
+            destination,
+            expected_destination_identity=installed_identity,
+        )
+        _assert_publication_directory_current(
+            directory,
+            job_dir,
+            expected_directory_snapshot,
+        )
+        if _existing_artifact_bytes(destination, directory) != previous:
+            raise HarmonyArtifactError(
+                "Previous harmonic context could not be restored exactly."
+            )
+        _fsync_directory(directory)
+    finally:
+        _remove_temporary(temporary, directory, job_dir)
+
+
+def _remove_published_artifact(
+    path: Path,
+    directory: Path,
+    *,
+    directory_descriptor: int | None = None,
+    expected_directory_snapshot: HarmonyDirectorySnapshot | None = None,
+    job_dir: Path | None = None,
+    leaf_name: str | None = None,
+    expected_file_snapshot: HarmonyFileSnapshot | None = None,
+    cleanup_authorizer: HarmonyCleanupAuthorizer | None = None,
+) -> bool:
+    if (
+        directory_descriptor is None
+        or expected_directory_snapshot is None
+        or job_dir is None
+        or leaf_name is None
+        or path.parent != directory
+        or path.name != leaf_name
+    ):
+        raise HarmonyArtifactError("Harmony cleanup target is invalid.")
+    _assert_removal_directory_current(
+        directory_descriptor,
+        directory,
+        job_dir,
+        expected_directory_snapshot,
+    )
+    first = _relative_regular_file_snapshot(directory_descriptor, leaf_name)
+    if first is None:
+        return False
+    baseline = expected_file_snapshot if expected_file_snapshot is not None else first
+    if first != baseline:
+        raise HarmonyArtifactError(
+            "Harmony cleanup target changed before removal."
+        )
+    _assert_removal_directory_current(
+        directory_descriptor,
+        directory,
+        job_dir,
+        expected_directory_snapshot,
+    )
+    if cleanup_authorizer is not None:
+        try:
+            cleanup_authorizer()
+        except HarmonyArtifactError:
+            raise
+        except Exception as exc:
+            raise HarmonyArtifactError(
+                "Harmony cleanup authorization could not be verified."
+            ) from exc
+    _assert_removal_directory_current(
+        directory_descriptor,
+        directory,
+        job_dir,
+        expected_directory_snapshot,
+    )
+    second = _relative_regular_file_snapshot(directory_descriptor, leaf_name)
+    if second is None:
+        return False
+    if second != baseline:
+        raise HarmonyArtifactError(
+            "Harmony cleanup target changed before removal."
+        )
+    try:
+        os.unlink(leaf_name, dir_fd=directory_descriptor)
     except FileNotFoundError:
+        return False
+    except (OSError, TypeError, ValueError) as exc:
+        raise HarmonyArtifactError(
+            "Unverified harmonic context could not be removed safely."
+        ) from exc
+    if _relative_regular_file_snapshot(directory_descriptor, leaf_name) is None:
+        return True
+    raise HarmonyArtifactError(
+        "Unverified harmonic context removal could not be verified."
+    )
+
+
+def _restore_harmony_artifact(
+    job_id: str,
+    settings: Settings,
+    previous: Mapping[str, Any] | None,
+    *,
+    artifact_file_name: str | None = None,
+) -> None:
+    """Restore the pre-attempt target, or remove a first publication."""
+    target = _resolve_artifact_file_name(artifact_file_name)
+    if previous is not None:
+        if target == HARMONY_ARTIFACT_RELATIVE_PATH and _ARTIFACT_SCOPE.get() is None:
+            write_harmony_artifact(job_id, settings, previous)
+        else:
+            write_harmony_artifact(
+                job_id,
+                settings,
+                previous,
+                artifact_file_name=target,
+            )
         return
-    except OSError:
+    job_dir = _secure_job_root(job_id, settings)
+    directory = _artifact_directory(job_dir, create=False)
+    if directory is None:
         return
+    remove_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=target,
+    )
+
+
+def _remove_temporary(path: Path, directory: Path, job_dir: Path) -> None:
+    if not _descriptor_relative_cleanup_supported():
+        return
+    context = _PUBLICATION_DIRECTORY.get()
+    owns_descriptor = context is None
+    if context is not None:
+        descriptor, expected_directory, expected_job_dir, snapshot = context
+        if expected_directory != directory or expected_job_dir != job_dir:
+            return
+    else:
+        try:
+            descriptor, snapshot = _open_cleanup_directory(directory, job_dir)
+        except HarmonyArtifactError:
+            return
     try:
-        if stat.S_ISREG(info.st_mode) and path.resolve(strict=True).parent == directory.resolve(strict=True):
-            path.unlink()
-    except OSError:
-        return
+        removed = _remove_published_artifact(
+            path,
+            directory,
+            directory_descriptor=descriptor,
+            expected_directory_snapshot=snapshot,
+            job_dir=job_dir,
+            leaf_name=path.name,
+        )
+        if removed:
+            _fsync_directory_descriptor(descriptor)
+    except HarmonyArtifactError:
+        pass
+    finally:
+        if owns_descriptor:
+            os.close(descriptor)
+
+
+def _directory_fsync_supported() -> bool:
+    return os.name != "nt"
 
 
 def _fsync_directory(directory: Path) -> None:
+    if not _directory_fsync_supported():
+        return
+    context = _active_publication_directory(directory)
+    if context is not None:
+        _fsync_directory_descriptor(context[0])
+        _active_publication_directory(directory)
+        return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
         descriptor = os.open(directory, flags)
@@ -1366,6 +2561,15 @@ def _fsync_directory(directory: Path) -> None:
         ) from exc
     finally:
         os.close(descriptor)
+
+
+def _fsync_directory_descriptor(descriptor: int) -> None:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise HarmonyArtifactError(
+            "Harmony artifact directory could not be synchronized."
+        ) from exc
 
 
 def _regular_file_snapshot(
@@ -1446,7 +2650,11 @@ __all__ = [
     "HarmonyArtifactValidationError",
     "build_harmony_artifact",
     "harmony_artifact_path",
+    "harmony_artifact_scope",
+    "harmony_attempt_artifact_file_name",
     "load_harmony_artifact",
+    "reconcile_harmony_attempt_artifacts",
+    "remove_harmony_artifact",
     "validate_harmony_artifact",
     "write_harmony_artifact",
 ]

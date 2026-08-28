@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from app import db
 from app.analysis import (
     ANALYSIS_JSON_RELATIVE_PATH,
     AudioAnalysisError,
@@ -19,7 +20,9 @@ from app.harmony_artifacts import (
     HARMONY_ARTIFACT_RELATIVE_PATH,
     HarmonyArtifactError,
     HarmonyArtifactValidationError,
+    _restore_harmony_artifact,
     build_harmony_artifact,
+    harmony_attempt_artifact_file_name,
     load_harmony_artifact,
     write_harmony_artifact,
 )
@@ -96,6 +99,7 @@ def infer_harmony_job(
     version: str = HARMONY_PIPELINE_VERSION,
     created_at: str | None = None,
     inference_processor: InferenceProcessor = infer_harmony,
+    attempt_id: str | None = None,
 ) -> HarmonyPipelineResult:
     """Infer and atomically publish harmonic context from canonical evidence."""
     if not isinstance(settings, Settings):
@@ -106,6 +110,17 @@ def infer_harmony_job(
         raise HarmonyPipelineError("Harmony progress callback is invalid.")
     if not callable(inference_processor):
         raise HarmonyPipelineError("Harmony inference processor is invalid.")
+    try:
+        artifact_file_name = (
+            HARMONY_ARTIFACT_RELATIVE_PATH
+            if attempt_id is None
+            else harmony_attempt_artifact_file_name(attempt_id)
+        )
+    except HarmonyArtifactError as exc:
+        raise HarmonyPipelineError("Harmony attempt identity is invalid.") from exc
+
+    if attempt_id is not None:
+        _reconcile_non_durable_attempts(job_id, settings, attempt_id)
 
     _report(
         stage_callback,
@@ -210,7 +225,12 @@ def infer_harmony_job(
         "Saving the canonical harmonic-context artifact.",
         92.0,
     )
-    reloaded = _publish_and_verify(job_id, settings, artifact)
+    reloaded = _publish_and_verify(
+        job_id,
+        settings,
+        artifact,
+        artifact_file_name=artifact_file_name,
+    )
 
     _report(
         stage_callback,
@@ -222,7 +242,7 @@ def infer_harmony_job(
     warnings = tuple(reloaded["warnings"])
     return HarmonyPipelineResult(
         version=pipeline_version,
-        artifact_file_name=HARMONY_ARTIFACT_RELATIVE_PATH,
+        artifact_file_name=artifact_file_name,
         created_at=reloaded["createdAt"],
         event_count=diagnostics["eventCount"],
         segment_count=diagnostics["segmentCount"],
@@ -235,6 +255,71 @@ def infer_harmony_job(
         warnings=warnings,
         payload=copy.deepcopy(reloaded),
     )
+
+
+def _reconcile_non_durable_attempts(
+    job_id: str,
+    settings: Settings,
+    attempt_id: str,
+) -> None:
+    try:
+        record = db.get_job(settings.database_path, job_id)
+    except Exception as exc:
+        raise HarmonyPipelineError(
+            "Harmony attempt reconciliation failed at a protected boundary."
+        ) from exc
+    # Direct unit/integration callers may exercise an isolated attempt target without
+    # a durable DB job. Production calls always have the freshly claimed row.
+    if record is None:
+        return
+    if (
+        record.get("harmony_status") != "processing"
+        or record.get("harmony_attempt_id") != attempt_id
+    ):
+        raise HarmonyPipelineError("Harmony attempt is no longer active.")
+
+    def read_protection_state() -> tuple[str, str | None, str | None] | None:
+        current = db.get_job(settings.database_path, job_id)
+        if current is None:
+            return None
+        status = current.get("harmony_status")
+        durable = current.get("harmony_artifact_file_name")
+        active = current.get("harmony_attempt_id")
+        if not isinstance(status, str):
+            return None
+        if durable is not None and not isinstance(durable, str):
+            return None
+        if active is not None and not isinstance(active, str):
+            return None
+        return status, durable, active
+
+    def cleanup_lease():
+        return db.harmony_cleanup_lease(
+            settings.database_path,
+            job_id,
+            status="processing",
+            durable_artifact_file_name=record.get("harmony_artifact_file_name"),
+            active_attempt_id=attempt_id,
+        )
+
+    try:
+        from app.harmony_artifacts import reconcile_harmony_attempt_artifacts
+        reconcile_harmony_attempt_artifacts(
+            job_id,
+            settings,
+            durable_artifact_file_name=record.get("harmony_artifact_file_name"),
+            active_attempt_id=attempt_id,
+            protection_state_reader=read_protection_state,
+            cleanup_lease=cleanup_lease,
+        )
+    except HarmonyArtifactError as exc:
+        raise HarmonyPipelineError(
+            "Non-durable harmonic-context artifacts could not be reconciled safely."
+        ) from exc
+    except Exception as exc:
+        raise HarmonyPipelineError(
+            "Harmony attempt reconciliation failed at a protected boundary."
+        ) from exc
 
 
 def _load_raw(job_id: str, settings: Settings) -> dict[str, Any]:
@@ -411,13 +496,46 @@ def _source_event_index(raw: Mapping[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _load_target(
+    job_id: str,
+    settings: Settings,
+    artifact_file_name: str,
+) -> dict[str, Any] | None:
+    if artifact_file_name == HARMONY_ARTIFACT_RELATIVE_PATH:
+        return load_harmony_artifact(job_id, settings)
+    return load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=artifact_file_name,
+    )
+
+
+def _write_target(
+    job_id: str,
+    settings: Settings,
+    artifact: Mapping[str, Any],
+    artifact_file_name: str,
+) -> None:
+    if artifact_file_name == HARMONY_ARTIFACT_RELATIVE_PATH:
+        write_harmony_artifact(job_id, settings, artifact)
+        return
+    write_harmony_artifact(
+        job_id,
+        settings,
+        artifact,
+        artifact_file_name=artifact_file_name,
+    )
+
+
 def _publish_and_verify(
     job_id: str,
     settings: Settings,
     artifact: Mapping[str, Any],
+    *,
+    artifact_file_name: str,
 ) -> dict[str, Any]:
     try:
-        previous = load_harmony_artifact(job_id, settings)
+        previous = _load_target(job_id, settings, artifact_file_name)
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError(
             "Existing harmonic context is unreadable or unsafe."
@@ -428,7 +546,7 @@ def _publish_and_verify(
         ) from exc
 
     try:
-        write_harmony_artifact(job_id, settings, artifact)
+        _write_target(job_id, settings, artifact, artifact_file_name)
     except HarmonyArtifactError as exc:
         raise HarmonyPipelineError(
             "Harmonic context could not be published safely."
@@ -439,19 +557,40 @@ def _publish_and_verify(
         ) from exc
 
     try:
-        reloaded = load_harmony_artifact(job_id, settings)
+        reloaded = _load_target(job_id, settings, artifact_file_name)
     except HarmonyArtifactError as exc:
-        _restore_previous(job_id, settings, previous)
+        try:
+            _restore_previous(
+                job_id,
+                settings,
+                previous,
+                artifact_file_name=artifact_file_name,
+            )
+        except HarmonyPipelineError as recovery_exc:
+            raise recovery_exc from exc
         raise HarmonyPipelineError(
             "Published harmonic context could not be verified."
         ) from exc
     except Exception as exc:
-        _restore_previous(job_id, settings, previous)
+        try:
+            _restore_previous(
+                job_id,
+                settings,
+                previous,
+                artifact_file_name=artifact_file_name,
+            )
+        except HarmonyPipelineError as recovery_exc:
+            raise recovery_exc from exc
         raise HarmonyPipelineError(
             "Harmonic-context verification failed at a protected boundary."
         ) from exc
     if reloaded is None or reloaded != artifact:
-        _restore_previous(job_id, settings, previous)
+        _restore_previous(
+            job_id,
+            settings,
+            previous,
+            artifact_file_name=artifact_file_name,
+        )
         raise HarmonyPipelineError(
             "Published harmonic context could not be verified."
         )
@@ -462,13 +601,28 @@ def _restore_previous(
     job_id: str,
     settings: Settings,
     previous: Mapping[str, Any] | None,
+    *,
+    artifact_file_name: str,
 ) -> None:
-    if previous is None:
-        return
     try:
-        write_harmony_artifact(job_id, settings, previous)
-    except Exception:
-        return
+        if artifact_file_name == HARMONY_ARTIFACT_RELATIVE_PATH:
+            _restore_harmony_artifact(job_id, settings, previous)
+        else:
+            _restore_harmony_artifact(
+                job_id,
+                settings,
+                previous,
+                artifact_file_name=artifact_file_name,
+            )
+    except HarmonyArtifactError as exc:
+        raise HarmonyPipelineError(
+            "Harmonic context verification failed and the previous publication "
+            "state could not be restored safely."
+        ) from exc
+    except Exception as exc:
+        raise HarmonyPipelineError(
+            "Harmonic-context restoration failed at a protected boundary."
+        ) from exc
 
 
 def _combined_warnings(*groups: Any) -> list[str]:

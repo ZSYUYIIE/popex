@@ -101,6 +101,7 @@ def test_clear_c_major_is_resolved_with_raw_evidence() -> None:
     assert result.raw_evidence[0]["rawEndSeconds"] == 1.0
     assert result.raw_evidence[0]["midiPitch"] == 60.12
     assert result.raw_evidence[0]["sourceKind"] == "vocals"
+    assert result.raw_evidence[0]["warnings"] == []
 
 
 def test_clear_a_minor_is_resolved() -> None:
@@ -305,6 +306,7 @@ def test_single_pitch_remains_unresolved_instead_of_fabricating_chord() -> None:
             "pitchClass": 0,
             "pitchName": "C",
             "confidence": 0.9,
+            "warnings": [],
         },
     )
     assert any("does not support" in warning for warning in first["warnings"])
@@ -455,6 +457,31 @@ def test_unsafe_event_warning_text_is_rejected(warning: str) -> None:
         infer_harmony([event("c", 60, warnings=[warning])], timing())
 
 
+def test_raw_warning_bound_matches_canonical_transcription_contract() -> None:
+    warnings = [f"Review warning {index}." for index in range(128)]
+    warnings[8] = "x" * 500
+    result = infer_harmony(
+        [event("c", 60, warnings=warnings), event("e", 64), event("g", 67)],
+        timing(),
+    )
+    assert result.raw_evidence[0]["warnings"] == warnings
+
+    with pytest.raises(HarmonyInferenceError, match="too many warnings"):
+        infer_harmony([event("c", 60, warnings=warnings + ["overflow"])], timing())
+    with pytest.raises(HarmonyInferenceError):
+        infer_harmony([event("c", 60, warnings=["x" * 501])], timing())
+
+
+def test_nine_benign_warnings_and_long_benign_warning_are_preserved() -> None:
+    warnings = [f"Benign warning {index}." for index in range(9)]
+    warnings[-1] = "Review this uncertain pitch boundary carefully. " + "x" * 300
+    result = infer_harmony(
+        [event("c", 60, warnings=warnings), event("e", 64), event("g", 67)],
+        timing(),
+    )
+    assert result.raw_evidence[0]["warnings"] == warnings
+
+
 def test_bad_part_evidence_references_and_assignments_fail() -> None:
     events = [event("c", 60)]
     with pytest.raises(HarmonyInferenceError, match="unknown raw event"):
@@ -522,3 +549,91 @@ def test_no_final_notation_roman_numeral_or_tab_claims() -> None:
         "engraving",
     ):
         assert forbidden not in encoded.replace("romannumeralsgenerated", "")
+
+
+def test_raw_pitched_event_warnings_are_preserved_in_inference_evidence() -> None:
+    warnings = [
+        "Dominant line only; review this pitch.",
+        "Pitch boundary remains uncertain.",
+    ]
+    result = infer_harmony(
+        [
+            event("c", 60, warnings=warnings),
+            event("e", 64),
+            event("g", 67),
+        ],
+        timing(),
+    )
+    evidence = {item["id"]: item for item in result.raw_evidence}
+
+    assert evidence["c"]["warnings"] == warnings
+    assert evidence["e"]["warnings"] == []
+    assert evidence["g"]["warnings"] == []
+
+
+def test_attempt_scoped_harmony_artifacts_use_isolated_destinations(
+    tmp_path,
+) -> None:
+    from app.config import Settings
+    from app.harmony_artifacts import (
+        build_harmony_artifact,
+        load_harmony_artifact,
+        write_harmony_artifact,
+    )
+
+    settings = Settings(
+        data_dir=tmp_path,
+        allowed_hosts=("example.invalid",),
+        max_duration_seconds=60,
+        max_filesize_mb=16,
+        max_upload_mb=16,
+        audio_quality="192",
+    )
+    settings.exports_dir.mkdir(parents=True)
+    job_id = "c" * 32
+    (settings.exports_dir / job_id).mkdir()
+    inference = infer_harmony(
+        [event("c", 60), event("e", 64), event("g", 67)],
+        timing(),
+    )
+    first = build_harmony_artifact(
+        inference,
+        harmony_version="harmonic-context-v1",
+        created_at="2026-08-14T06:00:00+00:00",
+        transcription_version="raw-transcription-v1",
+        analysis_version="analysis-v1",
+    )
+    second = build_harmony_artifact(
+        inference,
+        harmony_version="harmonic-context-v1",
+        created_at="2026-08-14T06:01:00+00:00",
+        transcription_version="raw-transcription-v1",
+        analysis_version="analysis-v1",
+    )
+    first_file = f"harmony/harmonic-context.{'a' * 32}.json"
+    second_file = f"harmony/harmonic-context.{'b' * 32}.json"
+
+    first_path = write_harmony_artifact(
+        job_id,
+        settings,
+        first,
+        artifact_file_name=first_file,
+    )
+    second_path = write_harmony_artifact(
+        job_id,
+        settings,
+        second,
+        artifact_file_name=second_file,
+    )
+
+    assert first_path != second_path
+    assert load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=first_file,
+    ) == first
+    assert load_harmony_artifact(
+        job_id,
+        settings,
+        artifact_file_name=second_file,
+    ) == second
