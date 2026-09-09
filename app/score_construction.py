@@ -136,7 +136,6 @@ def build_score_document(
     warnings: list[str] = []
     low_confidence = 0
     large_shift = 0
-    eighth = seconds_per_beat / 2.0
     for note in sorted_notes:
         raw_beat = note["startSeconds"] / seconds_per_beat
         quantized_beat = round(raw_beat * 2.0) / 2.0  # 8th-note grid
@@ -260,11 +259,17 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
     part_list = ET.SubElement(root, "part-list")
     ET.SubElement(ET.SubElement(part_list, "score-part", id="P1"), "part-name").text = "Draft Melody"
     part = ET.SubElement(root, "part", id="P1")
-    for measure in measures:
+    for position, measure in enumerate(measures):
         if not isinstance(measure, Mapping):
             raise ScoreConstructionError("Score measure must be a mapping.")
-        measure_el = ET.SubElement(part, "measure", number=str(int(measure.get("measureIndex", 0)) + 1))
-        if int(measure_el.get("number", "1")) == 1:
+        try:
+            stored_index = int(measure.get("measureIndex", position))
+        except (TypeError, ValueError) as exc:
+            raise ScoreConstructionError("Score measure index is invalid.") from exc
+        if stored_index != position:
+            raise ScoreConstructionError("Score measure index is inconsistent.")
+        measure_el = ET.SubElement(part, "measure", number=str(position + 1))
+        if position == 0:
             attrs = ET.SubElement(measure_el, "attributes")
             ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
             time_el = ET.SubElement(attrs, "time")
@@ -272,12 +277,17 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
             ET.SubElement(time_el, "beat-type").text = "4"
             direction = ET.SubElement(measure_el, "direction", placement="above")
             direction_type = ET.SubElement(direction, "direction-type")
-            ET.SubElement(direction_type, "metronome").text = str(int(round(tempo)))
+            metronome = ET.SubElement(direction_type, "metronome")
+            ET.SubElement(metronome, "beat-unit").text = "quarter"
+            ET.SubElement(metronome, "per-minute").text = str(int(round(tempo)))
         chord = measure.get("chordSymbol")
         if chord is not None:
-            harmony = ET.SubElement(measure_el, "harmony")
-            ET.SubElement(harmony, "root-step").text = "C"
-            ET.SubElement(harmony, "kind", text="major").text = "major"
+            # Honest rendering: preserve the exact chord text as words without
+            # fabricating a parsed root/kind harmony claim.
+            symbol = _text(chord, "chordSymbol")
+            direction = ET.SubElement(measure_el, "direction", placement="above")
+            direction_type = ET.SubElement(direction, "direction-type")
+            ET.SubElement(direction_type, "words").text = symbol
         notes = measure.get("notes", [])
         if not isinstance(notes, Sequence) or isinstance(notes, (str, bytes)):
             raise ScoreConstructionError("Measure notes must be a sequence.")

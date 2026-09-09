@@ -85,3 +85,34 @@ def test_musicxml_parses_and_marks_draft() -> None:
     assert root.tag == "score-partwise"
     assert SCORE_BUILDER_VERSION in text
     assert root.find(".//pitch") is not None
+    assert root.find(".//metronome/beat-unit") is not None
+    assert root.find(".//metronome/per-minute") is not None
+
+
+def test_musicxml_preserves_chord_text_without_fabricated_harmony() -> None:
+    document = build_score_document(
+        [_note("w2", 0.0, 0.5, 60)],
+        tempo_bpm=100.0,
+        chord_symbols=["Am7"],
+    )
+    text = score_to_musicxml_text(document)
+    root = ET.fromstring(text)
+    assert root.find(".//harmony") is None
+    words = [node.text for node in root.iter("words")]
+    assert "Am7" in words
+
+
+def test_musicxml_rejects_tampered_measure_index_or_chord() -> None:
+    document = build_score_document([_note("w3", 0.0, 0.5, 60)], tempo_bpm=100.0)
+    tampered = dict(document)
+    tampered_measures = [dict(measure) for measure in document["measures"]]
+    tampered_measures[0]["measureIndex"] = 7
+    tampered["measures"] = tampered_measures
+    with pytest.raises(ScoreConstructionError):
+        score_to_musicxml_text(tampered)
+    tampered2 = dict(document)
+    tampered_measures2 = [dict(measure) for measure in document["measures"]]
+    tampered_measures2[0]["chordSymbol"] = "Bad <tag>"
+    tampered2["measures"] = tampered_measures2
+    with pytest.raises(ScoreConstructionError):
+        score_to_musicxml_text(tampered2)
