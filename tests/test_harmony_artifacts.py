@@ -749,7 +749,9 @@ def test_first_publication_sync_failure_removes_and_syncs_recovery(
     )
     cleanup_supported = module._descriptor_relative_cleanup_supported()
     expected_error = (
-        "publication sync" if cleanup_supported else "could not be restored safely"
+        "publication sync"
+        if cleanup_supported
+        else "requires confined cleanup support"
     )
     with pytest.raises(HarmonyArtifactError, match=expected_error):
         write_harmony_artifact(JOB_ID, settings, artifact_payload())
