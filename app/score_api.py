@@ -16,6 +16,7 @@ Honesty rules:
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -36,6 +37,15 @@ from app.transcription_events import (
 )
 
 _METER_FALLBACK = 4
+
+
+def _optional_confidence(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    confidence = float(value)
+    if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+        return None
+    return confidence
 
 
 class ScorePreviewUnavailableError(RuntimeError):
@@ -97,6 +107,11 @@ def build_score_preview(
         raise ScorePreviewUnavailableError(
             "Tempo evidence is unavailable; score preview requires analysis tempo."
         )
+    tempo_confidence = _optional_confidence(timing.get("tempoConfidence"))
+    meter_confidence = _optional_confidence(timing.get("meterConfidence"))
+    tempo_stable = timing.get("tempoStable")
+    if not isinstance(tempo_stable, bool):
+        tempo_stable = None
     meter = timing.get("meter")
     if type(meter) is int and 1 <= meter <= 12:
         beats_per_measure = meter
@@ -108,10 +123,13 @@ def build_score_preview(
     pitched_inputs = [
         {
             "id": event["id"],
+            "sourceKind": event["sourceKind"],
             "startSeconds": event["startSeconds"],
             "endSeconds": event["endSeconds"],
             "midiNote": event["midiNote"],
+            "midiPitch": event["midiPitch"],
             "confidence": event["confidence"],
+            "warnings": event.get("warnings", []),
         }
         for event in raw_transcription.get("pitchedNoteEvents", ())
     ]
@@ -127,6 +145,33 @@ def build_score_preview(
         ) from exc
 
     warnings = list(document["warnings"])
+    warnings.append(
+        "Pitched events are shown as one draft part; instrument-specific part "
+        "assignment is not included."
+    )
+    if tempo_confidence is None:
+        warnings.append(
+            "Tempo confidence is unavailable; review score timing and measure placement."
+        )
+    elif tempo_confidence < 0.50:
+        warnings.append(
+            "Tempo confidence is below 0.50; review score timing and measure placement."
+        )
+    if tempo_stable is False:
+        warnings.append(
+            "The estimated tempo is unstable; review score timing and measure placement."
+        )
+    if meter_source == "analysis" and (
+        meter_confidence is None or meter_confidence < 0.50
+    ):
+        warnings.append(
+            "Meter confidence is low or unavailable; review the measure grouping."
+        )
+    percussion_event_count = len(raw_transcription.get("percussionEvents", ()))
+    if percussion_event_count:
+        warnings.append(
+            "Percussion events are present but are not rendered in this pitched-note draft."
+        )
     if meter_source != "analysis":
         warnings.append(
             "Meter evidence is unavailable or weak; measures use an explicit "
@@ -150,10 +195,17 @@ def build_score_preview(
         "builderVersion": SCORE_BUILDER_VERSION,
         "tempoBpm": document["tempoBpm"],
         "beatsPerMeasure": document["beatsPerMeasure"],
+        "divisions": document["divisions"],
         "meterSource": meter_source,
         "measureCount": document["measureCount"],
         "noteCount": document["noteCount"],
+        "percussionEventCount": percussion_event_count,
         "warnings": warnings,
+        "timingEvidence": {
+            "tempoConfidence": tempo_confidence,
+            "tempoStable": tempo_stable,
+            "meterConfidence": meter_confidence,
+        },
         "provenance": {
             "transcriptionVersion": raw_transcription.get("transcriptionVersion"),
             "transcribedAt": raw_transcription.get("createdAt"),
@@ -190,6 +242,8 @@ def render_score_download(
         "schemaVersion": preview["schemaVersion"],
         "tempoBpm": preview["tempoBpm"],
         "beatsPerMeasure": preview["beatsPerMeasure"],
+        "divisions": preview["divisions"],
+        "measureCount": preview["measureCount"],
         "measures": preview["measures"],
     }
     try:

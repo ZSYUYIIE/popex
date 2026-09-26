@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, and an optional local four-stem separation workflow. It does **not** yet generate note events, drum events, chord symbols, tablature, sheet music, MIDI, or MusicXML.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, and evidence-aware harmonic context. It does **not** yet generate tablature, sheet music, MIDI, or MusicXML.
 
 Implemented capabilities:
 
@@ -404,15 +404,19 @@ Implemented capabilities:
 - safe source retention;
 - 44.1 kHz PCM `analysis.wav` normalization;
 - persistent SQLite job history;
-- separate source-preparation, audio-analysis, and stem-separation states;
+- separate source-preparation, audio-analysis, stem-separation, raw-transcription, interpretation, and harmony states;
 - deterministic tempo, beat, tonal-centre, chroma, and tuning estimates with librosa;
 - versioned analysis JSON;
 - optional worker-isolated Demucs `4.1.0` separation into vocals, bass, drums, and other/accompaniment;
 - explicit first-use consent before any model preparation or download;
 - revision- and SHA-256-backed schema-3 stem manifests;
 - safe stem details, preview, and download endpoints;
-- retry and restart recovery that preserve completed source, analysis, and previously published stems;
-- source, WAV, metadata, analysis, and stem downloads;
+- local baseline raw transcription (`baseline-pyin-onset-v1`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment;
+- editable interpretation drafts (`editable-interpretation-v1`, schema 1) with source-aware pitched parts/phrases, conservative rhythm grid, and broad drum structure;
+- evidence-aware harmonic context (`pitch-class-window-v1`, schema 1) with conservative chord candidates, unresolved accounting, and per-event warning preservation;
+- attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
+- retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony;
+- source, WAV, metadata, analysis, stem, transcription, interpretation, and harmony downloads;
 - local Windows, Linux/macOS, and Docker workflows for the base application;
 - optional validated Linux and Windows CPU runtime profiles;
 - synthetic, offline automated tests for ordinary repository CI.
@@ -431,6 +435,9 @@ local upload or supported URL
 → optional first-use model preparation after consent
 → local worker separation into vocals, bass, drums, and other
 → atomic schema-3 stem manifest publication
+→ explicit raw-transcription action (pitched + percussion events)
+→ explicit interpretation action (parts, rhythm, drum structure, editable draft)
+→ explicit harmony action (evidence-aware harmonic context)
 ```
 
 Supported upload formats: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, and WebM.
@@ -499,18 +506,24 @@ These stems are model outputs, not guaranteed isolated studio tracks. Musicians 
 
 ## Processing status semantics
 
-Source preparation, audio analysis, and stem separation are tracked independently:
+Source preparation, audio analysis, stem separation, raw transcription, interpretation, and harmony are tracked independently:
 
 - `preparation_status` reports whether the source and `analysis.wav` were created;
 - `analysis_status` reports whether timing and tonal analysis is not started, processing, completed, or failed;
 - `separation_status` reports whether stem separation is not started, processing, completed, or failed;
+- `transcription_status`, `interpretation_status`, and `harmony_status` report the same lifecycle for their stages;
 - ordinary job serialization performs no runtime probe or network-capable operation;
 - separation progress remains below 100 during worker execution and reaches 100 only after successful manifest publication and persistence;
 - one atomic SQLite claim prevents concurrent duplicate separation attempts;
+- transcription, interpretation, and harmony each use atomic one-winner attempt claims bound to exact attempt identities;
 - analysis failure does not convert successful source preparation into failure;
 - separation failure does not downgrade source preparation or audio analysis;
-- a failed retry does not replace the last successful stem manifest or delete its stem files;
-- interrupted separation is marked retryable at restart while earlier artifacts remain readable.
+- transcription failure does not downgrade source, analysis, or stems;
+- interpretation failure does not downgrade raw transcription;
+- harmony failure does not downgrade transcription or interpretation;
+- a failed retry does not replace the last successful stem, transcription, interpretation, or harmony manifest, nor delete its files;
+- interrupted separation is marked retryable at restart while earlier artifacts remain readable;
+- interrupted transcription, interpretation, or harmony is marked retryable at restart while earlier artifacts remain readable.
 
 ## API
 
@@ -527,9 +540,18 @@ Source preparation, audio analysis, and stem separation are tracked independentl
 - `GET /api/jobs/{job_id}/stems`
 - `GET /api/jobs/{job_id}/stems/{kind}/preview`
 - `GET /api/jobs/{job_id}/stems/{kind}/download`
+- `POST /api/jobs/{job_id}/transcribe` with optional `?force=true`
+- `GET /api/jobs/{job_id}/transcription`
+- `GET /api/jobs/{job_id}/transcription/download`
+- `POST /api/jobs/{job_id}/interpret` with optional `?force=true`
+- `GET /api/jobs/{job_id}/interpretation`
+- `GET /api/jobs/{job_id}/interpretation/download`
+- `POST /api/jobs/{job_id}/harmonize` with optional `?force=true`
+- `GET /api/jobs/{job_id}/harmony`
+- `GET /api/jobs/{job_id}/harmony/download`
 - `GET /api/jobs/{job_id}/files/{file_name}`
 
-Historical completed jobs are not analyzed or separated automatically at startup. Use the Analyze and Separate actions or the corresponding endpoints. Active or already completed separation attempts are rejected rather than duplicated.
+Historical completed jobs are not analyzed, separated, transcribed, interpreted, or harmonized automatically at startup. Use the Analyze, Separate, Transcribe, Interpret, and Harmonize actions or the corresponding endpoints. Active or already completed attempts are rejected rather than duplicated.
 
 The web API never accepts a worker executable, runtime lock, cache root, model repository, model revision, checkpoint filename, checkpoint hash, device path, or arbitrary artifact path. Stem preview and download resolution always starts from the validated published manifest.
 
@@ -636,22 +658,27 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 ## Reliability behaviour
 
 - Existing SQLite databases are migrated in place.
-- Previously completed jobs remain readable with independent analysis and separation defaults.
+- Previously completed jobs remain readable with independent analysis, separation, transcription, interpretation, and harmony defaults.
 - Interrupted analysis retains successful source preparation and becomes retryable.
 - Interrupted separation retains source preparation, audio analysis, any previously published manifest, and its stem WAVs.
+- Interrupted transcription retains source, analysis, and stems while becoming retryable.
+- Interrupted interpretation retains raw transcription while becoming retryable.
+- Interrupted harmony retains transcription and interpretation while becoming retryable.
 - Analysis failures retain the source, `analysis.wav`, and metadata.
 - Separation failures update only separation state and remain retryable.
-- Analysis JSON and stem manifests are written atomically.
+- Transcription, interpretation, and harmony failures update only their own stage and remain retryable.
+- Analysis JSON, stem manifests, raw-transcription, interpretation-draft, and harmony artifacts are written atomically.
 - Runtime capability is probed at startup or explicit refresh, not once per job serialization.
 - A missing or incompatible optional runtime does not prevent the base application from starting.
 - Technical tracebacks are logged; user-facing runtime, cache, lock, and artifact paths are redacted or omitted.
-- Meter, tonal-centre, and separated stems are estimates and carry warnings where applicable.
+- Meter, tonal-centre, separated stems, raw events, interpretation drafts, and harmonic candidates are estimates and carry warnings where applicable.
 
 ## Known limitations
 
-- No pitched-note or percussion-event transcription yet.
-- No chord extraction yet.
 - No MusicXML, MIDI, PDF, tablature, or score rendering yet.
+- Raw transcription is a local baseline (pYIN/onset); dense mixes remain approximate and carry warnings.
+- Interpretation drafts are conservative reductions; pitched parts, rhythm grid, and drum structure require musician review.
+- Harmonic context provides conservative chord candidates with unresolved accounting, not guaranteed complete chord symbols for every measure.
 - Stem separation currently supports only the audited four-stem `htdemucs` profile.
 - Separation quality varies by recording and does not guarantee complete instrument isolation.
 - Optional runtime installation is separately managed and platform-specific; the base application does not install it automatically.
@@ -662,9 +689,9 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Next planned cycle
 
-The next planned implementation stage is raw pitched-note and percussion-event representation and baseline transcription from the source and separated stems.
+The next planned implementation stage is the missing score-construction vertical slice: quantized measures and rhythms from interpretation and harmony into versioned score documents with stdlib-only MIDI and MusicXML exports.
 
-That stage should preserve raw timing and confidence before score quantization, keep pitched and percussion events separate, record exact model/version provenance, and retain the current retry/preservation guarantees. Chord extraction, readable measures, MIDI, MusicXML, drum notation, tablature, and synchronized correction follow later in the canonical order.
+That stage must keep score construction separate from inference, keep tablature fingering separate from pitch transcription, preserve raw predictions and user-correction separation, retain retry/preservation guarantees with honest warnings, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Drum notation, guitar/bass tablature, synchronized correction, and part extraction follow in canonical order once the minimal score export is honest and reviewable.
 
 ## License
 

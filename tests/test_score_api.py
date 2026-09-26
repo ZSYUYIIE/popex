@@ -36,7 +36,14 @@ def make_settings(tmp_path: Path) -> Settings:
     )
 
 
-def analysis_payload(*, tempo=120.0, meter=4) -> dict:
+def analysis_payload(
+    *,
+    tempo=120.0,
+    meter=4,
+    tempo_confidence=0.9,
+    tempo_stable=True,
+    meter_confidence=0.8,
+) -> dict:
     return {
         "schemaVersion": 1,
         "analysisVersion": ANALYSIS_VERSION,
@@ -54,13 +61,13 @@ def analysis_payload(*, tempo=120.0, meter=4) -> dict:
         },
         "timing": {
             "tempoBpm": tempo,
-            "tempoConfidence": 0.9,
-            "tempoStable": True,
+            "tempoConfidence": tempo_confidence,
+            "tempoStable": tempo_stable,
             "beatsSeconds": [0.0, 0.5, 1.0],
             "beatConfidence": 0.9,
             "downbeatsSeconds": [0.0],
             "meter": meter,
-            "meterConfidence": 0.8,
+            "meterConfidence": meter_confidence,
         },
         "tonality": {
             "tonalCenter": "C",
@@ -88,7 +95,7 @@ def analysis_payload(*, tempo=120.0, meter=4) -> dict:
     }
 
 
-def raw_payload() -> dict:
+def raw_payload(*, percussion_events: list[dict] | None = None) -> dict:
     events = [
         {
             "id": "p_c",
@@ -100,7 +107,7 @@ def raw_payload() -> dict:
             "frequencyHz": 261.6,
             "noteName": "C4",
             "confidence": 0.9,
-            "warnings": [],
+            "warnings": ["synthetic low-level event warning"],
         },
         {
             "id": "p_e",
@@ -125,13 +132,23 @@ def raw_payload() -> dict:
         },
         "algorithms": {"testRaw": {"version": "raw-transcription-v1"}},
         "pitchedNoteEvents": events,
-        "percussionEvents": [],
+        "percussionEvents": [] if percussion_events is None else percussion_events,
         "alignmentCandidates": [],
         "warnings": [],
     }
 
 
-def create_job(settings: Settings, *, transcribed=True, tempo=120.0, meter=4) -> str:
+def create_job(
+    settings: Settings,
+    *,
+    transcribed=True,
+    tempo=120.0,
+    meter=4,
+    tempo_confidence=0.9,
+    tempo_stable=True,
+    meter_confidence=0.8,
+    percussion_events: list[dict] | None = None,
+) -> str:
     settings.ensure_directories()
     db.init_database(settings.database_path)
     job_id = uuid4().hex
@@ -144,7 +161,16 @@ def create_job(settings: Settings, *, transcribed=True, tempo=120.0, meter=4) ->
     job_dir = settings.exports_dir / job_id
     (job_dir / "analysis").mkdir(parents=True, exist_ok=True)
     (job_dir / "analysis" / "audio-analysis.json").write_text(
-        json.dumps(analysis_payload(tempo=tempo, meter=meter), allow_nan=False),
+        json.dumps(
+            analysis_payload(
+                tempo=tempo,
+                meter=meter,
+                tempo_confidence=tempo_confidence,
+                tempo_stable=tempo_stable,
+                meter_confidence=meter_confidence,
+            ),
+            allow_nan=False,
+        ),
         encoding="utf-8",
     )
     db.update_job(
@@ -168,11 +194,17 @@ def create_job(settings: Settings, *, transcribed=True, tempo=120.0, meter=4) ->
         ),
         transcribed_at=RAW_CREATED_AT if transcribed else None,
         pitched_event_count=2 if transcribed else None,
-        percussion_event_count=0 if transcribed else None,
+        percussion_event_count=(
+            len(percussion_events or []) if transcribed else None
+        ),
         aligned_event_count=0 if transcribed else None,
     )
     if transcribed:
-        write_raw_transcription(job_id, settings, raw_payload())
+        write_raw_transcription(
+            job_id,
+            settings,
+            raw_payload(percussion_events=percussion_events),
+        )
     return job_id
 
 
@@ -203,11 +235,71 @@ def test_score_preview_reports_provenance_and_counts(tmp_path: Path) -> None:
     assert payload["builderVersion"] == SCORE_BUILDER_VERSION
     assert payload["tempoBpm"] == 120.0
     assert payload["beatsPerMeasure"] == 4
+    assert payload["divisions"] == 480
     assert payload["meterSource"] == "analysis"
     assert payload["noteCount"] == 2
+    assert payload["percussionEventCount"] == 0
+    assert payload["timingEvidence"] == {
+        "tempoConfidence": 0.9,
+        "tempoStable": True,
+        "meterConfidence": 0.8,
+    }
     assert "measures" not in payload
     assert payload["provenance"]["transcriptionVersion"] == "raw-transcription-v1"
     assert payload["provenance"]["analysisVersion"] == ANALYSIS_VERSION
+
+
+def test_score_preview_surfaces_weak_timing_and_unrendered_percussion(
+    tmp_path: Path,
+) -> None:
+    percussion = [
+        {
+            "id": "drum_kick_1",
+            "sourceKind": "drums",
+            "timeSeconds": 0.25,
+            "strength": 0.8,
+            "hits": [{"kind": "kick", "confidence": 0.75}],
+        }
+    ]
+    settings = make_settings(tmp_path)
+    job_id = create_job(
+        settings,
+        tempo_confidence=0.3,
+        tempo_stable=False,
+        meter_confidence=0.2,
+        percussion_events=percussion,
+    )
+    client = TestClient(create_app(settings))
+    response = client.get(f"/api/jobs/{job_id}/score")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["percussionEventCount"] == 1
+    assert payload["timingEvidence"] == {
+        "tempoConfidence": 0.3,
+        "tempoStable": False,
+        "meterConfidence": 0.2,
+    }
+    assert any("Tempo confidence is below 0.50" in item for item in payload["warnings"])
+    assert any("tempo is unstable" in item for item in payload["warnings"])
+    assert any("Meter confidence is low" in item for item in payload["warnings"])
+    assert any("not rendered" in item for item in payload["warnings"])
+
+
+def test_score_measures_retain_fractional_pitch_and_raw_event_warnings(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    client = TestClient(create_app(settings))
+    response = client.get(
+        f"/api/jobs/{job_id}/score", params={"includeMeasures": "true"}
+    )
+    assert response.status_code == 200
+    note = response.json()["measures"][0]["notes"][0]
+    assert note["sourceKind"] == "full_mix"
+    assert note["rawMidiPitch"] == pytest.approx(60.05)
+    assert note["sourceWarnings"] == ["synthetic low-level event warning"]
 
 
 def test_score_preview_with_measures_and_meter_fallback(tmp_path: Path) -> None:
