@@ -52,6 +52,21 @@ The validator never prints raw exceptions, tracebacks, URLs, tokens, or local pa
 
 ## Local static validation
 
+The entry point is importable on Windows, but real inference remains restricted
+to the locked Linux x86-64 CPython 3.13 profile. With the approved profile
+argument, unsupported hosts exit with status 2 and the path-free
+`UNSUPPORTED_VALIDATION_PLATFORM` JSON before inspecting trusted paths,
+starting the application/runtime, or preparing a model. This is a refusal,
+not evidence that Windows inference has succeeded.
+
+Linux RSS telemetry imports `resource` only when a successful validation
+measures usage. Missing or unavailable telemetry remains `null`; it does not
+invent a memory measurement or relax any profile, consent or checkpoint check.
+Permanent tests cover a missing `resource` module, the no-side-effect platform
+boundary, RSS units, and the actual Windows CLI refusal. Symlink attack tests
+still require actual symlink privileges and retain their existing explicit
+unavailable-fixture skip.
+
 The permanent tests are offline and do not download or import the optional runtime:
 
 ```bash
@@ -62,6 +77,10 @@ node --check app/static/app.js
 ```
 
 ## Final workflow evidence
+
+The following is the historical pre-merge handoff, not a current dispatch-status
+claim. The entry-point portability change neither dispatches this workflow nor
+claims new real-model inference evidence.
 
 Status: blocked before dispatch.
 

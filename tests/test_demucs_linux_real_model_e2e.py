@@ -265,7 +265,7 @@ def test_trusted_input_validation_accepts_only_isolated_absolute_roots(tmp_path:
     assert caught.value.code == "TRUSTED_ROOTS_OVERLAP"
 
 
-def test_trusted_input_validation_rejects_symlink_and_nonempty_cache(tmp_path: Path, monkeypatch):
+def test_trusted_input_validation_rejects_symlink_cache(tmp_path: Path, monkeypatch):
     module = load_validator()
     monkeypatch.setattr(module, "_supported_platform", lambda: True)
     target = tmp_path / "actual-cache"
@@ -278,6 +278,10 @@ def test_trusted_input_validation_rejects_symlink_and_nonempty_cache(tmp_path: P
     with pytest.raises(module.E2EValidationError):
         module.validate_trusted_inputs(make_args(tmp_path / "symlink", cache_root=str(link)))
 
+
+def test_trusted_input_validation_rejects_nonempty_cache(tmp_path: Path, monkeypatch):
+    module = load_validator()
+    monkeypatch.setattr(module, "_supported_platform", lambda: True)
     base = tmp_path / "nonempty"
     args = make_args(base)
     cache = Path(args.cache_root)
