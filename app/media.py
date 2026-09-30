@@ -382,16 +382,54 @@ def friendly_error(
 ) -> str:
     message = str(error).strip() or "Media processing failed."
     replacements = [settings.data_dir.resolve(), *[path.resolve() for path in paths]]
-    for path in replacements:
-        message = message.replace(str(path), "<local media>")
-        message = message.replace(str(path).replace("\\", "/"), "<local media>")
-    message = re.sub(
-        r"(?i)(?:[a-z]:\\|/)(?:[^:\n\r]+[\\/])+[^:\n\r ]+",
-        "<local path>",
-        message,
+    message = redact_local_paths(
+        message, paths=tuple(replacements), replacement="<local media>"
     )
     message = re.sub(r"\s+", " ", message).strip()
     return message[-800:]
+
+
+def redact_local_paths(
+    value: str, *, paths: tuple[Path, ...] = (), replacement: str = "[redacted]"
+) -> str:
+    """Redact whole paths before replacing a root can hide its path grammar.
+
+    Spaces, commas and semicolons are legal in filenames. Quoting or a colon
+    separates diagnostics; ambiguous unquoted prose is redacted with the path.
+    This is string sanitization only, never a filesystem access or resolver.
+    """
+    # Quotes make even punctuation-rich filenames unambiguous. Handle them
+    # before generic diagnostic delimiters or root substitutions can split it.
+    value = re.sub(
+        r'''(?i)(["'])(?:[a-z]:[\\/]|\\\\|/)[^\r\n]*?\1''',
+        lambda match: match.group(1) + replacement + match.group(1),
+        value,
+    )
+    # Do not eat the letter of a following drive prefix in a multi-path
+    # diagnostic. It would leave ':\\...' and make that second path invisible.
+    tail = r'''(?:(?![A-Za-z]:[\\/])[^:\r\n])*'''
+    variants = {
+        variant
+        for path in paths
+        for variant in (str(path), str(path).replace("\\", "/"))
+        if str(path)
+    }
+    for path in sorted(variants, key=len, reverse=True):
+        # A full known filename wins over its shorter parent. Consume a
+        # descendant as one unit, including mixed Windows/POSIX separators.
+        pattern = (
+            re.escape(path) + r'''(?=$|[\\/\s:"';,<>\]])(?:[\\/]''' + tail + ")?"
+        )
+        windows_path = bool(re.match(r"(?i)^[a-z]:[\\/]|^\\\\", path))
+        value = re.sub(
+            pattern, lambda _match: replacement, value,
+            flags=re.IGNORECASE if windows_path else 0,
+        )
+    return re.sub(
+        r"(?i)(?:\b[a-z]:[\\/]|\\\\|(?<![:\w])/)" + tail,
+        lambda _match: replacement,
+        value,
+    )
 
 
 def generated_source_name(extension: str) -> str:

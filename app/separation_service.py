@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from app import db
 from app.config import Settings
-from app.media import MediaProcessingError, secure_job_dir
+from app.media import MediaProcessingError, redact_local_paths, secure_job_dir
 from app.separation import (
     AUDITED_CHECKPOINT_FILE,
     AUDITED_CHECKPOINT_SHA256,
@@ -69,8 +69,6 @@ _CREDENTIAL_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+\-/=]+")
 _URL_RE = re.compile(r"(?i)https?://[^\s\]\[<>()\"']+")
-_WINDOWS_PATH_RE = re.compile(r"(?i)(?:\b[A-Z]:[\\/]|\\\\)[^\s,;\"']+")
-_POSIX_PATH_RE = re.compile(r"(?<![:\w])/(?:[^\s,;\"']+)")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 _SPACE_RE = re.compile(r"\s+")
 _RUNTIME_CONFIGURATION_MESSAGE = (
@@ -914,16 +912,9 @@ def _sanitize_public_text(
         settings.stem_separation_runtime_lock,
         settings.stem_separation_cache_dir,
     )
-    for path in sorted(
-        {str(path) for path in known_paths if isinstance(path, Path)},
-        key=len,
-        reverse=True,
-    ):
-        if path:
-            text = text.replace(path, "[redacted]")
-            text = text.replace(path.replace("\\", "/"), "[redacted]")
-    text = _WINDOWS_PATH_RE.sub("[redacted]", text)
-    text = _POSIX_PATH_RE.sub("[redacted]", text)
+    text = redact_local_paths(
+        text, paths=tuple(path for path in known_paths if isinstance(path, Path))
+    )
     text = _SPACE_RE.sub(" ", text).strip()
     if not text:
         return fallback

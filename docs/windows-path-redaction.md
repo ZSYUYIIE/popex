@@ -13,8 +13,22 @@ retaining bounded useful failure and recovery text. Credentials and traceback
 handling must remain intact.
 
 No source, database, model, lifecycle, API schema, or product-definition change
-is planned. The remaining resource-import, symlink-privilege, readiness-cleanup
+is made. The remaining resource-import, symlink-privilege, readiness-cleanup
 and worker-classification failures remain separately tracked in #114.
+
+The shared string sanitizer matches whole configured paths (longest first),
+including descendants and mixed separators, before a replacement can hide the
+path grammar. Quoted paths preserve punctuation-rich filenames as one unit;
+generic Windows drive, UNC, and POSIX forms are then redacted. Windows known
+paths are matched case-insensitively. A following drive prefix in a multi-path
+message is not consumed by the first match. Existing separation credential,
+URL, traceback and output-size policies remain in force.
+
+Unquoted path/prose boundaries can be ambiguous, particularly when names
+contain spaces, commas or semicolons. Those characters do not end a path;
+the filter may conservatively remove adjacent diagnostic text up to a colon;
+it is not a reversible path parser. Original technical errors remain in private
+server logs, while public recovery controls and earlier artifacts are unchanged.
 
 Validation:
 
