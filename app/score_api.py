@@ -159,14 +159,18 @@ def _record_pointer(record: Mapping[str, Any]) -> None:
         )
 
 
-def build_score_preview(
+def collect_score_evidence(
     job_id: str,
     settings: Settings,
     record: Mapping[str, Any],
-    *,
-    include_measures: bool = False,
 ) -> dict[str, Any]:
-    """Build a detached score-preview payload from published artifacts."""
+    """Load and cross-check the raw transcription and analysis a score uses.
+
+    Returns detached evidence: the validated raw transcription, analysis, the
+    builder's pitched-note inputs, and explicit timing evidence. Raises
+    :class:`ScorePreviewUnavailableError` for missing evidence and
+    :class:`ScorePreviewError` for invalid or mismatched evidence.
+    """
     _record_pointer(record)
     try:
         raw_transcription = load_raw_transcription(job_id, settings)
@@ -232,11 +236,7 @@ def build_score_preview(
         raise ScorePreviewUnavailableError(
             "Tempo evidence is unavailable; score preview requires analysis tempo."
         )
-    tempo_confidence = _optional_confidence(timing.get("tempoConfidence"))
-    meter_confidence = _optional_confidence(timing.get("meterConfidence"))
     tempo_stable = timing.get("tempoStable")
-    if not isinstance(tempo_stable, bool):
-        tempo_stable = None
     meter = timing.get("meter")
     if type(meter) is int and 1 <= meter <= 12:
         beats_per_measure = meter
@@ -258,22 +258,33 @@ def build_score_preview(
         }
         for event in raw_transcription.get("pitchedNoteEvents", ())
     ]
-    try:
-        document = build_score_document(
-            pitched_inputs,
-            tempo_bpm=float(tempo),
-            beats_per_measure=beats_per_measure,
-        )
-    except ScoreConstructionError as exc:
-        raise ScorePreviewError(
-            "Score preview could not be constructed from saved evidence."
-        ) from exc
+    return {
+        "rawTranscription": raw_transcription,
+        "analysis": analysis,
+        "pitchedInputs": pitched_inputs,
+        "tempoBpm": float(tempo),
+        "beatsPerMeasure": beats_per_measure,
+        "meterSource": meter_source,
+        "tempoConfidence": _optional_confidence(timing.get("tempoConfidence")),
+        "meterConfidence": _optional_confidence(timing.get("meterConfidence")),
+        "tempoStable": tempo_stable if isinstance(tempo_stable, bool) else None,
+        "percussionEventCount": len(raw_transcription.get("percussionEvents", ())),
+    }
 
+
+def score_evidence_warnings(
+    document: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> list[str]:
+    """Return builder warnings plus explicit timing and omitted-layer warnings."""
     warnings = list(document["warnings"])
     warnings.append(
         "Pitched events are shown as one draft part; instrument-specific part "
         "assignment is not included."
     )
+    tempo_confidence = evidence["tempoConfidence"]
+    meter_confidence = evidence["meterConfidence"]
+    meter_source = evidence["meterSource"]
     if tempo_confidence is None:
         warnings.append(
             "Tempo confidence is unavailable; review score timing and measure placement."
@@ -282,7 +293,7 @@ def build_score_preview(
         warnings.append(
             "Tempo confidence is below 0.50; review score timing and measure placement."
         )
-    if tempo_stable is False:
+    if evidence["tempoStable"] is False:
         warnings.append(
             "The estimated tempo is unstable; review score timing and measure placement."
         )
@@ -292,8 +303,7 @@ def build_score_preview(
         warnings.append(
             "Meter confidence is low or unavailable; review the measure grouping."
         )
-    percussion_event_count = len(raw_transcription.get("percussionEvents", ()))
-    if percussion_event_count:
+    if evidence["percussionEventCount"]:
         warnings.append(
             "Percussion events are present but are not rendered in this pitched-note draft."
         )
@@ -302,6 +312,32 @@ def build_score_preview(
             "Meter evidence is unavailable or weak; measures use an explicit "
             "4/4 draft grid and require musician review."
         )
+    return warnings
+
+
+def build_score_preview(
+    job_id: str,
+    settings: Settings,
+    record: Mapping[str, Any],
+    *,
+    include_measures: bool = False,
+) -> dict[str, Any]:
+    """Build a detached score-preview payload from published artifacts."""
+    evidence = collect_score_evidence(job_id, settings, record)
+    raw_transcription = evidence["rawTranscription"]
+    analysis = evidence["analysis"]
+    try:
+        document = build_score_document(
+            evidence["pitchedInputs"],
+            tempo_bpm=evidence["tempoBpm"],
+            beats_per_measure=evidence["beatsPerMeasure"],
+        )
+    except ScoreConstructionError as exc:
+        raise ScorePreviewError(
+            "Score preview could not be constructed from saved evidence."
+        ) from exc
+
+    warnings = score_evidence_warnings(document, evidence)
     harmony_pointer = record.get("harmony_artifact_file_name")
     if (
         record.get("harmony_status") == "completed"
@@ -321,15 +357,15 @@ def build_score_preview(
         "tempoBpm": document["tempoBpm"],
         "beatsPerMeasure": document["beatsPerMeasure"],
         "divisions": document["divisions"],
-        "meterSource": meter_source,
+        "meterSource": evidence["meterSource"],
         "measureCount": document["measureCount"],
         "noteCount": document["noteCount"],
-        "percussionEventCount": percussion_event_count,
+        "percussionEventCount": evidence["percussionEventCount"],
         "warnings": warnings,
         "timingEvidence": {
-            "tempoConfidence": tempo_confidence,
-            "tempoStable": tempo_stable,
-            "meterConfidence": meter_confidence,
+            "tempoConfidence": evidence["tempoConfidence"],
+            "tempoStable": evidence["tempoStable"],
+            "meterConfidence": evidence["meterConfidence"],
         },
         "provenance": {
             "transcriptionVersion": raw_transcription.get("transcriptionVersion"),
@@ -394,5 +430,7 @@ __all__ = [
     "ScorePreviewError",
     "ScorePreviewUnavailableError",
     "build_score_preview",
+    "collect_score_evidence",
+    "score_evidence_warnings",
     "render_score_download",
 ]

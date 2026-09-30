@@ -5,10 +5,13 @@ import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from app.score_sources import current_score_fingerprint, is_score_fingerprint
 
 
 _TRANSCRIPTION_COUNT_FIELDS = frozenset(
@@ -54,6 +57,19 @@ _HARMONY_UNSAFE_ERROR_RE = re.compile(
     r"\b\s*[:=]",
     re.IGNORECASE,
 )
+_SCORE_COUNT_FIELDS = frozenset(
+    {
+        "score_measure_count",
+        "score_note_count",
+        "score_chord_symbol_count",
+        "score_warning_count",
+    }
+)
+_SCORE_STATUSES = frozenset({"not_started", "processing", "completed", "failed"})
+_SCORE_ATTEMPT_ARTIFACT_RE = re.compile(
+    r"score/score-document\.([a-f0-9]{32})\.json"
+)
+_SCORE_VERSION_RE = _HARMONY_VERSION_RE
 
 NEW_COLUMNS: dict[str, str] = {
     "source_type": "TEXT NOT NULL DEFAULT 'url'",
@@ -166,6 +182,33 @@ NEW_COLUMNS: dict[str, str] = {
         "OR harmony_used_interpretation_context IN (0, 1))"
     ),
     "harmony_error": "TEXT",
+    "score_status": "TEXT NOT NULL DEFAULT 'not_started'",
+    "score_stage": "TEXT NOT NULL DEFAULT 'not_started'",
+    "score_progress": (
+        "REAL NOT NULL DEFAULT 0 "
+        "CHECK (score_progress >= 0 AND score_progress <= 100)"
+    ),
+    "score_message": "TEXT",
+    "score_attempt_id": "TEXT",
+    "score_attempt_fingerprint": "TEXT",
+    "score_version": "TEXT",
+    "score_artifact_file_name": "TEXT",
+    "scored_at": "TEXT",
+    "score_source_fingerprint": "TEXT",
+    "score_measure_count": (
+        "INTEGER CHECK (score_measure_count IS NULL OR score_measure_count >= 0)"
+    ),
+    "score_note_count": (
+        "INTEGER CHECK (score_note_count IS NULL OR score_note_count >= 0)"
+    ),
+    "score_chord_symbol_count": (
+        "INTEGER CHECK (score_chord_symbol_count IS NULL "
+        "OR score_chord_symbol_count >= 0)"
+    ),
+    "score_warning_count": (
+        "INTEGER CHECK (score_warning_count IS NULL OR score_warning_count >= 0)"
+    ),
+    "score_error": "TEXT",
 }
 
 
@@ -180,6 +223,16 @@ def connect(database_path: Path) -> sqlite3.Connection:
         "is_valid_harmony_artifact",
         1,
         lambda value: 1 if _is_valid_harmony_artifact_file_name(value) else 0,
+    )
+    connection.create_function(
+        "is_valid_score_artifact",
+        1,
+        lambda value: 1 if _is_valid_score_artifact_file_name(value) else 0,
+    )
+    connection.create_function(
+        "is_valid_score_fingerprint",
+        1,
+        lambda value: 1 if is_score_fingerprint(value) else 0,
     )
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -564,6 +617,103 @@ def init_database(database_path: Path) -> None:
               )
             """
         )
+        _normalize_score_columns(connection)
+
+
+def _normalize_score_columns(connection: sqlite3.Connection) -> None:
+    """Normalize legacy or hand-edited score lifecycle rows in place."""
+    connection.execute(
+        """
+        UPDATE jobs
+        SET score_status = CASE
+                WHEN TRIM(COALESCE(score_status, '')) IN (
+                    'not_started', 'processing', 'completed', 'failed'
+                ) THEN TRIM(score_status)
+                ELSE 'not_started'
+            END,
+            score_stage = COALESCE(NULLIF(TRIM(score_stage), ''), 'not_started'),
+            score_progress = CASE
+                WHEN score_progress IS NULL OR score_progress < 0 THEN 0
+                WHEN score_progress > 100 THEN 100
+                ELSE score_progress
+            END,
+            score_artifact_file_name = CASE
+                WHEN is_valid_score_artifact(score_artifact_file_name) = 1
+                    THEN score_artifact_file_name
+                ELSE NULL
+            END,
+            score_measure_count = CASE
+                WHEN score_measure_count < 0 THEN NULL ELSE score_measure_count
+            END,
+            score_note_count = CASE
+                WHEN score_note_count < 0 THEN NULL ELSE score_note_count
+            END,
+            score_chord_symbol_count = CASE
+                WHEN score_chord_symbol_count < 0 THEN NULL
+                ELSE score_chord_symbol_count
+            END,
+            score_warning_count = CASE
+                WHEN score_warning_count < 0 THEN NULL ELSE score_warning_count
+            END
+        """
+    )
+    connection.execute(
+        """
+        UPDATE jobs
+        SET score_attempt_id = NULL,
+            score_attempt_fingerprint = NULL
+        WHERE score_status != 'processing'
+          AND (score_attempt_id IS NOT NULL OR score_attempt_fingerprint IS NOT NULL)
+        """
+    )
+    connection.execute(
+        """
+        UPDATE jobs
+        SET score_status = 'failed',
+            score_stage = 'failed',
+            score_progress = CASE
+                WHEN score_progress >= 100 THEN 99 ELSE score_progress
+            END,
+            score_message = 'Saved score metadata is incomplete; the score can be rebuilt.',
+            score_error = 'Saved score metadata is incomplete.'
+        WHERE score_status = 'completed'
+          AND (
+                score_artifact_file_name IS NULL
+                OR score_version IS NULL
+                OR TRIM(score_version) = ''
+                OR scored_at IS NULL
+                OR TRIM(scored_at) = ''
+                OR is_valid_score_fingerprint(score_source_fingerprint) != 1
+                OR score_measure_count IS NULL
+                OR score_note_count IS NULL
+                OR score_chord_symbol_count IS NULL
+                OR score_warning_count IS NULL
+          )
+        """
+    )
+    connection.execute(
+        """
+        UPDATE jobs
+        SET score_stage = CASE
+                WHEN score_status = 'completed' THEN 'completed'
+                WHEN score_status = 'failed' THEN 'failed'
+                WHEN score_status = 'not_started' THEN 'not_started'
+                ELSE score_stage
+            END,
+            score_progress = CASE
+                WHEN score_status = 'completed' THEN 100
+                WHEN score_status = 'not_started' THEN 0
+                ELSE score_progress
+            END,
+            score_error = CASE
+                WHEN score_status = 'failed'
+                     AND (score_error IS NULL OR TRIM(score_error) = '')
+                    THEN 'Score construction failed.'
+                WHEN score_status IN ('completed', 'not_started') THEN NULL
+                ELSE score_error
+            END
+        """
+    )
 
 
 def fail_incomplete_jobs(database_path: Path) -> None:
@@ -737,6 +887,20 @@ def fail_incomplete_jobs(database_path: Path) -> None:
                 harmony_error = 'Harmonic context was interrupted by a server restart.',
                 updated_at = ?
             WHERE harmony_status = 'processing'
+            """,
+            (now,),
+        )
+        connection.execute(
+            """
+            UPDATE jobs
+            SET score_status = 'failed',
+                score_stage = 'failed',
+                score_message = 'Earlier results and any previously built score remain available; score construction can be retried.',
+                score_attempt_id = NULL,
+                score_attempt_fingerprint = NULL,
+                score_error = 'Score construction was interrupted by a server restart.',
+                updated_at = ?
+            WHERE score_status = 'processing'
             """,
             (now,),
         )
@@ -1319,6 +1483,327 @@ def _reset_stale_harmony_in_connection(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ScoreCompletion:
+    """Outcome of an attempt-scoped score completion."""
+
+    completed: bool
+    previous_artifact_file_name: str | None = None
+
+
+def score_attempt_artifact_file_name(attempt_id: str) -> str:
+    """Return the immutable artifact pointer owned by one score attempt."""
+    safe_attempt_id = _validate_score_attempt_id(attempt_id)
+    if safe_attempt_id is None:
+        raise ValueError("score_attempt_id is required.")
+    return f"score/score-document.{safe_attempt_id}.json"
+
+
+@contextmanager
+def _score_write_transaction(
+    database_path: Path,
+    job_id: str,
+) -> Iterator[tuple[sqlite3.Connection, dict[str, Any] | None]]:
+    """Hold SQLite's write lock while one score row is read and changed."""
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        yield connection, (dict(row) if row is not None else None)
+
+
+def claim_score_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    score_version: str,
+    force: bool = False,
+    message: str = "Queued score construction.",
+) -> str | None:
+    """Atomically claim one score attempt and return its exact identity.
+
+    The claim captures the fingerprint of the evidence visible inside the same
+    write transaction, so the caller never re-reads mutable state to discover
+    which attempt it owns.
+    """
+    # The version is validated for the caller's contract; the durable version
+    # is written only by a successful completion.
+    _validate_score_version(score_version)
+    safe_message = _validate_harmony_text(message, "score message", 500)
+    attempt_id = uuid4().hex
+    with _score_write_transaction(database_path, job_id) as (connection, row):
+        if row is None:
+            return None
+        fingerprint = current_score_fingerprint(row)
+        status = row.get("score_status")
+        if fingerprint is None or not (
+            status in {"not_started", "failed"}
+            or (bool(force) and status == "completed")
+        ):
+            return None
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET score_status = 'processing',
+                score_stage = 'queued',
+                score_progress = 1,
+                score_message = ?,
+                score_attempt_id = ?,
+                score_attempt_fingerprint = ?,
+                score_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+              AND score_status = ?
+            """,
+            (
+                safe_message,
+                attempt_id,
+                fingerprint,
+                utc_now(),
+                job_id,
+                status,
+            ),
+        )
+        return attempt_id if cursor.rowcount == 1 else None
+
+
+def start_score_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    attempt_id: str,
+    message: str = "Loading saved analysis and transcription evidence.",
+) -> bool:
+    """Consume one queued claim exactly once for worker execution."""
+    safe_attempt_id = _validate_score_attempt_id(attempt_id)
+    if safe_attempt_id is None:
+        raise ValueError("score_attempt_id is required.")
+    safe_message = _validate_harmony_text(message, "score message", 500)
+    with _score_write_transaction(database_path, job_id) as (connection, row):
+        if (
+            row is None
+            or row.get("score_status") != "processing"
+            or row.get("score_stage") != "queued"
+            or row.get("score_attempt_id") != safe_attempt_id
+            or current_score_fingerprint(row) != row.get("score_attempt_fingerprint")
+        ):
+            return False
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET score_stage = 'loading_evidence',
+                score_progress = 2,
+                score_message = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND score_status = 'processing'
+              AND score_stage = 'queued'
+              AND score_attempt_id = ?
+            """,
+            (safe_message, utc_now(), job_id, safe_attempt_id),
+        )
+        return cursor.rowcount == 1
+
+
+def update_score_progress(
+    database_path: Path,
+    job_id: str,
+    *,
+    attempt_id: str,
+    stage: str,
+    progress: float,
+    message: str,
+) -> bool:
+    """Advance only the active attempt, monotonically."""
+    safe_attempt_id = _validate_score_attempt_id(attempt_id)
+    if safe_attempt_id is None:
+        raise ValueError("score_attempt_id is required.")
+    safe_stage = _validate_harmony_text(stage, "score stage", 128)
+    safe_message = _validate_harmony_text(message, "score message", 500)
+    safe_progress = _validate_score_progress(progress)
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET score_stage = ?,
+                score_progress = ?,
+                score_message = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND score_status = 'processing'
+              AND score_attempt_id = ?
+              AND ? >= score_progress
+            """,
+            (
+                safe_stage,
+                safe_progress,
+                safe_message,
+                utc_now(),
+                job_id,
+                safe_attempt_id,
+                safe_progress,
+            ),
+        )
+        return cursor.rowcount == 1
+
+
+def complete_score_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    attempt_id: str,
+    score_version: str,
+    artifact_file_name: str,
+    scored_at: str,
+    source_fingerprint: str,
+    measure_count: int,
+    note_count: int,
+    chord_symbol_count: int,
+    warning_count: int,
+    message: str = "Draft score saved.",
+) -> ScoreCompletion:
+    """Publish one attempt's score only if its evidence is still current."""
+    safe_attempt_id = _validate_score_attempt_id(attempt_id)
+    if safe_attempt_id is None:
+        raise ValueError("score_attempt_id is required.")
+    safe_version = _validate_score_version(score_version)
+    if artifact_file_name != score_attempt_artifact_file_name(safe_attempt_id):
+        return ScoreCompletion(False)
+    safe_timestamp = _validate_utc_timestamp(scored_at, "scored_at")
+    if not is_score_fingerprint(source_fingerprint):
+        raise ValueError("score source fingerprint is invalid.")
+    counts = {
+        "score_measure_count": measure_count,
+        "score_note_count": note_count,
+        "score_chord_symbol_count": chord_symbol_count,
+        "score_warning_count": warning_count,
+    }
+    _validate_nonnegative_counts(counts)
+    if any(value is None for value in counts.values()):
+        raise ValueError("score counts are required.")
+    if chord_symbol_count > measure_count:
+        raise ValueError("chord_symbol_count cannot exceed measure_count.")
+    safe_message = _validate_harmony_text(message, "score message", 500)
+    with _score_write_transaction(database_path, job_id) as (connection, row):
+        if (
+            row is None
+            or row.get("score_status") != "processing"
+            or row.get("score_attempt_id") != safe_attempt_id
+            or row.get("score_attempt_fingerprint") != source_fingerprint
+            or current_score_fingerprint(row) != source_fingerprint
+        ):
+            return ScoreCompletion(False)
+        previous = row.get("score_artifact_file_name")
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET score_status = 'completed',
+                score_stage = 'completed',
+                score_progress = 100,
+                score_message = ?,
+                score_attempt_id = NULL,
+                score_attempt_fingerprint = NULL,
+                score_version = ?,
+                score_artifact_file_name = ?,
+                scored_at = ?,
+                score_source_fingerprint = ?,
+                score_measure_count = ?,
+                score_note_count = ?,
+                score_chord_symbol_count = ?,
+                score_warning_count = ?,
+                score_error = NULL,
+                updated_at = ?
+            WHERE id = ?
+              AND score_status = 'processing'
+              AND score_attempt_id = ?
+            """,
+            (
+                safe_message,
+                safe_version,
+                artifact_file_name,
+                safe_timestamp,
+                source_fingerprint,
+                measure_count,
+                note_count,
+                chord_symbol_count,
+                warning_count,
+                utc_now(),
+                job_id,
+                safe_attempt_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            return ScoreCompletion(False)
+        return ScoreCompletion(
+            True,
+            previous
+            if _is_valid_score_artifact_file_name(previous)
+            and previous != artifact_file_name
+            else None,
+        )
+
+
+def fail_score_attempt(
+    database_path: Path,
+    job_id: str,
+    *,
+    attempt_id: str,
+    error: str,
+    message: str = "Score construction stopped; earlier results remain available.",
+) -> bool:
+    """Fail only the active attempt; the previous durable score is untouched."""
+    safe_attempt_id = _validate_score_attempt_id(attempt_id)
+    if safe_attempt_id is None:
+        raise ValueError("score_attempt_id is required.")
+    safe_message = _validate_harmony_text(message, "score message", 500)
+    safe_error = _sanitize_score_error(error)
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE jobs
+            SET score_status = 'failed',
+                score_stage = 'failed',
+                score_message = ?,
+                score_attempt_id = NULL,
+                score_attempt_fingerprint = NULL,
+                score_error = ?,
+                updated_at = ?
+            WHERE id = ?
+              AND score_status = 'processing'
+              AND score_attempt_id = ?
+            """,
+            (safe_message, safe_error, utc_now(), job_id, safe_attempt_id),
+        )
+        return cursor.rowcount == 1
+
+
+@contextmanager
+def score_cleanup_lease(
+    database_path: Path,
+    job_id: str,
+) -> Iterator[tuple[str | None, str | None]]:
+    """Yield the durable pointer and active attempt while holding the write lock.
+
+    Artifact cleanup runs inside this lease so a concurrent completion cannot
+    make a file durable between the ownership check and its removal.
+    """
+    with _score_write_transaction(database_path, job_id) as (_connection, row):
+        if row is None:
+            raise ValueError("score job is unavailable.")
+        durable = row.get("score_artifact_file_name")
+        active = (
+            row.get("score_attempt_id")
+            if row.get("score_status") == "processing"
+            else None
+        )
+        yield (
+            durable if _is_valid_score_artifact_file_name(durable) else None,
+            active if isinstance(active, str) else None,
+        )
+
+
 def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
     allowed = set(NEW_COLUMNS) | {
         "source_url",
@@ -1332,6 +1817,7 @@ def update_job(database_path: Path, job_id: str, **fields: Any) -> None:
     values = {key: value for key, value in fields.items() if key in allowed}
     _validate_nonnegative_counts(values)
     _validate_harmony_values(values)
+    _validate_score_values(values)
     if not values:
         return
     values["updated_at"] = utc_now()
@@ -1355,6 +1841,7 @@ def _validate_nonnegative_counts(values: dict[str, Any]) -> None:
         _TRANSCRIPTION_COUNT_FIELDS
         | _INTERPRETATION_COUNT_FIELDS
         | _HARMONY_COUNT_FIELDS
+        | _SCORE_COUNT_FIELDS
     ):
         if field not in values:
             continue
@@ -1475,6 +1962,78 @@ def _sanitize_harmony_error(value: Any) -> str:
     if len(text) > 500:
         text = text[:499].rstrip() + "…"
     return text
+
+
+def _validate_score_version(value: Any) -> str:
+    if not isinstance(value, str) or not _SCORE_VERSION_RE.fullmatch(value):
+        raise ValueError("score_version is invalid.")
+    return value
+
+
+def _validate_score_attempt_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _HARMONY_ATTEMPT_ID_RE.fullmatch(value):
+        raise ValueError("score_attempt_id is invalid.")
+    return value
+
+
+def _validate_score_progress(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("score progress must be a number from 0 through 100.")
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= 100:
+        raise ValueError("score progress must be a number from 0 through 100.")
+    return number
+
+
+def _is_valid_score_artifact_file_name(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and _SCORE_ATTEMPT_ARTIFACT_RE.fullmatch(value) is not None
+    )
+
+
+def _validate_utc_timestamp(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise ValueError(f"{label} must be a UTC timestamp.")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a UTC timestamp.") from exc
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise ValueError(f"{label} must be a UTC timestamp.")
+    return value
+
+
+def _sanitize_score_error(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("score error must be text.")
+    text = " ".join(value.split())
+    if not text or _HARMONY_UNSAFE_ERROR_RE.search(text):
+        return "Score construction failed."
+    if len(text) > 500:
+        text = text[:499].rstrip() + "…"
+    return text
+
+
+def _validate_score_values(values: dict[str, Any]) -> None:
+    if "score_status" in values and values["score_status"] not in _SCORE_STATUSES:
+        raise ValueError("score_status is invalid.")
+    if "score_progress" in values:
+        values["score_progress"] = _validate_score_progress(values["score_progress"])
+    if "score_attempt_id" in values:
+        values["score_attempt_id"] = _validate_score_attempt_id(
+            values["score_attempt_id"]
+        )
+    pointer = values.get("score_artifact_file_name")
+    if pointer is not None and not _is_valid_score_artifact_file_name(pointer):
+        raise ValueError("score_artifact_file_name is invalid.")
+    for field in ("score_attempt_fingerprint", "score_source_fingerprint"):
+        value = values.get(field)
+        if value is not None and not is_score_fingerprint(value):
+            raise ValueError(f"{field} is invalid.")
 
 
 def get_job(database_path: Path, job_id: str) -> dict[str, Any] | None:
