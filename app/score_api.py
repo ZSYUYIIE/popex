@@ -16,17 +16,18 @@ Honesty rules:
 from __future__ import annotations
 
 import copy
+import json
 import math
+import os
+import stat
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from app.analysis import (
     ANALYSIS_JSON_RELATIVE_PATH,
-    AudioAnalysisError,
-    load_analysis,
 )
 from app.config import Settings
-from app.media import MediaProcessingError
 from app.score_construction import (
     SCORE_BUILDER_VERSION,
     SCORE_SCHEMA_VERSION,
@@ -42,6 +43,72 @@ from app.transcription_events import (
 )
 
 _METER_FALLBACK = 4
+_MAX_ANALYSIS_BYTES = 8 * 1024 * 1024
+
+
+def _analysis_directory_state(paths: tuple[Path, ...]) -> tuple:
+    state = []
+    for path in paths:
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            raise ScorePreviewError("Saved audio analysis directory is unsafe.")
+        state.append((info.st_dev, info.st_ino, info.st_mode))
+    return tuple(state)
+
+
+def _analysis_file_state(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+            info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _reject_analysis_constant(value: str) -> None:
+    raise ValueError("Non-finite analysis JSON is invalid.")
+
+
+def _load_score_analysis(job_id: str, settings: Settings) -> Mapping | None:
+    """Read bounded, stable analysis evidence after raw loader validates the ID."""
+    job_dir = settings.exports_dir / job_id
+    analysis_dir = job_dir / "analysis"
+    path = analysis_dir / "audio-analysis.json"
+    directories = (settings.exports_dir, job_dir, analysis_dir)
+    try:
+        directory_state = _analysis_directory_state(directories)
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ScorePreviewError("Saved audio analysis is unavailable.") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_ANALYSIS_BYTES:
+        raise ScorePreviewError("Saved audio analysis is unsafe or too large.")
+    flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    try:
+        with os.fdopen(os.open(path, flags), "rb") as reader:
+            opened = os.fstat(reader.fileno())
+            if _analysis_file_state(opened) != _analysis_file_state(before):
+                raise ScorePreviewError("Saved audio analysis changed during validation.")
+            data = reader.read(_MAX_ANALYSIS_BYTES + 1)
+            after_read = os.fstat(reader.fileno())
+        if (
+            len(data) > _MAX_ANALYSIS_BYTES
+            or _analysis_file_state(before) != _analysis_file_state(after_read)
+            or _analysis_file_state(before) != _analysis_file_state(path.lstat())
+            or directory_state != _analysis_directory_state(directories)
+        ):
+            raise ScorePreviewError("Saved audio analysis changed during validation.")
+    except OSError as exc:
+        raise ScorePreviewError("Saved audio analysis could not be read safely.") from exc
+    try:
+        payload = json.loads(data.decode("utf-8"), parse_constant=_reject_analysis_constant)
+    except (UnicodeError, ValueError, RecursionError) as exc:
+        raise ScorePreviewError("Saved audio analysis is unreadable.") from exc
+    if (
+        not isinstance(payload, Mapping)
+        or type(payload.get("schemaVersion")) is not int
+        or payload["schemaVersion"] != 1
+    ):
+        raise ScorePreviewError("Saved audio analysis schema is invalid.")
+    return payload
 
 
 def _optional_confidence(value: Any) -> float | None:
@@ -140,12 +207,7 @@ def build_score_preview(
         raise ScorePreviewError(
             "Published raw transcription counts do not match the job record."
         )
-    try:
-        analysis = load_analysis(job_id, settings)
-    except (AudioAnalysisError, MediaProcessingError, OSError, AttributeError) as exc:
-        raise ScorePreviewError(
-            "Saved audio analysis could not be validated."
-        ) from exc
+    analysis = _load_score_analysis(job_id, settings)
     if analysis is None:
         raise ScorePreviewUnavailableError(
             "Saved audio analysis is unavailable; tempo evidence is required."

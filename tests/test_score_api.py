@@ -268,6 +268,43 @@ def test_score_preview_rejects_analysis_file_from_a_different_version(
     assert response.status_code == 500
 
 
+@pytest.mark.parametrize("linked_target", ["file", "directory"])
+def test_score_preview_rejects_linked_analysis_evidence(
+    tmp_path: Path, linked_target: str,
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    analysis_dir = settings.exports_dir / job_id / "analysis"
+    path = analysis_dir / "audio-analysis.json"
+    if linked_target == "file":
+        external = tmp_path / "external-analysis.json"
+        path.rename(external)
+        link = path
+    else:
+        external = tmp_path / "external-analysis"
+        analysis_dir.rename(external)
+        link = analysis_dir
+    try:
+        link.symlink_to(external, target_is_directory=linked_target == "directory")
+    except OSError:
+        pytest.skip("Creating symlinks is unavailable on this platform.")
+    client = TestClient(create_app(settings))
+    response = client.get(f"/api/jobs/{job_id}/score")
+    assert response.status_code == 500
+    assert str(external) not in response.text
+
+
+def test_score_preview_bounds_analysis_evidence(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    path = settings.exports_dir / job_id / "analysis" / "audio-analysis.json"
+    payload = analysis_payload()
+    payload["padding"] = "x" * (8 * 1024 * 1024)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    client = TestClient(create_app(settings))
+    assert client.get(f"/api/jobs/{job_id}/score").status_code == 500
+
+
 def test_score_preview_reports_provenance_and_counts(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     job_id = create_job(settings)
