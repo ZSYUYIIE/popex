@@ -20,8 +20,13 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-from app.analysis import AudioAnalysisError, load_analysis
+from app.analysis import (
+    ANALYSIS_JSON_RELATIVE_PATH,
+    AudioAnalysisError,
+    load_analysis,
+)
 from app.config import Settings
+from app.media import MediaProcessingError
 from app.score_construction import (
     SCORE_BUILDER_VERSION,
     SCORE_SCHEMA_VERSION,
@@ -57,6 +62,21 @@ class ScorePreviewError(RuntimeError):
 
 
 def _record_pointer(record: Mapping[str, Any]) -> None:
+    if (
+        record.get("preparation_status") != "completed"
+        or record.get("analysis_status") != "completed"
+    ):
+        raise ScorePreviewUnavailableError(
+            "Completed source preparation and audio analysis are required before score preview."
+        )
+    if (
+        record.get("analysis_json_file_name") != ANALYSIS_JSON_RELATIVE_PATH
+        or not isinstance(record.get("analysis_version"), str)
+        or not record.get("analysis_version")
+    ):
+        raise ScorePreviewUnavailableError(
+            "A published versioned audio analysis is required before score preview."
+        )
     if record.get("transcription_status") != "completed":
         raise ScorePreviewUnavailableError(
             "A completed raw transcription is required before score preview."
@@ -89,15 +109,56 @@ def build_score_preview(
         raise ScorePreviewUnavailableError(
             "Published raw transcription is unavailable."
         )
+    source_analysis = raw_transcription.get("sourceAnalysis")
+    if (
+        not isinstance(source_analysis, Mapping)
+        or raw_transcription.get("transcriptionVersion")
+        != record.get("transcription_version")
+        or raw_transcription.get("createdAt") != record.get("transcribed_at")
+        or source_analysis.get("fileName") != ANALYSIS_JSON_RELATIVE_PATH
+        or source_analysis.get("analysisVersion") != record.get("analysis_version")
+    ):
+        raise ScorePreviewError(
+            "Published raw transcription does not match the job's current evidence."
+        )
+    aligned_count = sum(
+        1
+        for candidate in raw_transcription.get("alignmentCandidates", ())
+        if isinstance(candidate, Mapping) and "alignedTimeSeconds" in candidate
+    )
+    expected_counts = (
+        ("pitched_event_count", len(raw_transcription.get("pitchedNoteEvents", ()))),
+        ("percussion_event_count", len(raw_transcription.get("percussionEvents", ()))),
+        ("aligned_event_count", aligned_count),
+    )
+    if any(
+        isinstance(record.get(field), bool)
+        or not isinstance(record.get(field), int)
+        or record.get(field) != count
+        for field, count in expected_counts
+    ):
+        raise ScorePreviewError(
+            "Published raw transcription counts do not match the job record."
+        )
     try:
         analysis = load_analysis(job_id, settings)
-    except AudioAnalysisError as exc:
+    except (AudioAnalysisError, MediaProcessingError, OSError, AttributeError) as exc:
         raise ScorePreviewError(
             "Saved audio analysis could not be validated."
         ) from exc
     if analysis is None:
         raise ScorePreviewUnavailableError(
             "Saved audio analysis is unavailable; tempo evidence is required."
+        )
+    if not isinstance(analysis, Mapping):
+        raise ScorePreviewError("Saved audio analysis is invalid.")
+    if (
+        analysis.get("analysisVersion") != record.get("analysis_version")
+        or analysis.get("createdAt") != record.get("analyzed_at")
+        or analysis.get("sourceAsset") != "analysis.wav"
+    ):
+        raise ScorePreviewError(
+            "Saved audio analysis does not match the job's current evidence."
         )
     timing = analysis.get("timing")
     if not isinstance(timing, Mapping):

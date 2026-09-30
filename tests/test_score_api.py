@@ -224,6 +224,50 @@ def test_untranscribed_job_has_no_score_preview(tmp_path: Path) -> None:
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "status_code"),
+    [
+        ("analysis_status", "processing", 404),
+        ("analysis_json_file_name", None, 404),
+        ("analysis_version", "stale-analysis", 500),
+        ("analyzed_at", "2026-08-14T05:00:00+00:00", 500),
+        ("transcription_version", "stale-transcription", 500),
+        ("transcribed_at", "2026-08-14T05:00:00+00:00", 500),
+        ("pitched_event_count", 1, 500),
+    ],
+)
+def test_score_preview_requires_complete_matching_job_evidence(
+    tmp_path: Path,
+    field: str,
+    value: str | int | None,
+    status_code: int,
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    db.update_job(settings.database_path, job_id, **{field: value})
+    client = TestClient(create_app(settings))
+
+    response = client.get(f"/api/jobs/{job_id}/score")
+
+    assert response.status_code == status_code
+
+
+def test_score_preview_rejects_analysis_file_from_a_different_version(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    path = settings.exports_dir / job_id / "analysis" / "audio-analysis.json"
+    payload = analysis_payload()
+    payload["analysisVersion"] = "stale-analysis"
+    path.write_text(json.dumps(payload, allow_nan=False), encoding="utf-8")
+    client = TestClient(create_app(settings))
+
+    response = client.get(f"/api/jobs/{job_id}/score")
+
+    assert response.status_code == 500
+
+
 def test_score_preview_reports_provenance_and_counts(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     job_id = create_job(settings)

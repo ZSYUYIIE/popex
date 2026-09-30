@@ -274,6 +274,32 @@ def test_musicxml_parses_and_marks_draft() -> None:
     assert root.find(".//pitch") is not None
     assert root.find(".//metronome/beat-unit") is not None
     assert root.find(".//metronome/per-minute") is not None
+    encoding = root.find("identification/encoding")
+    assert encoding is not None
+    assert not (encoding.text or "").strip()
+    assert encoding.findtext("software") == f"PopEx {SCORE_BUILDER_VERSION}"
+    assert "review required" in encoding.findtext("encoding-description")
+
+
+@pytest.mark.parametrize("midi_note", [0, 11])
+def test_musicxml_rejects_pitch_below_its_octave_range_but_midi_preserves_it(
+    midi_note: int,
+) -> None:
+    document = build_score_document(
+        [_note("low-pitch", 0.0, 0.5, midi_note)], tempo_bpm=120.0
+    )
+    assert (0, 0x90, midi_note) in _midi_note_events(score_to_midi_bytes(document))
+    with pytest.raises(ScoreConstructionError, match="MusicXML pitch range"):
+        score_to_musicxml_text(document)
+
+
+@pytest.mark.parametrize("midi_note", [12, 127])
+def test_musicxml_preserves_pitches_at_its_octave_boundaries(midi_note: int) -> None:
+    document = build_score_document(
+        [_note("boundary-pitch", 0.0, 0.5, midi_note)], tempo_bpm=120.0
+    )
+    root = ET.fromstring(score_to_musicxml_text(document))
+    assert root.findtext(".//pitch/octave") == str(midi_note // 12 - 1)
 
 
 def test_musicxml_preserves_chord_text_without_fabricated_harmony() -> None:

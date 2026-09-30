@@ -445,6 +445,10 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
                 raise ScoreConstructionError("Score note timing is inconsistent.")
             midi_note = _integer(note.get("midiNote"), "midiNote", minimum=0, maximum=127)
             source_kind = note.get("sourceKind", "unassigned")
+            if midi_note < 12:
+                raise ScoreConstructionError(
+                    "Note is below the supported MusicXML pitch range (C0 and above)."
+                )
             source_kind = _text(source_kind, "sourceKind")
             if not _SAFE_SOURCE_KIND.fullmatch(source_kind):
                 raise ScoreConstructionError("Score sourceKind is invalid.")
@@ -525,9 +529,9 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
             ).append(fragment)
 
     root = ET.Element("score-partwise", version="3.1")
-    ET.SubElement(ET.SubElement(root, "identification"), "encoding").text = (
-        f"PopEx {SCORE_BUILDER_VERSION} draft; review required"
-    )
+    encoding = ET.SubElement(ET.SubElement(root, "identification"), "encoding")
+    ET.SubElement(encoding, "software").text = f"PopEx {SCORE_BUILDER_VERSION}"
+    ET.SubElement(encoding, "encoding-description").text = "Draft; review required"
     part_list = ET.SubElement(root, "part-list")
     ET.SubElement(ET.SubElement(part_list, "score-part", id="P1"), "part-name").text = "Draft Pitched Events"
     part = ET.SubElement(root, "part", id="P1")
