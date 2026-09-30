@@ -2,9 +2,25 @@ from pathlib import Path
 
 import pytest
 
-from app.separation_service import _sanitize_public_text
+from app.config import Settings
 from app.media import friendly_error, redact_local_paths
-from tests.test_stem_api import make_settings
+from app.separation_service import _sanitize_public_text
+
+
+def make_settings(tmp_path: Path) -> Settings:
+    # Keep this suite runnable via the pytest console script: tests is not an
+    # installed package and cannot be imported as a namespace in clean CI.
+    return Settings(
+        data_dir=tmp_path,
+        allowed_hosts=("youtube.com",),
+        max_duration_seconds=1800,
+        max_filesize_mb=250,
+        max_upload_mb=500,
+        audio_quality="192",
+        stem_separation_worker_executable=tmp_path / "bin" / "worker",
+        stem_separation_runtime_lock=tmp_path / "runtime-lock.json",
+        stem_separation_cache_dir=tmp_path / "runtime-cache",
+    )
 
 
 @pytest.mark.parametrize("separator", ["\\", "/"])
