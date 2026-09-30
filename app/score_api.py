@@ -57,8 +57,10 @@ def _analysis_directory_state(paths: tuple[Path, ...]) -> tuple:
 
 
 def _analysis_file_state(info: os.stat_result) -> tuple:
-    return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
-            info.st_mtime_ns, info.st_ctime_ns)
+    state = (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+    # Windows lstat and fstat can report different creation-time values for
+    # the same unchanged file. ctime is a mutation guard only on POSIX.
+    return state if os.name == "nt" else (*state, info.st_ctime_ns)
 
 
 def _reject_analysis_constant(value: str) -> None:

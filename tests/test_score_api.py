@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -303,6 +305,31 @@ def test_score_preview_bounds_analysis_evidence(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     client = TestClient(create_app(settings))
     assert client.get(f"/api/jobs/{job_id}/score").status_code == 500
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows creation-time stat semantics")
+def test_score_preview_handles_windows_creation_time_stat_difference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    path = settings.exports_dir / job_id / "analysis" / "audio-analysis.json"
+    inode = path.stat().st_ino
+    real_fstat = os.fstat
+
+    def different_creation_time(fd: int):
+        info = real_fstat(fd)
+        if info.st_ino != inode:
+            return info
+        fields = {name: getattr(info, name) for name in (
+            "st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns"
+        )}
+        fields["st_ctime_ns"] += 100
+        return SimpleNamespace(**fields)
+
+    monkeypatch.setattr(os, "fstat", different_creation_time)
+    client = TestClient(create_app(settings))
+    assert client.get(f"/api/jobs/{job_id}/score").status_code == 200
 
 
 def test_score_preview_reports_provenance_and_counts(tmp_path: Path) -> None:
