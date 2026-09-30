@@ -122,3 +122,16 @@ def test_friendly_error_redacts_windows_path(tmp_path: Path):
     assert "C:\\Users" not in message
     assert "secret.mp3" not in message
     assert "invalid data" in message
+
+
+@pytest.mark.parametrize("separator", ["\\", "/"])
+def test_friendly_error_redacts_known_root_and_entire_descendant(
+    tmp_path: Path, separator: str
+):
+    config = settings(tmp_path)
+    private_path = str(config.data_dir.resolve()) + separator + "private" + separator + "song.mp3"
+    message = friendly_error(f"{private_path}: invalid data", settings=config)
+    assert "invalid data" in message
+    assert "private" not in message
+    assert "song.mp3" not in message
+    assert str(config.data_dir) not in message
