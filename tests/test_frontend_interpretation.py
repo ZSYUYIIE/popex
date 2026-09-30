@@ -440,7 +440,6 @@ console.log(JSON.stringify({processing,completed,failed}));
 def test_no_premature_score_or_export_placeholders() -> None:
     source = APP_JS.read_text(encoding="utf-8").lower()
     for phrase in (
-        "musicxml",
         "score engraving",
         "midi export",
         "tablature ready",
@@ -448,3 +447,10 @@ def test_no_premature_score_or_export_placeholders() -> None:
         "publication-ready score",
     ):
         assert phrase not in source
+    interpretation_lines = [
+        line
+        for line in source.splitlines()
+        if line.startswith(("function renderinterpretation", "function interpretation"))
+    ]
+    assert interpretation_lines
+    assert not any("musicxml" in line for line in interpretation_lines)

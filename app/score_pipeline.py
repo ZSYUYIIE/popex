@@ -348,7 +348,10 @@ def construct_score(
             note["partId"] = part_id
     parts = []
     if part_data is not None:
-        for part_id in sorted(part_data["parts"]):
+        # List only parts that label pitched notes; percussion-only parts are
+        # not part of this pitched-note draft.
+        pitched_part_ids = set().union(*part_data["assignments"].values())
+        for part_id in sorted(pitched_part_ids):
             part = part_data["parts"][part_id]
             parts.append(
                 {
@@ -436,6 +439,11 @@ def construct_score(
         ]
 
     chord_symbol_count = sum(1 for measure in measures if measure["chordSymbol"] is not None)
+    if segments is not None and chord_symbol_count == 0:
+        harmony_note = (
+            "Harmonic context was checked, but no measure had one clearly dominant "
+            "resolved candidate, so no chord symbols are shown."
+        )
     percussion_count = evidence["percussionEventCount"]
     payload = {
         "schemaVersion": SCORE_ARTIFACT_SCHEMA_VERSION,
@@ -470,7 +478,7 @@ def construct_score(
             },
             "tablature": {
                 "status": "omitted",
-                "note": "Guitar and bass tablature are planned after score construction.",
+                "note": "Guitar and bass tablature are not generated yet.",
             },
         },
         "timing": timing,
