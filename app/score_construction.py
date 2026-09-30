@@ -237,8 +237,8 @@ def build_score_document(
         )
     if fractional_pitch:
         warnings.append(
-            f"{fractional_pitch} note(s) differ from the nearest semitone by more than 0.25; "
-            "raw pitch is preserved, while MIDI and MusicXML use the nearest semitone."
+            f"{fractional_pitch} note(s) differ from the nominal semitone pitch by more than 0.25; "
+            "raw pitch is preserved, while MIDI and MusicXML use the nominal semitone pitch."
         )
     if not sorted_notes:
         warnings.append("No pitched-note evidence was available; the draft contains empty measures.")
@@ -288,7 +288,7 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
     if len(measures) != measure_count:
         raise ScoreConstructionError("Score measure count is inconsistent.")
     total_beats = measure_count * meter
-    events: list[tuple[int, bytes]] = []
+    notes: list[tuple[int, int, int, str]] = []
     event_ids: set[str] = set()
     for position, measure in enumerate(measures):
         if not isinstance(measure, Mapping):
@@ -328,21 +328,38 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
             duration_tick = end_tick - start_tick
             if duration_tick <= 0:
                 raise ScoreConstructionError("Score note duration is invalid.")
-            velocity = 80
-            events.append((start_tick, bytes((0x90, midi_note, velocity))))
-            events.append((end_tick, bytes((0x80, midi_note, 0x40))))
-    if len(events) > _MAX_NOTES * 2:
+            notes.append((start_tick, end_tick, midi_note, event_id))
+    if len(notes) > _MAX_NOTES:
         raise ScoreConstructionError("Too many MIDI events.")
+
+    # A note-off must not silence another still-held copy of the same pitch.
+    # Different pitches can share a channel; overlapping unisons cannot.
+    # General MIDI channel 10 is reserved for percussion, not this pitched draft.
+    melodic_channels = tuple(channel for channel in range(16) if channel != 9)
+    channel_ends: dict[int, list[int]] = {}
+    events: list[tuple[int, bytes]] = []
+    for start_tick, end_tick, midi_note, _ in sorted(
+        notes, key=lambda note: (note[0], note[1], note[3])
+    ):
+        ends = channel_ends.setdefault(midi_note, [0] * len(melodic_channels))
+        available = next((index for index, end in enumerate(ends) if end <= start_tick), None)
+        if available is None:
+            raise ScoreConstructionError("MIDI overlapping unison channel limit exceeded.")
+        channel = melodic_channels[available]
+        ends[available] = end_tick
+        events.append((start_tick, bytes((0x90 | channel, midi_note, 80))))
+        events.append((end_tick, bytes((0x80 | channel, midi_note, 0x40))))
     events.sort(key=lambda item: (item[0], item[1]))
 
     track = bytearray()
     microseconds = int(round(60_000_000 / tempo))
     track += b"\x00\xff\x51\x03" + struct.pack(">I", microseconds)[1:]
+    track += b"\x00\xff\x58\x04" + bytes((meter, 2, 24, 8))
     last_tick = 0
     for tick, payload in events:
         track += _midi_varlen(tick - last_tick) + payload
         last_tick = tick
-    track += b"\x00\xff\x2f\x00"
+    track += _midi_varlen(total_beats * _DIVISIONS - last_tick) + b"\xff\x2f\x00"
     header = struct.pack(">4sIHHH", b"MThd", 6, 0, 1, _DIVISIONS)
     return header + struct.pack(">4sI", b"MTrk", len(track)) + bytes(track)
 

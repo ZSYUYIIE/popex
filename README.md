@@ -685,6 +685,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - No PDF, engraved score review, individual instrument-part export, percussion notation, or tablature yet.
 - Score drafts and MIDI/MusicXML downloads are read-only and built on demand, with no persisted score lifecycle or revision history yet.
 - Score quantization uses a coarse eighth-note grid and global tempo/meter; chord symbols and percussion are not yet mapped into the score.
+- MIDI preserves overlapping unisons on separate melodic channels and includes meter and full-measure duration. More than 15 simultaneous copies of one pitch fail explicitly rather than truncate held notes or use the percussion channel.
 - Raw transcription is a local baseline (pYIN/onset); dense mixes remain approximate and carry warnings.
 - Interpretation drafts are conservative reductions; pitched parts, rhythm grid, and drum structure require musician review.
 - Harmonic context provides conservative chord candidates with unresolved accounting, not guaranteed complete chord symbols for every measure.

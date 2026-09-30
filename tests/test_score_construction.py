@@ -71,7 +71,7 @@ def _midi_note_events(payload: bytes) -> list[tuple[int, int, int]]:
         second = data[cursor + 1]
         cursor += 2
         if (status & 0xF0) in (0x80, 0x90):
-            events.append((tick, status & 0xF0, first))
+            events.append((tick, status, first))
     return events
 
 
@@ -202,6 +202,49 @@ def test_midi_and_musicxml_keep_duration_beyond_sixteen_beats() -> None:
     events = _midi_note_events(score_to_midi_bytes(document))
     assert (0, 0x90, 55) in events
     assert (24 * 480, 0x80, 55) in events
+
+
+def test_midi_keeps_overlapping_unisons_on_independent_channels() -> None:
+    document = build_score_document(
+        [_note("held", 0.0, 2.0, 60), _note("short", 0.5, 1.0, 60)],
+        tempo_bpm=120.0,
+    )
+    assert _midi_note_events(score_to_midi_bytes(document)) == [
+        (0, 0x90, 60), (480, 0x91, 60), (960, 0x81, 60), (1920, 0x80, 60),
+    ]
+
+
+def test_midi_unison_channel_limit_fails_without_using_percussion_channel() -> None:
+    events = [_note(f"unison-{index}", 0, 0.5, 60) for index in range(16)]
+    document = build_score_document(events[:15], tempo_bpm=120.0)
+    on_channels = {
+        status & 0x0F for _, status, _ in _midi_note_events(score_to_midi_bytes(document))
+        if status & 0xF0 == 0x90
+    }
+    assert on_channels == set(range(16)) - {9}
+    with pytest.raises(ScoreConstructionError, match="overlapping unison"):
+        score_to_midi_bytes(build_score_document(events, tempo_bpm=120.0))
+
+
+def test_midi_preserves_meter_and_trailing_measure_time() -> None:
+    document = build_score_document(
+        [_note("short", 0, 0.5, 60)], tempo_bpm=120.0, beats_per_measure=3
+    )
+    payload = score_to_midi_bytes(document)
+    assert b"\x00\xff\x58\x04\x03\x02\x18\x08" in payload
+    # The last note ends at tick 480; the 3/4 measure ends at tick 1440.
+    assert payload.endswith(b"\x87\x40\xff\x2f\x00")
+
+
+def test_midi_reuses_finished_channels_with_note_off_before_note_on() -> None:
+    events = [_note("first", 0, 0.5, 60), _note("next", 0.5, 1, 60)]
+    payload = score_to_midi_bytes(build_score_document(events, tempo_bpm=120.0))
+    assert _midi_note_events(payload) == [
+        (0, 0x90, 60), (480, 0x80, 60), (480, 0x90, 60), (960, 0x80, 60),
+    ]
+    assert payload == score_to_midi_bytes(
+        build_score_document(list(reversed(events)), tempo_bpm=120.0)
+    )
 
 
 def test_musicxml_bounds_note_fragment_expansion() -> None:
