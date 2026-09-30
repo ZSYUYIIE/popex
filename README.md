@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, and evidence-aware harmonic context. It does **not** yet generate tablature, sheet music, MIDI, or MusicXML.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and an on-demand pitched-note score draft with MIDI and MusicXML downloads. It does **not** yet provide engraved score review, individual instrument parts, percussion notation, or tablature.
 
 Implemented capabilities:
 
@@ -415,6 +415,8 @@ Implemented capabilities:
 - editable interpretation drafts (`editable-interpretation-v1`, schema 1) with source-aware pitched parts/phrases, conservative rhythm grid, and broad drum structure;
 - evidence-aware harmonic context (`pitch-class-window-v1`, schema 1) with conservative chord candidates, unresolved accounting, and per-event warning preservation;
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
+- read-only, versioned pitched-note score previews built from matching completed transcription and analysis evidence;
+- stdlib-only MIDI and MusicXML exports with explicit quantization warnings, raw-event provenance, independent overlapping voices, and ties across measure boundaries;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, and harmony downloads;
 - local Windows, Linux/macOS, and Docker workflows for the base application;
@@ -438,6 +440,7 @@ local upload or supported URL
 → explicit raw-transcription action (pitched + percussion events)
 → explicit interpretation action (parts, rhythm, drum structure, editable draft)
 → explicit harmony action (evidence-aware harmonic context)
+→ on-demand pitched-note score preview and MIDI/MusicXML download through the API
 ```
 
 Supported upload formats: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, and WebM.
@@ -549,11 +552,15 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `POST /api/jobs/{job_id}/harmonize` with optional `?force=true`
 - `GET /api/jobs/{job_id}/harmony`
 - `GET /api/jobs/{job_id}/harmony/download`
+- `GET /api/jobs/{job_id}/score` with optional `?includeMeasures=true`
+- `GET /api/jobs/{job_id}/score/download?format=midi|musicxml`
 - `GET /api/jobs/{job_id}/files/{file_name}`
 
 Historical completed jobs are not analyzed, separated, transcribed, interpreted, or harmonized automatically at startup. Use the Analyze, Separate, Transcribe, Interpret, and Harmonize actions or the corresponding endpoints. Active or already completed attempts are rejected rather than duplicated.
 
 The web API never accepts a worker executable, runtime lock, cache root, model repository, model revision, checkpoint filename, checkpoint hash, device path, or arbitrary artifact path. Stem preview and download resolution always starts from the validated published manifest.
+
+Score previews require completed source preparation, analysis, and raw transcription with matching persisted versions, timestamps, and event counts. They use an explicit eighth-note grid and show warnings for uncertain timing and pitch. The current draft contains one pitched part; percussion and harmony-to-measure mapping are reported as omitted. MIDI retains the full MIDI pitch range; MusicXML rejects pitches below C0 instead of shifting or dropping them. Score previews and exports are built on demand and are not yet persisted or exposed in the web review interface.
 
 ## Local setup
 
@@ -675,7 +682,10 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Known limitations
 
-- No MusicXML, MIDI, PDF, tablature, or score rendering yet.
+- No PDF, engraved score review, individual instrument-part export, percussion notation, or tablature yet.
+- Score drafts and MIDI/MusicXML downloads are read-only and built on demand, with no persisted score lifecycle or revision history yet.
+- Score quantization uses a coarse eighth-note grid and global tempo/meter; chord symbols and percussion are not yet mapped into the score.
+- MIDI preserves overlapping unisons on separate melodic channels and includes meter and full-measure duration. More than 15 simultaneous copies of one pitch fail explicitly rather than truncate held notes or use the percussion channel.
 - Raw transcription is a local baseline (pYIN/onset); dense mixes remain approximate and carry warnings.
 - Interpretation drafts are conservative reductions; pitched parts, rhythm grid, and drum structure require musician review.
 - Harmonic context provides conservative chord candidates with unresolved accounting, not guaranteed complete chord symbols for every measure.
@@ -689,9 +699,9 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Next planned cycle
 
-The next planned implementation stage is the missing score-construction vertical slice: quantized measures and rhythms from interpretation and harmony into versioned score documents with stdlib-only MIDI and MusicXML exports.
+The next planned implementation stage is a persistent score-construction workflow with retryable job state, safe artifact publication, previous-result preservation, and musician-facing structured score review. It should reuse the score builder and export formats, consume interpretation and harmony evidence, and preserve unresolved events and corrections separately from predictions.
 
-That stage must keep score construction separate from inference, keep tablature fingering separate from pitch transcription, preserve raw predictions and user-correction separation, retain retry/preservation guarantees with honest warnings, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Drum notation, guitar/bass tablature, synchronized correction, and part extraction follow in canonical order once the minimal score export is honest and reviewable.
+That stage must keep score construction separate from inference, keep tablature fingering separate from pitch transcription, retain retry/preservation guarantees with honest warnings, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Drum notation, guitar/bass tablature, synchronized correction, and part extraction follow in canonical order once the score workflow is reviewable end to end.
 
 ## License
 

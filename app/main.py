@@ -20,7 +20,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, HttpUrl, StrictBool
 
@@ -86,6 +86,12 @@ from app.harmony_pipeline import (
     HarmonyPipelineError,
     HarmonyPipelineResult,
     infer_harmony_job,
+)
+from app.score_api import (
+    ScorePreviewError,
+    ScorePreviewUnavailableError,
+    build_score_preview,
+    render_score_download,
 )
 from app.transcription_draft import INTERPRETATION_DRAFT_RELATIVE_PATH
 from app.transcription_artifacts import (
@@ -999,6 +1005,66 @@ def create_app(
             path,
             filename="harmonic-context.json",
             media_type="application/json",
+        )
+
+    @app.get("/api/jobs/{job_id}/score")
+    def get_score(
+        job_id: str,
+        include_measures: str | None = Query(None, alias="includeMeasures"),
+    ) -> dict:
+        include_measures_value = _strict_query_bool(
+            include_measures,
+            field="includeMeasures",
+            default=False,
+        )
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            return build_score_preview(
+                job_id,
+                app_settings,
+                record,
+                include_measures=include_measures_value,
+            )
+        except ScorePreviewUnavailableError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ScorePreviewError:
+            logging.exception("Score preview failed validation for job %s", job_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Score preview could not be validated.",
+            ) from None
+
+    @app.get("/api/jobs/{job_id}/score/download")
+    def download_score(job_id: str, format: str | None = Query(None)) -> Response:
+        if format not in ("midi", "musicxml"):
+            raise HTTPException(
+                status_code=422,
+                detail="Query parameter 'format' must be 'midi' or 'musicxml'.",
+            )
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            payload, filename, media_type = render_score_download(
+                job_id,
+                app_settings,
+                record,
+                format=format,
+            )
+        except ScorePreviewUnavailableError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from None
+        except ScorePreviewError:
+            logging.exception("Score download failed validation for job %s", job_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Score download could not be validated.",
+            ) from None
+        return Response(
+            content=payload,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
     @app.get("/api/jobs/{job_id}/stems")
