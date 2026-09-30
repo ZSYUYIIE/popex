@@ -400,8 +400,10 @@ def redact_local_paths(
     """
     # Quotes make even punctuation-rich filenames unambiguous. Handle them
     # before generic diagnostic delimiters or root substitutions can split it.
+    # Use the last matching quote on the line: an apostrophe in O'Connor is
+    # legal path content, not permission to expose the remainder of the name.
     value = re.sub(
-        r'''(?i)(["'])(?:[a-z]:[\\/]|\\\\|/)[^\r\n]*?\1''',
+        r'''(?i)(["'])(?:[a-z]:[\\/]|\\\\|/)[^\r\n]*\1''',
         lambda match: match.group(1) + replacement + match.group(1),
         value,
     )

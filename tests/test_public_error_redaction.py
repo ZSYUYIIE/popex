@@ -102,9 +102,9 @@ def test_multiple_paths_cannot_strip_the_next_drive_prefix(tmp_path: Path) -> No
     r"C:\Private Music\O'Connor[session]\secret-take.wav",
     "/tmp/private music/O'Connor[session]/secret-take.wav",
 ])
-@pytest.mark.parametrize("quoted", [False, True])
-def test_punctuation_rich_filenames_remain_whole(path: str, quoted: bool) -> None:
-    location = f'"{path}"' if quoted else path
+@pytest.mark.parametrize("quote", ["", "'", '"'])
+def test_punctuation_rich_filenames_remain_whole(path: str, quote: str) -> None:
+    location = f'{quote}{path}{quote}'
     value = f'Cannot read {location}: invalid data; retry later.'
     result = redact_local_paths(value)
     assert "secret-take" not in result
