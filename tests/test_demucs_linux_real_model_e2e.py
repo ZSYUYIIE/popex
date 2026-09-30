@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import builtins
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -23,6 +26,97 @@ def load_validator():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_import_and_platform_refusal_do_not_require_resource(tmp_path: Path, capsys, monkeypatch):
+    original_import = builtins.__import__
+    resource_attempts = []
+
+    def without_resource(name, *args, **kwargs):
+        if name == "resource":
+            resource_attempts.append(name)
+            raise ModuleNotFoundError("resource unavailable on this host")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_resource)
+    module = load_validator()
+    assert resource_attempts == []
+    monkeypatch.setattr(module, "_supported_platform", lambda: False)
+
+    def must_not_touch_runtime(*args, **kwargs):
+        pytest.fail("unsupported host accessed a trusted path or resource telemetry")
+
+    for name in ("_file", "_root", "_rss"):
+        monkeypatch.setattr(module, name, must_not_touch_runtime)
+    root = tmp_path / "private-not-created"
+    result = module.main([
+        "--worker", str(root / "worker"),
+        "--runtime-lock", str(root / "lock.json"),
+        "--cache-root", str(root / "cache"),
+        "--data-dir", str(root / "data"),
+        "--expected-profile", module.EXPECTED_PROFILE,
+    ])
+    captured = capsys.readouterr()
+    assert result == 2
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "status": "error", "code": "UNSUPPORTED_VALIDATION_PLATFORM", "phase": "input"
+    }
+    assert resource_attempts == []
+    assert not root.exists()
+
+
+def test_optional_resource_measurement_remains_real_and_uses_linux_units(monkeypatch):
+    module = load_validator()
+    original_import = builtins.__import__
+    measured = []
+
+    def getrusage(kind):
+        measured.append(kind)
+        return SimpleNamespace(ru_maxrss={"self": 4096, "children": 8192}[kind])
+
+    fake_resource = SimpleNamespace(
+        RUSAGE_SELF="self", RUSAGE_CHILDREN="children", getrusage=getrusage
+    )
+
+    def instrument_resource(name, *args, **kwargs):
+        return fake_resource if name == "resource" else original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", instrument_resource)
+    assert module._rss() == 8.0
+    assert measured == ["self", "children"]
+
+
+def test_optional_resource_absence_does_not_fabricate_memory_measurement(monkeypatch):
+    module = load_validator()
+    original_import = builtins.__import__
+
+    def without_resource(name, *args, **kwargs):
+        if name == "resource":
+            raise ModuleNotFoundError("resource unavailable")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_resource)
+    assert module._rss() is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows CLI refusal")
+def test_windows_cli_refuses_before_creating_roots(tmp_path: Path):
+    root = tmp_path / "private-not-created"
+    result = subprocess.run([
+        sys.executable, str(SCRIPT),
+        "--worker", str(root / "worker"),
+        "--runtime-lock", str(root / "lock.json"),
+        "--cache-root", str(root / "cache"),
+        "--data-dir", str(root / "data"),
+        "--expected-profile", "linux-x86_64-cpu-cpython313",
+    ], capture_output=True, text=True, timeout=20, check=False)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert json.loads(result.stderr) == {
+        "status": "error", "code": "UNSUPPORTED_VALIDATION_PLATFORM", "phase": "input"
+    }
+    assert not root.exists()
 
 
 def test_workflow_is_manual_only_read_only_and_bounded():
