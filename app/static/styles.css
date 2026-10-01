@@ -498,3 +498,106 @@ details {
   max-width:100%;
   min-width:0
 }
+.score-corrections,.review-controls {
+  margin-top:1rem
+}
+.correction-actions {
+  display:flex;
+  flex-wrap:wrap;
+  gap:.5rem;
+  margin-top:.5rem
+}
+.review-controls {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:.35rem .75rem
+}
+.review-controls p {
+  flex-basis:100%;
+  margin:0
+}
+button.mini,select.mini {
+  min-height:32px;
+  padding:.2rem .5rem;
+  font-size:.85rem;
+  margin:.15rem .15rem 0 0
+}
+button.mini.danger {
+  background:#fff;
+  color:var(--bad);
+  border:1px solid var(--bad)
+}
+.bar-play {
+  display:flex;
+  margin-top:.35rem
+}
+.score-edit-controls {
+  display:inline-flex;
+  flex-wrap:wrap;
+  align-items:center;
+  margin-left:.25rem
+}
+.score-edited {
+  color:var(--accent-dark);
+  font-weight:600
+}
+.score-deleted {
+  color:var(--muted)
+}
+.chord-edit {
+  display:flex;
+  flex-wrap:wrap;
+  gap:.25rem;
+  align-items:center
+}
+.chord-edit input {
+  width:6.5rem;
+  min-height:32px;
+  padding:.2rem .4rem;
+  border:1px solid var(--line);
+  border-radius:6px;
+  font:inherit
+}
+.score-measures tr.is-playing {
+  background:#eef2ff;
+  box-shadow:inset 4px 0 0 var(--accent)
+}
+.score-measures tr.is-playing th::after {
+  content:"Playing";
+  display:block;
+  font-size:.75rem;
+  font-weight:700;
+  color:var(--accent-dark)
+}
+.review-player {
+  position:fixed;
+  left:0;
+  right:0;
+  bottom:0;
+  z-index:20;
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:.5rem 1rem;
+  padding:.6rem 1rem;
+  background:var(--surface);
+  border-top:1px solid var(--line);
+  box-shadow:0 -4px 16px rgba(0,0,0,.08)
+}
+.review-player audio {
+  flex:1 1 220px;
+  min-width:0;
+  max-width:100%
+}
+.review-label {
+  font-weight:600
+}
+body.has-review-player {
+  padding-bottom:7rem
+}
+@media (max-width:600px) {
+  body.has-review-player {
+    padding-bottom:11rem
+  }
+}

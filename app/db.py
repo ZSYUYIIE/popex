@@ -393,6 +393,19 @@ def init_database(database_path: Path) -> None:
                 connection.execute(
                     f"ALTER TABLE jobs ADD COLUMN {column} {definition}"
                 )
+        # Musician corrections are kept apart from predictions: one versioned
+        # operation log per job, replayed onto the saved score when read.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS score_corrections (
+                job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                payload TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         connection.execute(
             """
@@ -1519,6 +1532,61 @@ def _score_write_transaction(
             (job_id,),
         ).fetchone()
         yield connection, (dict(row) if row is not None else None)
+
+
+def get_score_corrections(database_path: Path, job_id: str) -> str | None:
+    """Return one job's stored correction log JSON, or ``None``."""
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT payload FROM score_corrections WHERE job_id = ?", (job_id,)
+        ).fetchone()
+    return None if row is None else row["payload"]
+
+
+def save_score_corrections(
+    database_path: Path,
+    job_id: str,
+    *,
+    expected_revision: int,
+    revision: int,
+    payload: str,
+) -> str:
+    """Store a correction log if its revision is still ``expected_revision``.
+
+    Returns ``saved``, ``conflict`` or ``missing``. The caller validates the
+    payload; this function only guarantees one-writer revision ordering.
+    """
+    if (
+        isinstance(expected_revision, bool)
+        or isinstance(revision, bool)
+        or not isinstance(expected_revision, int)
+        or not isinstance(revision, int)
+        or revision != expected_revision + 1
+        or not isinstance(payload, str)
+        or len(payload) > 4 * 1024 * 1024
+    ):
+        raise ValueError("score correction revision or payload is invalid.")
+    with _score_write_transaction(database_path, job_id) as (connection, row):
+        if row is None:
+            return "missing"
+        current = connection.execute(
+            "SELECT revision FROM score_corrections WHERE job_id = ?", (job_id,)
+        ).fetchone()
+        current_revision = 0 if current is None else int(current["revision"])
+        if current_revision != expected_revision:
+            return "conflict"
+        connection.execute(
+            """
+            INSERT INTO score_corrections (job_id, schema_version, revision, payload, updated_at)
+            VALUES (?, 1, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                revision = excluded.revision,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (job_id, revision, payload, utc_now()),
+        )
+        return "saved"
 
 
 def set_score_tablature_request(

@@ -349,3 +349,20 @@ def test_index_and_degraded_health_are_clear(tmp_path: Path):
 
     assert health["status"] == "degraded"
     assert health["dependencies"]["data_directory_writable"] is True
+
+
+def test_index_fingerprints_assets_and_is_revalidated(tmp_path: Path):
+    import hashlib
+    import re
+
+    app = make_app(tmp_path)
+    with TestClient(app) as client:
+        response = client.get("/")
+        script = client.get(re.search(r'src="(/static/app\.js\?v=[0-9a-f]{12})"', response.text).group(1))
+
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["content-type"].startswith("text/html")
+    digest = hashlib.sha256((Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_bytes())
+    assert f"/static/app.js?v={digest.hexdigest()[:12]}" in response.text
+    assert re.search(r'href="/static/styles\.css\?v=[0-9a-f]{12}"', response.text)
+    assert script.status_code == 200
