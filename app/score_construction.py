@@ -43,8 +43,21 @@ import xml.etree.ElementTree as ET
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.tablature import (
+    TAB_INSTRUMENT_ORDER,
+    TAB_INSTRUMENTS,
+    TAB_STATUSES,
+    tab_position_is_consistent,
+)
+
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v2"
+SCORE_BUILDER_VERSION = "score-construction-v3"
+# Fixed MusicXML part identities: combined pitched part, drums, then one part
+# per fretted instrument (standard staff plus a synchronized TAB staff).
+_TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
+_TAB_PART_NAMES = {"bass": "Bass (draft, with TAB)", "guitar": "Guitar (fingering suggestion, with TAB)"}
+_TAB_CLEFS = {"bass": ("F", "4"), "guitar": ("G", "2")}
+_TAB_GM_PROGRAMS = {"bass": 34, "guitar": 26}  # MusicXML 1-based: fingered bass, steel guitar
 
 # broad voice -> (display step, display octave, notehead, GM drum note, label)
 PERCUSSION_NOTATION: dict[str, tuple[str, int, str, int, str]] = {
@@ -697,6 +710,8 @@ def _musicxml_note(
     voice: int,
     tie_stop: bool,
     tie_start: bool,
+    staff: int = 1,
+    technical: tuple[int, int] | None = None,
 ) -> None:
     pitch_class = midi_note % 12
     note_el = ET.SubElement(measure, "note")
@@ -710,13 +725,218 @@ def _musicxml_note(
     for tie_type in tie_types:
         ET.SubElement(note_el, "tie", type=tie_type)
     ET.SubElement(note_el, "voice").text = str(voice)
-    if _STEP_ALTER[pitch_class]:
+    if _STEP_ALTER[pitch_class] and technical is None:
         ET.SubElement(note_el, "accidental").text = "sharp"
-    ET.SubElement(note_el, "staff").text = "1"
-    if tie_types:
+    ET.SubElement(note_el, "staff").text = str(staff)
+    if tie_types or technical is not None:
         notations = ET.SubElement(note_el, "notations")
         for tie_type in tie_types:
             ET.SubElement(notations, "tied", type=tie_type)
+        if technical is not None:
+            technical_el = ET.SubElement(notations, "technical")
+            ET.SubElement(technical_el, "string").text = str(technical[0])
+            ET.SubElement(technical_el, "fret").text = str(technical[1])
+
+
+def _parse_note_tab(value: Any, midi_note: int) -> dict[str, Any] | None:
+    """Validate one note's optional tablature suggestion."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"instrument", "status", "string", "fret"}:
+        raise ScoreConstructionError("Score note tablature is malformed.")
+    instrument = value["instrument"]
+    status = value["status"]
+    if instrument not in TAB_INSTRUMENTS or status not in TAB_STATUSES:
+        raise ScoreConstructionError("Score note tablature is unsupported.")
+    string, fret = value["string"], value["fret"]
+    if status == "assigned":
+        if (
+            isinstance(string, bool)
+            or isinstance(fret, bool)
+            or not isinstance(string, int)
+            or not isinstance(fret, int)
+            or not tab_position_is_consistent(midi_note, instrument, string, fret)
+        ):
+            raise ScoreConstructionError("Score note tablature does not sound the note's pitch.")
+    elif string is not None or fret is not None:
+        raise ScoreConstructionError("An unassigned tablature note cannot name a position.")
+    return {"instrument": instrument, "status": status, "string": string, "fret": fret}
+
+
+def _voice_lanes(notes: Sequence[Mapping[str, Any]], first_voice: int) -> tuple[dict[str, int], int]:
+    """Keep source kinds in separate voices and split overlaps into more voices."""
+    voice_by_id: dict[str, int] = {}
+    next_voice = first_voice
+    for source_kind in sorted({note["sourceKind"] for note in notes}):
+        source_notes = sorted(
+            (note for note in notes if note["sourceKind"] == source_kind),
+            key=lambda item: (item["quantizedBeat"], item["quantizedEndBeat"], item["id"]),
+        )
+        lane_ends: list[float] = []
+        for note in source_notes:
+            lane = next(
+                (index for index, lane_end in enumerate(lane_ends) if lane_end <= note["quantizedBeat"]),
+                None,
+            )
+            if lane is None:
+                lane = len(lane_ends)
+                lane_ends.append(note["quantizedEndBeat"])
+            else:
+                lane_ends[lane] = note["quantizedEndBeat"]
+            voice_by_id[note["id"]] = next_voice + lane
+        next_voice += len(lane_ends)
+    return voice_by_id, next_voice
+
+
+def _measure_fragments(
+    notes: Sequence[Mapping[str, Any]],
+    voice_by_id: Mapping[str, int],
+    *,
+    meter: int,
+    budget: list[int],
+) -> dict[int, dict[int, list[dict[str, Any]]]]:
+    """Split sustained notes at bar lines; bound the total fragment count."""
+    fragments_by_measure: dict[int, dict[int, list[dict[str, Any]]]] = {}
+    for note in notes:
+        first_measure = int(note["quantizedBeat"] // meter)
+        end_measure = int(math.ceil(note["quantizedEndBeat"] / meter))
+        budget[0] += end_measure - first_measure
+        if budget[0] > _MAX_MUSICXML_FRAGMENTS:
+            raise ScoreConstructionError(
+                "MusicXML note splitting exceeds the supported fragment limit."
+            )
+        for position in range(first_measure, end_measure):
+            bar_start = position * meter
+            bar_end = bar_start + meter
+            fragment_start = max(note["quantizedBeat"], bar_start)
+            fragment_end = min(note["quantizedEndBeat"], bar_end)
+            if fragment_start >= fragment_end:
+                continue
+            fragment = {
+                **note,
+                "localStartBeat": fragment_start - bar_start,
+                "localEndBeat": fragment_end - bar_start,
+                "tieStop": note["quantizedBeat"] < bar_start,
+                "tieStart": note["quantizedEndBeat"] > bar_end,
+                "voice": voice_by_id[note["id"]],
+            }
+            fragments_by_measure.setdefault(position, {}).setdefault(
+                fragment["voice"], []
+            ).append(fragment)
+    return fragments_by_measure
+
+
+def _write_measure_voices(
+    measure_el: ET.Element,
+    voices: Sequence[tuple[int, Sequence[Mapping[str, Any]], int, bool]],
+    bar_ticks: int,
+) -> None:
+    """Write ``(voice, fragments, staff, with_tab)`` lanes separated by backups.
+
+    A forward is only a timing spacer. It does not claim that missing
+    transcription evidence proves a musical rest.
+    """
+    if not voices:
+        _append_forward(measure_el, bar_ticks)
+        return
+    for index, (voice, fragments, staff, with_tab) in enumerate(voices):
+        if index:
+            ET.SubElement(ET.SubElement(measure_el, "backup"), "duration").text = str(bar_ticks)
+        cursor_ticks = 0
+        for fragment in sorted(
+            fragments, key=lambda item: (item["localStartBeat"], item["localEndBeat"], item["id"])
+        ):
+            start_ticks = int(round(fragment["localStartBeat"] * _DIVISIONS))
+            end_ticks = int(round(fragment["localEndBeat"] * _DIVISIONS))
+            if start_ticks < cursor_ticks or end_ticks <= start_ticks:
+                raise ScoreConstructionError("Overlapping score notes share a MusicXML voice.")
+            _append_forward(measure_el, start_ticks - cursor_ticks)
+            tab = fragment.get("tab")
+            _musicxml_note(
+                measure_el,
+                midi_note=fragment["midiNote"],
+                duration_ticks=end_ticks - start_ticks,
+                voice=voice,
+                tie_stop=fragment["tieStop"],
+                tie_start=fragment["tieStart"],
+                staff=staff,
+                technical=(tab["string"], tab["fret"]) if with_tab else None,
+            )
+            cursor_ticks = end_ticks
+        _append_forward(measure_el, bar_ticks - cursor_ticks)
+
+
+def _musicxml_tab_score_part(part_list: ET.Element, instrument_id: str) -> None:
+    part_id = _TAB_PART_IDS[instrument_id]
+    score_part = ET.SubElement(part_list, "score-part", id=part_id)
+    ET.SubElement(score_part, "part-name").text = _TAB_PART_NAMES[instrument_id]
+    instrument = ET.SubElement(score_part, "score-instrument", id=f"{part_id}-I1")
+    ET.SubElement(instrument, "instrument-name").text = TAB_INSTRUMENTS[instrument_id].label
+    midi = ET.SubElement(score_part, "midi-instrument", id=f"{part_id}-I1")
+    ET.SubElement(midi, "midi-program").text = str(_TAB_GM_PROGRAMS[instrument_id])
+
+
+def _musicxml_tab_part(
+    root: ET.Element,
+    instrument_id: str,
+    notes: Sequence[Mapping[str, Any]],
+    *,
+    measure_count: int,
+    meter: int,
+    budget: list[int],
+) -> None:
+    """Write one fretted instrument: standard staff 1 and TAB staff 2.
+
+    Both staves carry the same notes and durations so they stay synchronized;
+    notes without a playable position appear only on the standard staff.
+    """
+    instrument = TAB_INSTRUMENTS[instrument_id]
+    voice_by_id, next_voice = _voice_lanes(notes, 1)
+    standard = _measure_fragments(notes, voice_by_id, meter=meter, budget=budget)
+    fingered = [note for note in notes if note["tab"]["status"] == "assigned"]
+    tab_voice_by_id = {
+        note_id: voice + max(4, next_voice - 1)
+        for note_id, voice in voice_by_id.items()
+    }
+    tab = _measure_fragments(fingered, tab_voice_by_id, meter=meter, budget=budget)
+    bar_ticks = meter * _DIVISIONS
+    part = ET.SubElement(root, "part", id=_TAB_PART_IDS[instrument_id])
+    for position in range(measure_count):
+        measure_el = ET.SubElement(part, "measure", number=str(position + 1))
+        if position == 0:
+            attrs = ET.SubElement(measure_el, "attributes")
+            ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
+            time_el = ET.SubElement(attrs, "time")
+            ET.SubElement(time_el, "beats").text = str(meter)
+            ET.SubElement(time_el, "beat-type").text = "4"
+            ET.SubElement(attrs, "staves").text = "2"
+            sign, line = _TAB_CLEFS[instrument_id]
+            clef = ET.SubElement(attrs, "clef", number="1")
+            ET.SubElement(clef, "sign").text = sign
+            ET.SubElement(clef, "line").text = line
+            # Fretted instruments sound an octave below written pitch; pitches
+            # stay at sounding pitch and the clef carries the octave.
+            ET.SubElement(clef, "clef-octave-change").text = "-1"
+            tab_clef = ET.SubElement(attrs, "clef", number="2")
+            ET.SubElement(tab_clef, "sign").text = "TAB"
+            ET.SubElement(tab_clef, "line").text = "5"
+            details = ET.SubElement(attrs, "staff-details", number="2")
+            ET.SubElement(details, "staff-lines").text = str(len(instrument.strings))
+            for line_number, open_note in enumerate(reversed(instrument.strings), start=1):
+                tuning = ET.SubElement(details, "staff-tuning", line=str(line_number))
+                pitch_class = open_note % 12
+                ET.SubElement(tuning, "tuning-step").text = _STEP_BASE[pitch_class]
+                if _STEP_ALTER[pitch_class]:
+                    ET.SubElement(tuning, "tuning-alter").text = "1"
+                ET.SubElement(tuning, "tuning-octave").text = str(open_note // 12 - 1)
+        lanes = [
+            (voice, fragments, 1, False)
+            for voice, fragments in sorted(standard.get(position, {}).items())
+        ] + [
+            (voice, fragments, 2, True)
+            for voice, fragments in sorted(tab.get(position, {}).items())
+        ]
+        _write_measure_voices(measure_el, lanes, bar_ticks)
 
 
 def _percussion_instrument_id(voice: str) -> str:
@@ -906,81 +1126,34 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
                     "midiNote": midi_note,
                     "quantizedBeat": start_beat,
                     "quantizedEndBeat": end_beat,
+                    "tab": _parse_note_tab(note.get("tab"), midi_note),
                 }
             )
     if len(all_notes) > _MAX_NOTES:
         raise ScoreConstructionError("Too many score notes.")
 
-    # Keep source kinds in independent MusicXML voices and split overlapping
-    # events within a source into additional voices without inventing parts.
-    voice_by_id: dict[str, int] = {}
-    source_kinds = sorted({note["sourceKind"] for note in all_notes})
-    next_voice = 1
-    for source_kind in source_kinds:
-        source_notes = sorted(
-            (note for note in all_notes if note["sourceKind"] == source_kind),
-            key=lambda item: (
-                item["quantizedBeat"],
-                item["quantizedEndBeat"],
-                item["id"],
-            ),
-        )
-        lane_ends: list[float] = []
-        for note in source_notes:
-            lane = next(
-                (
-                    index
-                    for index, lane_end in enumerate(lane_ends)
-                    if lane_end <= note["quantizedBeat"]
-                ),
-                None,
-            )
-            if lane is None:
-                lane = len(lane_ends)
-                lane_ends.append(note["quantizedEndBeat"])
-            else:
-                lane_ends[lane] = note["quantizedEndBeat"]
-            voice_by_id[note["id"]] = next_voice + lane
-        next_voice += len(lane_ends)
-
-    # A note sustained across bar lines creates one MusicXML note per bar.
-    # Bound that expansion before allocating ElementTree nodes, then index
-    # fragments by measure so sparse scores do not scan every event in every bar.
-    fragments_by_measure: dict[int, dict[int, list[dict[str, Any]]]] = {}
-    fragment_count = 0
-    for note in all_notes:
-        first_measure = int(note["quantizedBeat"] // meter)
-        end_measure = int(math.ceil(note["quantizedEndBeat"] / meter))
-        fragment_count += end_measure - first_measure
-        if fragment_count > _MAX_MUSICXML_FRAGMENTS:
-            raise ScoreConstructionError(
-                "MusicXML note splitting exceeds the supported fragment limit."
-            )
-        for position in range(first_measure, end_measure):
-            bar_start = position * meter
-            bar_end = bar_start + meter
-            fragment_start = max(note["quantizedBeat"], bar_start)
-            fragment_end = min(note["quantizedEndBeat"], bar_end)
-            if fragment_start >= fragment_end:
-                continue
-            fragment = {
-                **note,
-                "localStartBeat": fragment_start - bar_start,
-                "localEndBeat": fragment_end - bar_start,
-                "tieStop": note["quantizedBeat"] < bar_start,
-                "tieStart": note["quantizedEndBeat"] > bar_end,
-                "voice": voice_by_id[note["id"]],
-            }
-            fragments_by_measure.setdefault(position, {}).setdefault(
-                fragment["voice"], []
-            ).append(fragment)
+    tab_notes = {
+        instrument: [note for note in all_notes if note["tab"] and note["tab"]["instrument"] == instrument]
+        for instrument in TAB_INSTRUMENT_ORDER
+    }
+    tab_instruments = [instrument for instrument in TAB_INSTRUMENT_ORDER if tab_notes[instrument]]
+    combined_notes = [note for note in all_notes if note["tab"] is None]
+    budget = [0]
+    voice_by_id, _ = _voice_lanes(combined_notes, 1)
+    fragments_by_measure = _measure_fragments(
+        combined_notes, voice_by_id, meter=meter, budget=budget
+    )
 
     root = ET.Element("score-partwise", version="3.1")
     encoding = ET.SubElement(ET.SubElement(root, "identification"), "encoding")
     ET.SubElement(encoding, "software").text = f"PopEx {SCORE_BUILDER_VERSION}"
     ET.SubElement(encoding, "encoding-description").text = "Draft; review required"
     part_list = ET.SubElement(root, "part-list")
-    ET.SubElement(ET.SubElement(part_list, "score-part", id="P1"), "part-name").text = "Draft Pitched Events"
+    ET.SubElement(ET.SubElement(part_list, "score-part", id="P1"), "part-name").text = (
+        "Other Pitched Lines" if tab_instruments else "Draft Pitched Events"
+    )
+    for instrument in tab_instruments:
+        _musicxml_tab_score_part(part_list, instrument)
     drum_voices = sorted(
         {hit["broadVoice"] for hits in drum_hits_by_measure for hit in hits},
         key=list(PERCUSSION_NOTATION).index,
@@ -1012,43 +1185,24 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
             direction = ET.SubElement(measure_el, "direction", placement="above")
             direction_type = ET.SubElement(direction, "direction-type")
             ET.SubElement(direction_type, "words").text = chord
+        _write_measure_voices(
+            measure_el,
+            [
+                (voice, fragments, 1, False)
+                for voice, fragments in sorted(fragments_by_measure.get(position, {}).items())
+            ],
+            bar_ticks,
+        )
 
-        fragments = fragments_by_measure.get(position, {})
-
-        if not fragments:
-            # A forward is only a timing spacer. It does not claim that missing
-            # transcription evidence proves a musical rest.
-            _append_forward(measure_el, bar_ticks)
-            continue
-        for voice_index, voice in enumerate(sorted(fragments)):
-            if voice_index:
-                backup = ET.SubElement(measure_el, "backup")
-                ET.SubElement(backup, "duration").text = str(bar_ticks)
-            cursor_ticks = 0
-            voice_fragments = sorted(
-                fragments[voice],
-                key=lambda item: (
-                    item["localStartBeat"],
-                    item["localEndBeat"],
-                    item["id"],
-                ),
-            )
-            for fragment in voice_fragments:
-                start_ticks = int(round(fragment["localStartBeat"] * _DIVISIONS))
-                end_ticks = int(round(fragment["localEndBeat"] * _DIVISIONS))
-                if start_ticks < cursor_ticks or end_ticks <= start_ticks:
-                    raise ScoreConstructionError("Overlapping score notes share a MusicXML voice.")
-                _append_forward(measure_el, start_ticks - cursor_ticks)
-                _musicxml_note(
-                    measure_el,
-                    midi_note=fragment["midiNote"],
-                    duration_ticks=end_ticks - start_ticks,
-                    voice=voice,
-                    tie_stop=fragment["tieStop"],
-                    tie_start=fragment["tieStart"],
-                )
-                cursor_ticks = end_ticks
-            _append_forward(measure_el, bar_ticks - cursor_ticks)
+    for instrument in tab_instruments:
+        _musicxml_tab_part(
+            root,
+            instrument,
+            tab_notes[instrument],
+            measure_count=measure_count,
+            meter=meter,
+            budget=budget,
+        )
 
     if drum_voices:
         _musicxml_percussion_part(

@@ -1896,7 +1896,11 @@ def test_no_final_notation_or_export_claims() -> None:
     source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
         encoding="utf-8"
     ).lower()
-    harmony_section = source[source.index("def _run_harmony_job") :]
+    # The draft-score code later in the module legitimately exports MusicXML
+    # and tablature; this guard covers the harmony stage only.
+    harmony_section = source[
+        source.index("def _run_harmony_job") : source.index("def _cleanup_score_artifacts")
+    ]
     for forbidden in (
         "musicxml",
         "midi export",

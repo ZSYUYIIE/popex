@@ -483,7 +483,7 @@ def test_score_without_interpretation_maps_raw_hit_kinds(tmp_path: Path) -> None
     job_id = create_drum_job(settings)
     job, details = build_and_load(settings, job_id)
 
-    assert details["version"] == "score-pipeline-v2"
+    assert details["version"] == "score-pipeline-v3"
     assert details["layers"]["percussion"]["status"] == "included"
     assert "raw hit-kind table" in details["layers"]["percussion"]["note"]
     assert details["percussion"]["voiceSource"] == "raw-hit-kinds"
@@ -515,7 +515,8 @@ def test_score_without_interpretation_maps_raw_hit_kinds(tmp_path: Path) -> None
         "unresolved_percussion": 2,
     }
     assert not any("not rendered" in warning for warning in details["warnings"])
-    assert any("Tablature is not part" in warning for warning in details["warnings"])
+    assert details["layers"]["tablature"]["status"] == "omitted"
+    assert not any("tablature" in warning.lower() for warning in details["warnings"])
     assert job["score"]["stale"] is False
 
 
@@ -604,6 +605,9 @@ def _downgrade_to_schema_one(document: dict) -> dict:
     legacy["pipelineVersion"] = "score-pipeline-v1"
     legacy["builderVersion"] = "score-construction-v1"
     del legacy["percussion"]
+    del legacy["tablature"]
+    del legacy["counts"]["tabNotes"]
+    del legacy["counts"]["fingeredTabNotes"]
     for key in (
         "percussionHits",
         "notatedPercussionHits",
@@ -615,6 +619,12 @@ def _downgrade_to_schema_one(document: dict) -> dict:
         del legacy["counts"][key]
     for measure in legacy["measures"]:
         del measure["percussionHits"]
+        for note in measure["notes"]:
+            del note["tab"]
+    legacy["layers"]["tablature"] = {
+        "status": "omitted",
+        "note": "Guitar and bass tablature are not generated yet.",
+    }
     legacy["layers"]["percussion"] = {
         "status": "omitted",
         "note": "Raw percussion events are preserved but not notated yet.",
@@ -662,9 +672,9 @@ def test_schema_one_score_without_percussion_events_is_not_stale(tmp_path: Path)
     job_id = create_job(settings)
     build_and_load(settings, job_id)
     db.update_job(settings.database_path, job_id, score_version="score-pipeline-v1")
-    from app.score_pipeline import score_outdated_by_pipeline
+    from app.score_pipeline import score_outdated_reason
 
-    assert score_outdated_by_pipeline(db.get_job(settings.database_path, job_id)) is False
+    assert score_outdated_reason(db.get_job(settings.database_path, job_id)) is None
 
 
 @pytest.mark.parametrize(
@@ -680,7 +690,7 @@ def test_schema_one_score_without_percussion_events_is_not_stale(tmp_path: Path)
         lambda doc: doc["measures"][0]["percussionHits"].append(
             copy.deepcopy(doc["measures"][0]["percussionHits"][0])
         ),
-        lambda doc: doc.update(schemaVersion=3),
+        lambda doc: doc.update(schemaVersion=4),
     ],
 )
 def test_tampered_percussion_documents_are_rejected(tmp_path: Path, mutate) -> None:

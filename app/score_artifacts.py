@@ -34,12 +34,17 @@ from uuid import uuid4
 
 from app.config import Settings
 from app.score_construction import PERCUSSION_NOTATION, UNRESOLVED_PERCUSSION_VOICE
-from app.score_sources import is_score_fingerprint, score_source_fingerprint
+from app.score_sources import (
+    is_score_fingerprint,
+    score_source_fingerprint,
+    validate_tablature_request,
+)
+from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consistent
 
-# Schema 2 adds a separate percussion part; schema-1 documents (pitched notes
-# only) remain readable and downloadable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 2
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2})
+# Schema 2 adds a separate percussion part and schema 3 a tablature layer;
+# schema-1 and schema-2 documents remain readable and downloadable.
+SCORE_ARTIFACT_SCHEMA_VERSION = 3
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -78,6 +83,22 @@ _TOP_LEVEL_KEYS_V1 = frozenset(
     }
 )
 _TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
+_TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {"tablature"}
+_TAB_COUNT_KEYS = frozenset({"tabNotes", "fingeredTabNotes"})
+_TAB_INSTRUMENT_KEYS = frozenset(
+    {
+        "instrument",
+        "label",
+        "sourceKind",
+        "tuningName",
+        "strings",
+        "frets",
+        "noteCount",
+        "assignedCount",
+        "outOfRangeCount",
+        "unplayableCount",
+    }
+)
 _COUNT_KEYS_V1 = frozenset(
     {
         "measures",
@@ -101,6 +122,7 @@ _PERCUSSION_COUNT_KEYS = frozenset(
     }
 )
 _COUNT_KEYS_V2 = _COUNT_KEYS_V1 | _PERCUSSION_COUNT_KEYS
+_COUNT_KEYS_V3 = _COUNT_KEYS_V2 | _TAB_COUNT_KEYS
 _MEASURE_KEYS_V1 = frozenset(
     {"measureIndex", "startSeconds", "endSeconds", "notes", "chordSymbol", "harmony"}
 )
@@ -212,13 +234,19 @@ def _exact_keys(value: Mapping[str, Any], expected: frozenset[str], label: str) 
 
 def _validate_sources(value: Any) -> None:
     sources = _mapping(value, "sources")
+    base_keys = frozenset(
+        {"identityVersion", "analysis", "transcription", "interpretation", "harmony"}
+    )
     _exact_keys(
         sources,
-        frozenset(
-            {"identityVersion", "analysis", "transcription", "interpretation", "harmony"}
-        ),
+        base_keys | ({"tablature"} if "tablature" in sources else set()),
         "sources",
     )
+    if "tablature" in sources:
+        try:
+            validate_tablature_request(sources["tablature"])
+        except ValueError as exc:
+            raise _fail("sources.tablature is invalid.") from exc
     _integer(sources["identityVersion"], "sources.identityVersion", 1, 1)
     for name in ("analysis", "transcription"):
         layer = _mapping(sources[name], f"sources.{name}")
@@ -234,7 +262,7 @@ def _validate_sources(value: Any) -> None:
             _text(layer[key], f"sources.{name}.{key}", 256)
 
 
-def _validate_layers(value: Any) -> dict[str, str]:
+def _validate_layers(value: Any, schema_version: int) -> dict[str, str]:
     layers = _mapping(value, "layers")
     _exact_keys(layers, _LAYER_KEYS, "layers")
     statuses = {}
@@ -245,7 +273,9 @@ def _validate_layers(value: Any) -> dict[str, str]:
             raise _fail(f"layers.{name}.status is invalid.")
         _text(layer["note"], f"layers.{name}.note")
         statuses[name] = layer["status"]
-    if statuses["pitchedNotes"] != "included" or statuses["tablature"] != "omitted":
+    if statuses["pitchedNotes"] != "included" or (
+        schema_version < 3 and statuses["tablature"] != "omitted"
+    ):
         raise _fail("layers do not match the supported score package.")
     return statuses
 
@@ -355,6 +385,90 @@ def _validate_percussion_hit(
     totals["byVoice"][voice] = totals["byVoice"].get(voice, 0) + 1
 
 
+def _validate_note_tab(note: Mapping[str, Any], label: str, totals: dict[str, Any]) -> None:
+    if "tab" not in note:
+        raise _fail(f"{label}.tab is required.")
+    tab = note["tab"]
+    if tab is None:
+        return
+    tab = _mapping(tab, f"{label}.tab")
+    _exact_keys(tab, frozenset({"instrument", "status", "string", "fret"}), f"{label}.tab")
+    instrument = tab["instrument"]
+    if instrument not in TAB_INSTRUMENTS or tab["status"] not in TAB_STATUSES:
+        raise _fail(f"{label}.tab is unsupported.")
+    if tab["status"] == "assigned":
+        string, fret = tab["string"], tab["fret"]
+        if (
+            type(string) is not int
+            or type(fret) is not int
+            or not tab_position_is_consistent(note["midiNote"], instrument, string, fret)
+        ):
+            raise _fail(f"{label}.tab does not sound the note's pitch.")
+        totals["fingeredTabNotes"] += 1
+    elif tab["string"] is not None or tab["fret"] is not None:
+        raise _fail(f"{label}.tab cannot name a position without assignment.")
+    totals["tabNotes"] += 1
+    counts = totals["tabByInstrument"].setdefault(
+        instrument,
+        {"noteCount": 0, "assignedCount": 0, "outOfRangeCount": 0, "unplayableCount": 0, "sources": set()},
+    )
+    counts["noteCount"] += 1
+    key = {"assigned": "assignedCount", "out_of_range": "outOfRangeCount", "unplayable": "unplayableCount"}[
+        tab["status"]
+    ]
+    counts[key] += 1
+    counts["sources"].add(note.get("sourceKind"))
+
+
+def _validate_tablature_summary(
+    value: Any, sources: Mapping[str, Any], by_instrument: Mapping[str, Any]
+) -> None:
+    summary = _mapping(value, "tablature")
+    _exact_keys(summary, frozenset({"version", "origin", "request", "instruments"}), "tablature")
+    if not isinstance(summary["version"], str) or not _VERSION.fullmatch(summary["version"]):
+        raise _fail("tablature.version is invalid.")
+    try:
+        request = validate_tablature_request(summary["request"])
+    except ValueError as exc:
+        raise _fail("tablature.request is invalid.") from exc
+    if summary["origin"] == "musician":
+        if sources.get("tablature") != request:
+            raise _fail("tablature.request does not match the recorded score inputs.")
+    elif summary["origin"] != "default" or "tablature" in sources:
+        raise _fail("tablature.origin does not match the recorded score inputs.")
+    instruments = _sequence(summary["instruments"], "tablature.instruments", len(TAB_INSTRUMENTS))
+    listed: set[str] = set()
+    for index, raw in enumerate(instruments):
+        label = f"tablature.instruments[{index}]"
+        item = _mapping(raw, label)
+        _exact_keys(item, _TAB_INSTRUMENT_KEYS, label)
+        instrument_id = item["instrument"]
+        instrument = TAB_INSTRUMENTS.get(instrument_id)
+        if instrument is None or instrument_id in listed:
+            raise _fail(f"{label}.instrument is invalid.")
+        listed.add(instrument_id)
+        if (
+            item["sourceKind"] != request[instrument_id]
+            or item["label"] != instrument.label
+            or item["tuningName"] != instrument.tuning_name
+            or item["strings"] != list(instrument.strings)
+            or item["frets"] != instrument.frets
+        ):
+            raise _fail(f"{label} does not match the tablature request or tuning.")
+        expected = by_instrument.get(
+            instrument_id,
+            {"noteCount": 0, "assignedCount": 0, "outOfRangeCount": 0, "unplayableCount": 0, "sources": set()},
+        )
+        for key in ("noteCount", "assignedCount", "outOfRangeCount", "unplayableCount"):
+            if _integer(item[key], f"{label}.{key}", 0, _MAX_NOTES) != expected[key]:
+                raise _fail(f"{label}.{key} does not match the measures.")
+        if expected["sources"] - {item["sourceKind"]}:
+            raise _fail(f"{label} covers notes from another line.")
+    requested = {name for name, source in request.items() if source is not None}
+    if listed != requested or set(by_instrument) - listed:
+        raise _fail("tablature.instruments does not match the request.")
+
+
 def _validate_measures(
     value: Any,
     part_ids: set[str],
@@ -374,6 +488,9 @@ def _validate_measures(
         "harmonyEntries": 0,
         **{key: 0 for key in _PERCUSSION_COUNT_KEYS},
         "byVoice": {},
+        "tabNotes": 0,
+        "fingeredTabNotes": 0,
+        "tabByInstrument": {},
     }
     for position, raw in enumerate(measures):
         label = f"measures[{position}]"
@@ -429,6 +546,8 @@ def _validate_measures(
             _number(note.get("confidence"), f"{note_label}.confidence", 0.0, 1.0)
             if "partId" not in note:
                 raise _fail(f"{note_label}.partId is required.")
+            if schema_version >= 3:
+                _validate_note_tab(note, note_label, totals)
             if note["partId"] is not None:
                 if note["partId"] not in part_ids:
                     raise _fail(f"{note_label}.partId references an unknown part.")
@@ -511,7 +630,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         raise _fail("Unsupported score document schema version.")
     _exact_keys(
         document,
-        _TOP_LEVEL_KEYS_V2 if schema_version >= 2 else _TOP_LEVEL_KEYS_V1,
+        {1: _TOP_LEVEL_KEYS_V1, 2: _TOP_LEVEL_KEYS_V2, 3: _TOP_LEVEL_KEYS_V3}[schema_version],
         "score document",
     )
     if document["artifactType"] != SCORE_ARTIFACT_TYPE:
@@ -528,18 +647,20 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     _validate_sources(document["sources"])
     if score_source_fingerprint(document["sources"]) != fingerprint:
         raise _fail("sourceFingerprint does not match the recorded sources.")
-    layers = _validate_layers(document["layers"])
+    layers = _validate_layers(document["layers"], schema_version)
     _tempo, meter = _validate_timing(document["timing"])
     part_ids = _validate_parts(document["parts"])
     totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
     counts = _mapping(document["counts"], "counts")
-    count_keys = _COUNT_KEYS_V2 if schema_version >= 2 else _COUNT_KEYS_V1
+    count_keys = {1: _COUNT_KEYS_V1, 2: _COUNT_KEYS_V2, 3: _COUNT_KEYS_V3}[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
         _integer(counts[key], f"counts.{key}", 0, 1_000_000)
     checked = ["measures", "notes", "chordSymbols", "notesWithPart"]
     if schema_version >= 2:
         checked += sorted(_PERCUSSION_COUNT_KEYS)
+    if schema_version >= 3:
+        checked += sorted(_TAB_COUNT_KEYS)
     for key in checked:
         if counts[key] != totals[key]:
             raise _fail(f"counts.{key} does not match the measures.")
@@ -549,6 +670,12 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             raise _fail("The percussion layer status does not match its hits.")
     elif layers["percussion"] != "omitted":
         raise _fail("Schema-1 score documents cannot carry percussion.")
+    if schema_version >= 3:
+        _validate_tablature_summary(
+            document["tablature"], document["sources"], totals["tabByInstrument"]
+        )
+        if (layers["tablature"] == "included") != bool(totals["fingeredTabNotes"]):
+            raise _fail("The tablature layer status does not match its notes.")
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (

@@ -3,9 +3,9 @@
 Generates a short synthetic recording (a sine-tone melody over a kick, snare
 and hi-hat pattern), then drives the real application through upload, FFmpeg
 normalization, analysis, raw transcription, interpretation, harmony and
-score construction. It checks that the saved draft score holds pitched notes
-and a separate percussion part, and that the MIDI and MusicXML exports carry
-them. Only synthetic audio is used; nothing is downloaded.
+score construction. It asks for guitar tablature of the melody line, then
+checks that the saved draft score holds pitched notes, guitar tablature and a
+separate percussion part, and that the MIDI and MusicXML exports carry them. Only synthetic audio is used; nothing is downloaded.
 
 Usage::
 
@@ -139,6 +139,11 @@ def run(data_dir: Path) -> dict:
         step("Transcription", f"/api/jobs/{job_id}/transcribe", "transcription")
         step("Interpretation", f"/api/jobs/{job_id}/interpret", "interpretation")
         step("Harmony", f"/api/jobs/{job_id}/harmonize", "harmony")
+        choice = client.put(
+            f"/api/jobs/{job_id}/score/tablature", json={"bass": "bass", "guitar": "full_mix"}
+        )
+        if choice.status_code != 200:
+            raise SystemExit(f"Tablature choice was rejected: {choice.status_code} {choice.text}")
         step("Score", f"/api/jobs/{job_id}/score/construct", "score")
 
         details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
@@ -150,6 +155,11 @@ def run(data_dir: Path) -> dict:
         root = ET.fromstring(musicxml.content)
         parts = [part.get("id") for part in root.findall("part")]
         drum_notes = root.findall("part[@id='P2']/measure/note")
+        tab_notes = [
+            note
+            for note in root.findall("part[@id='P4']/measure/note")
+            if note.find("notations/technical/fret") is not None
+        ]
         summary = {
             "jobId": job_id,
             "scoreVersion": details["version"],
@@ -161,6 +171,8 @@ def run(data_dir: Path) -> dict:
             "counts": details["counts"],
             "musicxmlParts": parts,
             "musicxmlDrumNotes": len(drum_notes),
+            "tablature": details["tablature"],
+            "musicxmlGuitarTabNotes": len(tab_notes),
             "midiChannel10NoteOns": _channel_ten_note_ons(midi.content),
             "warnings": details["warnings"],
         }
@@ -173,6 +185,10 @@ def run(data_dir: Path) -> dict:
         problems.append("MusicXML has no percussion part")
     if summary["midiChannel10NoteOns"] != summary["counts"]["notatedPercussionHits"]:
         problems.append("MIDI channel-10 hits do not match notated hits")
+    if summary["layers"].get("tablature") != "included":
+        problems.append("tablature layer is not included")
+    if summary["musicxmlGuitarTabNotes"] != summary["counts"]["fingeredTabNotes"]:
+        problems.append("MusicXML TAB notes do not match fingered notes")
     summary["problems"] = problems
     return summary
 

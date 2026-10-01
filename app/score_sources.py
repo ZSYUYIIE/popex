@@ -31,6 +31,60 @@ INTERPRETATION_FILE_NAME = "interpretation/draft.json"
 _HARMONY_FILE_RE = re.compile(r"harmony/harmonic-context(?:\.[a-f0-9]{32})?\.json")
 _FINGERPRINT_RE = re.compile(r"[a-f0-9]{64}")
 
+# Tablature choices: which transcribed line each fretted instrument fingers.
+# The default tabs only the separated bass-stem line; guitar is never inferred.
+TAB_SOURCE_KINDS = ("vocals", "bass", "other", "full_mix")
+TAB_REQUEST_INSTRUMENTS = ("bass", "guitar")
+DEFAULT_TABLATURE_REQUEST: dict[str, str | None] = {"bass": "bass", "guitar": None}
+
+
+def validate_tablature_request(value: Any) -> dict[str, str | None]:
+    """Return a normalized tablature request or raise ``ValueError``."""
+    if not isinstance(value, Mapping) or set(value) != set(TAB_REQUEST_INSTRUMENTS):
+        raise ValueError("Tablature choices must name exactly bass and guitar.")
+    request: dict[str, str | None] = {}
+    for instrument in TAB_REQUEST_INSTRUMENTS:
+        source = value[instrument]
+        if source is not None and source not in TAB_SOURCE_KINDS:
+            raise ValueError(f"The {instrument} tablature line is not supported.")
+        request[instrument] = source
+    chosen = [source for source in request.values() if source is not None]
+    if len(chosen) != len(set(chosen)):
+        raise ValueError("Bass and guitar tablature must use different lines.")
+    return request
+
+
+def stored_tablature_request(record: Mapping[str, Any] | None) -> dict[str, str | None] | None:
+    """Return the musician's saved choice, or ``None`` when the default applies."""
+    if not isinstance(record, Mapping):
+        return None
+    raw = record.get("score_tablature_request")
+    if not isinstance(raw, str) or len(raw) > 256:
+        return None
+    try:
+        request = validate_tablature_request(json.loads(raw))
+    except (ValueError, TypeError):
+        return None
+    return None if request == DEFAULT_TABLATURE_REQUEST else request
+
+
+def effective_tablature_request(
+    record: Mapping[str, Any] | None,
+) -> tuple[dict[str, str | None], str]:
+    """Return ``(request, origin)`` where origin is ``default`` or ``musician``."""
+    stored = stored_tablature_request(record)
+    if stored is None:
+        return dict(DEFAULT_TABLATURE_REQUEST), "default"
+    return stored, "musician"
+
+
+def encode_tablature_request(request: Mapping[str, Any]) -> str | None:
+    """Return the database value for a request; the default is stored as NULL."""
+    normalized = validate_tablature_request(request)
+    if normalized == DEFAULT_TABLATURE_REQUEST:
+        return None
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"))
+
 
 def _text(record: Mapping[str, Any], key: str) -> str | None:
     value = record.get(key)
@@ -52,6 +106,9 @@ def score_source_identity(record: Mapping[str, Any] | None) -> dict[str, Any] | 
     Analysis and raw transcription are required. Interpretation and harmony
     are included only when their stage is completed with a canonical pointer;
     otherwise they are recorded as ``None`` (an explicitly omitted layer).
+    A musician's non-default tablature choice is a score input, so it is
+    recorded under ``tablature``; the default adds no key, which keeps
+    fingerprints of earlier scores unchanged.
     """
     if not isinstance(record, Mapping):
         return None
@@ -111,7 +168,7 @@ def score_source_identity(record: Mapping[str, Any] | None) -> dict[str, Any] | 
             "createdAt": record["harmonized_at"],
         }
 
-    return {
+    identity: dict[str, Any] = {
         "identityVersion": SCORE_SOURCE_IDENTITY_VERSION,
         "analysis": {
             "fileName": ANALYSIS_FILE_NAME,
@@ -127,6 +184,10 @@ def score_source_identity(record: Mapping[str, Any] | None) -> dict[str, Any] | 
         "interpretation": interpretation,
         "harmony": harmony,
     }
+    tablature = stored_tablature_request(record)
+    if tablature is not None:
+        identity["tablature"] = tablature
+    return identity
 
 
 def score_source_fingerprint(identity: Mapping[str, Any]) -> str:
@@ -152,7 +213,14 @@ def is_score_fingerprint(value: object) -> bool:
 
 
 __all__ = [
+    "DEFAULT_TABLATURE_REQUEST",
     "SCORE_SOURCE_IDENTITY_VERSION",
+    "TAB_REQUEST_INSTRUMENTS",
+    "TAB_SOURCE_KINDS",
+    "effective_tablature_request",
+    "encode_tablature_request",
+    "stored_tablature_request",
+    "validate_tablature_request",
     "current_score_fingerprint",
     "is_score_fingerprint",
     "score_source_fingerprint",

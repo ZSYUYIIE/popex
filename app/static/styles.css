@@ -476,3 +476,25 @@ details {
 .analysis-panel {
   margin-top: 1rem;
 }
+.tab-choices {
+  margin-top:1rem;
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:.75rem 1rem;
+  min-width:0
+}
+.tab-choices legend {
+  font-weight:600;
+  padding:0 .25rem
+}
+.tab-choice-row {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:.35rem .75rem;
+  margin-top:.5rem
+}
+.tab-choice-row select {
+  max-width:100%;
+  min-width:0
+}

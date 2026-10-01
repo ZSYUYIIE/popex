@@ -210,6 +210,7 @@ NEW_COLUMNS: dict[str, str] = {
         "INTEGER CHECK (score_warning_count IS NULL OR score_warning_count >= 0)"
     ),
     "score_error": "TEXT",
+    "score_tablature_request": "TEXT",
 }
 
 
@@ -1518,6 +1519,33 @@ def _score_write_transaction(
             (job_id,),
         ).fetchone()
         yield connection, (dict(row) if row is not None else None)
+
+
+def set_score_tablature_request(
+    database_path: Path,
+    job_id: str,
+    encoded_request: str | None,
+) -> str:
+    """Save one job's tablature choice unless a score build is running.
+
+    Returns ``saved``, ``missing`` or ``busy``. The value is validated by the
+    caller with :func:`app.score_sources.encode_tablature_request`; ``None``
+    restores the default.
+    """
+    if encoded_request is not None and (
+        not isinstance(encoded_request, str) or len(encoded_request) > 256
+    ):
+        raise ValueError("score_tablature_request is invalid.")
+    with _score_write_transaction(database_path, job_id) as (connection, row):
+        if row is None:
+            return "missing"
+        if row.get("score_status") == "processing":
+            return "busy"
+        connection.execute(
+            "UPDATE jobs SET score_tablature_request = ?, updated_at = ? WHERE id = ?",
+            (encoded_request, utc_now(), job_id),
+        )
+        return "saved"
 
 
 def claim_score_attempt(

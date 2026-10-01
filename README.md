@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part) with MIDI and MusicXML downloads and a structured review panel. It does **not** yet provide engraved notation, individual instrument-part exports, or tablature.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads and a structured review panel. It does **not** yet provide engraved notation, correction editing, or reliable instrument-specific parts beyond the separated bass line.
 
 Implemented capabilities:
 
@@ -417,12 +417,15 @@ Implemented capabilities:
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
 - read-only, versioned pitched-note score previews built from matching completed transcription and analysis evidence;
 - stdlib-only MIDI and MusicXML exports with explicit quantization warnings, raw-event provenance, independent overlapping voices, and ties across measure boundaries;
-- persisted draft scores (`score-pipeline-v2`, document schema 2; schema-1 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
+- persisted draft scores (`score-pipeline-v3`, document schema 3; schema-1 and schema-2 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
 - chord symbols placed per measure only when one resolved harmonic candidate covers at least half the measure without a competing candidate, with every overlapping window (including unresolved ones) kept as review evidence;
 - editable-interpretation part labels on notes whose raw event maps to exactly one part; MIDI and MusicXML still use one combined draft part;
 - a separate drum part built from the raw percussion events on the same eighth-note grid: broad voices (low drum, mid drum, tom-like, closed/open high-frequency, cymbal-like) come from a matching editable interpretation, otherwise from the documented raw hit-kind table; unresolved hits keep their own flagged lane and are never assigned to a drum; every hit keeps its raw event ID, time, strength and confidence, and same-voice duplicates in one slot are kept as evidence but written once;
 - drum exports: a MusicXML percussion part (percussion clef, `unpitched` notes, documented display positions and noteheads, hands and low drum in two voices) and General MIDI channel-10 notes from a documented table; pitched notes never use channel 10;
-- out-of-date detection: a saved score built from older evidence, or a pitched-only score built before drum notation for a recording with percussion, stays readable and downloadable but is flagged for rebuild;
+- guitar and bass tablature (`tab-fingering-v1`) as a fingering layer separate from pitch transcription: standard tunings (guitar E2–E4, 21 frets; bass E1–G2, 20 frets), a deterministic Viterbi over hand positions that prefers compact shapes and staying in position, and explicit `out_of_range`/`unplayable` statuses instead of dropped or transposed notes;
+- honest tablature targets: bass tablature fingers the separated bass-stem line by default; guitar tablature is only written for a line the musician chooses and is labelled a fingering suggestion, never a detected guitar part; the choice is saved per recording and joins the score's input fingerprint;
+- MusicXML instrument parts for tabbed lines with a standard staff (octave-transposing clef) and a synchronized TAB staff (`staff-tuning`, string and fret per note); every note appears once in the score;
+- out-of-date detection: a saved score built from older evidence or tablature choices, a pitched-only score built before drum notation for a recording with percussion, or a score built before tablature for a separated recording, stays readable and downloadable but is flagged for rebuild;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony and scores;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
@@ -447,7 +450,8 @@ local upload or supported URL
 → explicit raw-transcription action (pitched + percussion events)
 → explicit interpretation action (parts, rhythm, drum structure, editable draft)
 → explicit harmony action (evidence-aware harmonic context)
-→ explicit score action (measures, chord symbols, part labels, drum part, persisted draft score)
+→ optional tablature choices (bass line by default, guitar line chosen by the musician)
+→ explicit score action (measures, chord symbols, part labels, drum part, tablature, persisted draft score)
 → structured score review and MIDI/MusicXML/JSON downloads
 ```
 
@@ -567,6 +571,8 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `POST /api/jobs/{job_id}/score/construct` with optional `?force=true`
 - `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true`
 - `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json`
+- `GET /api/jobs/{job_id}/score/tablature`
+- `PUT /api/jobs/{job_id}/score/tablature` with strict JSON `{ "bass": line | null, "guitar": line | null }`, where a line is `vocals`, `bass`, `other`, or `full_mix`; rejected while a score is being built
 - `GET /api/jobs/{job_id}/files/{file_name}`
 
 Historical completed jobs are not analyzed, separated, transcribed, interpreted, harmonized, or scored automatically at startup. Use the Analyze, Separate, Transcribe, Interpret, Harmonize, and Build score actions or the corresponding endpoints. Active or already completed attempts are rejected rather than duplicated.
@@ -706,7 +712,8 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Known limitations
 
-- No PDF, engraved notation view, individual instrument-part export, or tablature yet.
+- No PDF, engraved notation view, or individual instrument-part export yet.
+- Tablature uses standard tuning only and suggests one position per note; held notes do not block strings for later notes, and capo, alternate tunings, and techniques (bends, slides, hammer-ons) are not modelled. Guitar parts are never detected automatically.
 - Drum notation uses broad voices on an eighth-note grid. It does not claim specific kit pieces, sticking, ghost notes, accents, flams, or 16th-note detail; off-grid hits are counted and warned about. Auxiliary percussion detection is limited to what the raw baseline labels.
 - Only the latest successful score is kept; there is no score revision history or user-correction editing yet. Raw predictions and interpretation drafts are never modified by score construction.
 - Score quantization uses a coarse eighth-note grid and global tempo/meter.
@@ -726,9 +733,9 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Next planned cycle
 
-The next planned implementation stage is guitar and bass tablature generation (canonical step 6): assign playable string and fret positions to the score's pitched notes from instrument tuning, playable range, and hand-position continuity, keep fingering separate from pitch transcription and structurally editable, and export synchronized standard notation plus tablature.
+The next planned implementation stage is synchronized score review and correction (canonical step 7): review measures against the source audio at the matching time, and record musician corrections (pitch, timing, removal, chord symbols, drum voices, tablature positions) in a separate, versioned corrections artifact that is applied on top of the original predictions with undo, so raw output is never overwritten.
 
-That stage must keep score construction separate from inference, retain the existing retry/preservation and out-of-date guarantees, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Synchronized review and correction, and version grouping, follow in canonical order.
+That stage must keep corrections separate from predictions, retain the existing retry/preservation and out-of-date guarantees, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Private arrangement/version grouping follows in canonical order.
 
 ## License
 
