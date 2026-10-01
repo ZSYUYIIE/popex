@@ -147,6 +147,26 @@ def run(data_dir: Path) -> dict:
         step("Score", f"/api/jobs/{job_id}/score/construct", "score")
 
         details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+        # Correct the first note up a semitone and remove one drum hit, as a
+        # musician would; the original prediction must stay downloadable.
+        first_note = next(note for measure in details["measures"] for note in measure["notes"])
+        first_hit = next(hit for measure in details["measures"] for hit in measure["percussionHits"])
+        corrections = [
+            {"op": "set_pitch", "target": {"noteId": first_note["id"]},
+             "midiNote": min(127, first_note["midiNote"] + 1)},
+            {"op": "delete_hit", "target": {"eventId": first_hit["eventId"], "hitIndex": first_hit["hitIndex"]}},
+        ]
+        for revision, operation in enumerate(corrections):
+            response = client.post(
+                f"/api/jobs/{job_id}/score/corrections",
+                json={"expectedRevision": revision, "operation": operation},
+            )
+            if response.status_code != 200:
+                raise SystemExit(f"Correction was rejected: {response.status_code} {response.text}")
+        corrected_details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+        original_xml = client.get(
+            f"/api/jobs/{job_id}/score/saved/download?format=musicxml&view=original"
+        )
         base = f"/api/jobs/{job_id}/score/saved/download?format="
         musicxml = client.get(base + "musicxml")
         midi = client.get(base + "midi")
@@ -155,6 +175,7 @@ def run(data_dir: Path) -> dict:
         root = ET.fromstring(musicxml.content)
         parts = [part.get("id") for part in root.findall("part")]
         drum_notes = root.findall("part[@id='P2']/measure/note")
+        original_details, details = details, corrected_details
         tab_notes = [
             note
             for note in root.findall("part[@id='P4']/measure/note")
@@ -173,6 +194,13 @@ def run(data_dir: Path) -> dict:
             "musicxmlDrumNotes": len(drum_notes),
             "tablature": details["tablature"],
             "musicxmlGuitarTabNotes": len(tab_notes),
+            "corrections": {
+                "active": corrected_details["corrections"]["activeCount"],
+                "originalPercussionHits": original_details["counts"]["percussionHits"],
+                "correctedPercussionHits": corrected_details["counts"]["percussionHits"],
+                "originalMusicxmlDiffers": original_xml.status_code == 200
+                and original_xml.content != musicxml.content,
+            },
             "midiChannel10NoteOns": _channel_ten_note_ons(midi.content),
             "warnings": details["warnings"],
         }
@@ -183,6 +211,13 @@ def run(data_dir: Path) -> dict:
         problems.append("no pitched notes were notated")
     if "P2" not in summary["musicxmlParts"] or not summary["musicxmlDrumNotes"]:
         problems.append("MusicXML has no percussion part")
+    corrections = summary["corrections"]
+    if (
+        corrections["active"] != 2
+        or corrections["correctedPercussionHits"] != corrections["originalPercussionHits"] - 1
+        or not corrections["originalMusicxmlDiffers"]
+    ):
+        problems.append("corrections were not applied separately from the prediction")
     if summary["midiChannel10NoteOns"] != summary["counts"]["notatedPercussionHits"]:
         problems.append("MIDI channel-10 hits do not match notated hits")
     if summary["layers"].get("tablature") != "included":

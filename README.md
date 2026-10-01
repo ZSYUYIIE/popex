@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads and a structured review panel. It does **not** yet provide engraved notation, correction editing, or reliable instrument-specific parts beyond the separated bass line.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads and a structured review panel. Musicians can review each bar against the recording and correct the draft; corrections are stored separately from predictions and can be undone. It does **not** yet provide engraved notation or reliable instrument-specific parts beyond the separated bass line.
 
 Implemented capabilities:
 
@@ -426,6 +426,9 @@ Implemented capabilities:
 - honest tablature targets: bass tablature fingers the separated bass-stem line by default; guitar tablature is only written for a line the musician chooses and is labelled a fingering suggestion, never a detected guitar part; the choice is saved per recording and joins the score's input fingerprint;
 - MusicXML instrument parts for tabbed lines with a standard staff (octave-transposing clef) and a synchronized TAB staff (`staff-tuning`, string and fret per note); every note appears once in the score;
 - out-of-date detection: a saved score built from older evidence or tablature choices, a pitched-only score built before drum notation for a recording with percussion, or a score built before tablature for a separated recording, stays readable and downloadable but is flagged for rebuild;
+- synchronized review: a persistent review player plays any bar of the recording (or of a separated stem) from the measure table and marks the bar that is playing;
+- musician corrections (pitch by semitone or octave, delete note, tablature position, chord symbol, drum voice, delete drum hit) kept as a versioned, revision-checked operation log in SQLite, separate from the immutable saved prediction; undo, redo, and an undoable reset; corrections survive score rebuilds by stable event IDs, and ones whose target disappeared are reported rather than dropped;
+- corrected and original views of the saved score and of every MIDI, MusicXML, and JSON download;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony and scores;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
@@ -452,7 +455,8 @@ local upload or supported URL
 → explicit harmony action (evidence-aware harmonic context)
 → optional tablature choices (bass line by default, guitar line chosen by the musician)
 → explicit score action (measures, chord symbols, part labels, drum part, tablature, persisted draft score)
-→ structured score review and MIDI/MusicXML/JSON downloads
+→ bar-by-bar review against the recording, separate undoable corrections
+→ corrected (or original) MIDI/MusicXML/JSON downloads
 ```
 
 Supported upload formats: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, and WebM.
@@ -569,8 +573,11 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `GET /api/jobs/{job_id}/score` with optional `?includeMeasures=true`
 - `GET /api/jobs/{job_id}/score/download?format=midi|musicxml`
 - `POST /api/jobs/{job_id}/score/construct` with optional `?force=true`
-- `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true`
-- `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json`
+- `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true` and `?view=corrected|original` (default `corrected`)
+- `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json` with optional `&view=corrected|original`
+- `GET /api/jobs/{job_id}/score/corrections`
+- `POST /api/jobs/{job_id}/score/corrections` with strict JSON `{ "expectedRevision": n, "operation": {...} }` (`set_pitch`, `delete_note`, `set_tab`, `set_chord`, `set_drum_voice`, `delete_hit`)
+- `POST /api/jobs/{job_id}/score/corrections/undo`, `/redo`, and `/reset` with `{ "expectedRevision": n }`; a stale revision returns 409
 - `GET /api/jobs/{job_id}/score/tablature`
 - `PUT /api/jobs/{job_id}/score/tablature` with strict JSON `{ "bass": line | null, "guitar": line | null }`, where a line is `vocals`, `bass`, `other`, or `full_mix`; rejected while a score is being built
 - `GET /api/jobs/{job_id}/files/{file_name}`
@@ -715,7 +722,8 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - No PDF, engraved notation view, or individual instrument-part export yet.
 - Tablature uses standard tuning only and suggests one position per note; held notes do not block strings for later notes, and capo, alternate tunings, and techniques (bends, slides, hammer-ons) are not modelled. Guitar parts are never detected automatically.
 - Drum notation uses broad voices on an eighth-note grid. It does not claim specific kit pieces, sticking, ghost notes, accents, flams, or 16th-note detail; off-grid hits are counted and warned about. Auxiliary percussion detection is limited to what the raw baseline labels.
-- Only the latest successful score is kept; there is no score revision history or user-correction editing yet. Raw predictions and interpretation drafts are never modified by score construction.
+- Only the latest successful score is kept; corrections are re-applied to rebuilt scores by stable IDs. Raw predictions, interpretation drafts, and saved score files are never modified by score construction or corrections.
+- Corrections cannot yet add notes or change rhythm and duration; review playback uses the browser's audio element and bar timing from the global tempo grid.
 - Score quantization uses a coarse eighth-note grid and global tempo/meter.
 - Chord symbols are review candidates placed at most one per measure; measures with competing or partial harmony show no symbol, and chord symbols are exported as MusicXML words rather than parsed harmony elements.
 - Part labels are review annotations on notes; MIDI and MusicXML still contain one combined draft part.
@@ -733,9 +741,9 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Next planned cycle
 
-The next planned implementation stage is synchronized score review and correction (canonical step 7): review measures against the source audio at the matching time, and record musician corrections (pitch, timing, removal, chord symbols, drum voices, tablature positions) in a separate, versioned corrections artifact that is applied on top of the original predictions with undo, so raw output is never overwritten.
+The next planned implementation stage is private arrangement and recording-version grouping (canonical step 8): group local recordings under a composition and arrangement, label each recording version, keep every version's analysis, score, and corrections independent, and compare versions side by side (tempo, key, structure, and score statistics) without ever combining their parts.
 
-That stage must keep corrections separate from predictions, retain the existing retry/preservation and out-of-date guarantees, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Private arrangement/version grouping follows in canonical order.
+That stage must keep versions separate, remain local-only and private, and avoid adding public-library, account, or hosted features. Instrument-specific and modal-analysis accuracy improvements follow in canonical order.
 
 ## License
 

@@ -24,7 +24,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, HttpUrl, StrictBool
+from pydantic import BaseModel, ConfigDict, HttpUrl, StrictBool, StrictInt
 
 from app import db
 from app.analysis import (
@@ -92,6 +92,7 @@ from app.harmony_pipeline import (
     infer_harmony_job,
 )
 from app.score_artifacts import (
+    validate_score_artifact,
     ScoreArtifactError,
     is_score_artifact_file_name,
     load_score_artifact,
@@ -110,6 +111,15 @@ from app.score_pipeline import (
     construct_score,
     score_export_document,
     score_outdated_reason,
+)
+from app.score_corrections import (
+    MAX_OPERATIONS,
+    CorrectionError,
+    active_operations,
+    apply_corrections,
+    empty_log,
+    new_operation,
+    validate_log,
 )
 from app.score_sources import (
     TAB_SOURCE_KINDS,
@@ -295,6 +305,19 @@ class SeparationStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allowModelDownload: StrictBool = False
+
+
+class CorrectionAddRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expectedRevision: StrictInt
+    operation: dict[str, Any]
+
+
+class CorrectionRevisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expectedRevision: StrictInt
 
 
 class TablatureChoiceRequest(BaseModel):
@@ -1200,6 +1223,136 @@ def create_app(
         current = db.get_job(app_settings.database_path, job_id)
         return serialize_job(current or record)
 
+    def _saved_document_or_404(job_id: str) -> tuple[dict, dict[str, Any]]:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return record, _load_saved_score_for_http(job_id, app_settings, record)
+
+    def _commit_corrections(
+        job_id: str,
+        document: dict[str, Any],
+        log: dict[str, Any],
+        *,
+        operations: list[dict[str, Any]],
+        redo: list[dict[str, Any]],
+        expected_revision: int,
+        new_operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        if expected_revision != log["revision"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Corrections changed in another window; reload the score and try again.",
+            )
+        if len(operations) > MAX_OPERATIONS or len(redo) > MAX_OPERATIONS:
+            raise HTTPException(status_code=409, detail="This score has reached the correction limit.")
+        corrected, report = apply_corrections(document, operations)
+        if new_operation_id is not None and new_operation_id not in report["applied"]:
+            reason = next(
+                (item["reason"] for item in report["notApplicable"] if item["id"] == new_operation_id),
+                "The correction does not apply to this score.",
+            )
+            raise HTTPException(status_code=422, detail=reason)
+        try:
+            validate_score_artifact(corrected)
+        except ScoreArtifactError:
+            raise HTTPException(
+                status_code=422, detail="That correction would make the score invalid."
+            ) from None
+        candidate = {
+            "schemaVersion": log["schemaVersion"],
+            "revision": log["revision"] + 1,
+            "operations": operations,
+            "redo": redo,
+        }
+        validate_log(candidate)
+        outcome = db.save_score_corrections(
+            app_settings.database_path,
+            job_id,
+            expected_revision=expected_revision,
+            revision=candidate["revision"],
+            payload=json.dumps(candidate, ensure_ascii=False, separators=(",", ":")),
+        )
+        if outcome == "missing":
+            raise HTTPException(status_code=404, detail="Job not found")
+        if outcome == "conflict":
+            raise HTTPException(
+                status_code=409,
+                detail="Corrections changed in another window; reload the score and try again.",
+            )
+        return _corrections_state(job_id, candidate, report)
+
+    @app.get("/api/jobs/{job_id}/score/corrections")
+    def get_score_corrections(job_id: str) -> dict:
+        _record, document = _saved_document_or_404(job_id)
+        log = _load_correction_log(app_settings, job_id)
+        _corrected, report = apply_corrections(document, log["operations"])
+        return _corrections_state(job_id, log, report)
+
+    @app.post("/api/jobs/{job_id}/score/corrections")
+    def add_score_correction(job_id: str, payload: CorrectionAddRequest) -> dict:
+        _record, document = _saved_document_or_404(job_id)
+        try:
+            operation = new_operation(payload.operation)
+        except CorrectionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        log = _load_correction_log(app_settings, job_id)
+        return _commit_corrections(
+            job_id,
+            document,
+            log,
+            operations=[*log["operations"], operation],
+            redo=[],
+            expected_revision=payload.expectedRevision,
+            new_operation_id=operation["id"],
+        )
+
+    @app.post("/api/jobs/{job_id}/score/corrections/undo")
+    def undo_score_correction(job_id: str, payload: CorrectionRevisionRequest) -> dict:
+        _record, document = _saved_document_or_404(job_id)
+        log = _load_correction_log(app_settings, job_id)
+        if not log["operations"]:
+            raise HTTPException(status_code=409, detail="There is no correction to undo.")
+        return _commit_corrections(
+            job_id,
+            document,
+            log,
+            operations=log["operations"][:-1],
+            redo=[log["operations"][-1], *log["redo"]],
+            expected_revision=payload.expectedRevision,
+        )
+
+    @app.post("/api/jobs/{job_id}/score/corrections/redo")
+    def redo_score_correction(job_id: str, payload: CorrectionRevisionRequest) -> dict:
+        _record, document = _saved_document_or_404(job_id)
+        log = _load_correction_log(app_settings, job_id)
+        if not log["redo"]:
+            raise HTTPException(status_code=409, detail="There is no correction to redo.")
+        return _commit_corrections(
+            job_id,
+            document,
+            log,
+            operations=[*log["operations"], log["redo"][0]],
+            redo=log["redo"][1:],
+            expected_revision=payload.expectedRevision,
+        )
+
+    @app.post("/api/jobs/{job_id}/score/corrections/reset")
+    def reset_score_corrections(job_id: str, payload: CorrectionRevisionRequest) -> dict:
+        _record, document = _saved_document_or_404(job_id)
+        log = _load_correction_log(app_settings, job_id)
+        if not active_operations(log["operations"]):
+            raise HTTPException(status_code=409, detail="There are no corrections to reset.")
+        operation = new_operation({"op": "reset_all"})
+        return _commit_corrections(
+            job_id,
+            document,
+            log,
+            operations=[*log["operations"], operation],
+            redo=[],
+            expected_revision=payload.expectedRevision,
+        )
+
     @app.get("/api/jobs/{job_id}/score/tablature")
     def get_score_tablature(job_id: str) -> dict:
         record = db.get_job(app_settings.database_path, job_id)
@@ -1230,27 +1383,34 @@ def create_app(
     def get_saved_score(
         job_id: str,
         include_measures: str | None = Query(None, alias="includeMeasures"),
+        view: str | None = Query(None),
     ) -> dict:
         include_measures_value = _strict_query_bool(
             include_measures,
             field="includeMeasures",
             default=False,
         )
+        view_value = _score_view(view)
         record = db.get_job(app_settings.database_path, job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found")
         document = _load_saved_score_for_http(job_id, app_settings, record)
-        return _saved_score_payload(
+        shown, corrections = _score_view_document(app_settings, job_id, document, view_value)
+        payload = _saved_score_payload(
             job_id,
-            document,
+            shown,
             record,
             include_measures=include_measures_value,
         )
+        payload["view"] = view_value
+        payload["corrections"] = corrections
+        return payload
 
     @app.get("/api/jobs/{job_id}/score/saved/download")
     def download_saved_score(
         job_id: str,
         format: str | None = Query(None),
+        view: str | None = Query(None),
     ) -> Response:
         if format not in _SCORE_DOWNLOADS:
             raise HTTPException(
@@ -1260,8 +1420,17 @@ def create_app(
         record = db.get_job(app_settings.database_path, job_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        document = _load_saved_score_for_http(job_id, app_settings, record)
+        view_value = _score_view(view)
+        document, _corrections = _score_view_document(
+            app_settings,
+            job_id,
+            _load_saved_score_for_http(job_id, app_settings, record),
+            view_value,
+        )
         filename, media_type = _SCORE_DOWNLOADS[format]
+        if view_value == "original":
+            stem, _, suffix = filename.partition(".")
+            filename = f"{stem}-original.{suffix}"
         try:
             if format == "json":
                 content = _public_score_document_bytes(document)
@@ -3196,6 +3365,87 @@ def _public_score_document_bytes(document: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def _score_view(value: str | None) -> str:
+    if value is None:
+        return "corrected"
+    if value not in {"corrected", "original"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Query parameter 'view' must be 'corrected' or 'original'.",
+        )
+    return value
+
+
+def _load_correction_log(settings: Settings, job_id: str) -> dict[str, Any]:
+    raw = db.get_score_corrections(settings.database_path, job_id)
+    if raw is None:
+        return empty_log()
+    try:
+        return validate_log(json.loads(raw))
+    except (CorrectionError, ValueError, TypeError):
+        logging.exception("Saved score corrections failed validation for job %s", job_id)
+        raise HTTPException(
+            status_code=500,
+            detail="The saved score corrections could not be validated.",
+        ) from None
+
+
+def _corrections_state(
+    job_id: str,
+    log: dict[str, Any],
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    active = active_operations(log["operations"])
+    base = f"/api/jobs/{job_id}/score/corrections"
+    return {
+        "schemaVersion": log["schemaVersion"],
+        "revision": log["revision"],
+        "activeCount": sum(1 for operation in active if operation["op"] != "reset_all"),
+        "appliedCount": len(report["applied"]),
+        "notApplicable": report["notApplicable"],
+        "undoCount": len(log["operations"]),
+        "redoCount": len(log["redo"]),
+        "canUndo": bool(log["operations"]),
+        "canRedo": bool(log["redo"]),
+        "canReset": bool(active),
+        "recent": [dict(operation) for operation in active[-20:]],
+        "review": {
+            "notes": report["notes"],
+            "chords": report["chords"],
+            "hits": report["hits"],
+            "deletedNotes": report["deletedNotes"],
+            "deletedHits": report["deletedHits"],
+        },
+        "urls": {
+            "add": base,
+            "undo": f"{base}/undo",
+            "redo": f"{base}/redo",
+            "reset": f"{base}/reset",
+        },
+    }
+
+
+def _score_view_document(
+    settings: Settings,
+    job_id: str,
+    document: dict[str, Any],
+    view: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Return the document for a view plus the corrections state, if any."""
+    log = _load_correction_log(settings, job_id)
+    corrected, report = apply_corrections(document, log["operations"])
+    state = _corrections_state(job_id, log, report)
+    if view == "original" or not report["applied"]:
+        return document, state
+    try:
+        validate_score_artifact(corrected)
+    except ScoreArtifactError:
+        logging.exception("Saved corrections no longer fit the score for job %s", job_id)
+        state["unusable"] = True
+        return document, state
+    return corrected, state
+
+
 def _saved_score_payload(
     job_id: str,
     document: dict[str, Any],
@@ -3243,6 +3493,10 @@ def _saved_score_payload(
         "exports": document["exports"],
         "downloadUrls": {
             name: f"/api/jobs/{job_id}/score/saved/download?format={name}"
+            for name in _SCORE_DOWNLOADS
+        },
+        "originalDownloadUrls": {
+            name: f"/api/jobs/{job_id}/score/saved/download?format={name}&view=original"
             for name in _SCORE_DOWNLOADS
         },
     }
