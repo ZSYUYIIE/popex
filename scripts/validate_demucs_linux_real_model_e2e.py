@@ -2,7 +2,7 @@
 """Validate PopEx's real Linux CPU stem path and print path-free evidence."""
 from __future__ import annotations
 
-import argparse, hashlib, io, json, math, os, platform, resource, shutil, stat, sys, time
+import argparse, hashlib, io, json, math, os, platform, shutil, stat, sys, time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
@@ -188,6 +188,11 @@ def _evidence(v):
 def _runtime_evidence(exc):
     d=getattr(exc,"detail",None);return _evidence({"runtimeCode":getattr(exc,"code",None),"workerCode":getattr(d,"worker_code",None),"exitCode":getattr(d,"exit_code",None)})
 def _rss():
-    try:return max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)/1024
-    except Exception:return None
+    try:
+        # Optional Linux telemetry must not prevent unsupported hosts from
+        # reaching the classified platform refusal before runtime/model work.
+        import resource
+        return max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)/1024
+    except Exception:
+        return None
 if __name__=="__main__":raise SystemExit(main())
