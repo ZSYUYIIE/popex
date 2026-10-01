@@ -109,9 +109,15 @@ from app.score_pipeline import (
     ScorePipelineResult,
     construct_score,
     score_export_document,
-    score_outdated_by_pipeline,
+    score_outdated_reason,
 )
-from app.score_sources import current_score_fingerprint
+from app.score_sources import (
+    TAB_SOURCE_KINDS,
+    current_score_fingerprint,
+    effective_tablature_request,
+    encode_tablature_request,
+)
+from app.tablature import TAB_INSTRUMENT_ORDER, TAB_INSTRUMENTS
 from app.score_api import (
     ScorePreviewError,
     ScorePreviewUnavailableError,
@@ -271,6 +277,7 @@ _INTERNAL_SCORE_FIELDS = frozenset(
         "score_chord_symbol_count",
         "score_warning_count",
         "score_error",
+        "score_tablature_request",
     }
 )
 _SCORE_DOWNLOADS = {
@@ -288,6 +295,41 @@ class SeparationStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     allowModelDownload: StrictBool = False
+
+
+class TablatureChoiceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bass: str | None
+    guitar: str | None
+
+
+_TAB_SOURCE_LABELS = {
+    "bass": "Bass stem",
+    "vocals": "Vocal stem",
+    "other": "Accompaniment stem",
+    "full_mix": "Full-mix melody",
+}
+
+
+def _tablature_choices(job_id: str, record: dict) -> dict[str, Any]:
+    request, origin = effective_tablature_request(record)
+    return {
+        "request": request,
+        "origin": origin,
+        "sources": [
+            {"sourceKind": kind, "label": _TAB_SOURCE_LABELS[kind]} for kind in TAB_SOURCE_KINDS
+        ],
+        "instruments": [
+            {
+                "id": instrument_id,
+                "label": TAB_INSTRUMENTS[instrument_id].label,
+                "tuningName": TAB_INSTRUMENTS[instrument_id].tuning_name,
+            }
+            for instrument_id in TAB_INSTRUMENT_ORDER
+        ],
+        "settingsUrl": f"/api/jobs/{job_id}/score/tablature",
+    }
 
 
 def create_app(
@@ -1157,6 +1199,32 @@ def create_app(
         )
         current = db.get_job(app_settings.database_path, job_id)
         return serialize_job(current or record)
+
+    @app.get("/api/jobs/{job_id}/score/tablature")
+    def get_score_tablature(job_id: str) -> dict:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return _tablature_choices(job_id, record)
+
+    @app.put("/api/jobs/{job_id}/score/tablature")
+    def put_score_tablature(job_id: str, payload: TablatureChoiceRequest) -> dict:
+        try:
+            encoded = encode_tablature_request(payload.model_dump())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        outcome = db.set_score_tablature_request(
+            app_settings.database_path, job_id, encoded
+        )
+        if outcome == "missing":
+            raise HTTPException(status_code=404, detail="Job not found")
+        if outcome == "busy":
+            raise HTTPException(
+                status_code=409,
+                detail="A score is being built; change tablature choices after it finishes.",
+            )
+        record = db.get_job(app_settings.database_path, job_id)
+        return _tablature_choices(job_id, record or {})
 
     @app.get("/api/jobs/{job_id}/score/saved")
     def get_saved_score(
@@ -3136,14 +3204,20 @@ def _saved_score_payload(
     include_measures: bool,
 ) -> dict[str, Any]:
     evidence_changed = current_score_fingerprint(record) != document["sourceFingerprint"]
-    predates_drums = score_outdated_by_pipeline(record)
-    stale = evidence_changed or predates_drums
+    outdated = score_outdated_reason(record)
+    stale = evidence_changed or outdated is not None
     warnings = list(document["warnings"])
-    if predates_drums:
+    if outdated == "drum-notation":
         warnings.insert(
             0,
             "This score was built before drum notation was available; rebuild it "
             "to add the percussion part.",
+        )
+    elif outdated == "tablature":
+        warnings.insert(
+            0,
+            "This score was built before tablature was available; rebuild it "
+            "to add bass tablature for the separated bass line.",
         )
     if evidence_changed:
         warnings.insert(
@@ -3163,6 +3237,7 @@ def _saved_score_payload(
         "timing": document["timing"],
         "parts": document["parts"],
         "percussion": document.get("percussion"),
+        "tablature": document.get("tablature"),
         "counts": document["counts"],
         "warnings": warnings,
         "exports": document["exports"],
@@ -3194,11 +3269,12 @@ def _serialize_score(job: dict) -> dict[str, Any] | None:
     job_id = job["id"]
     current = current_score_fingerprint(job)
     ready = current is not None
+    tab_request, tab_origin = effective_tablature_request(job)
     stale_reason = None
     if available and current != job.get("score_source_fingerprint"):
         stale_reason = "evidence"
-    elif available and score_outdated_by_pipeline(job):
-        stale_reason = "drum-notation"
+    elif available:
+        stale_reason = score_outdated_reason(job)
     return {
         "enabled": True,
         "status": status,
@@ -3230,4 +3306,9 @@ def _serialize_score(job: dict) -> dict[str, Any] | None:
             else None
         ),
         "error": job.get("score_error") if status == "failed" else None,
+        "tablature": {
+            "request": tab_request,
+            "origin": tab_origin,
+            "settingsUrl": f"/api/jobs/{job_id}/score/tablature",
+        },
     }

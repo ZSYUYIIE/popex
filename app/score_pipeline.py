@@ -13,7 +13,10 @@ The pipeline reuses the reviewed score builder and exporters from
 - a separate percussion part of broad drum voices built from the raw
   percussion events: voices come from a completed, matching interpretation,
   otherwise from the documented raw hit-kind table; unresolved hits stay in an
-  explicit unresolved lane and are never assigned to a specific drum.
+  explicit unresolved lane and are never assigned to a specific drum;
+- guitar and bass tablature as a separate fingering layer on already
+  quantized notes: bass fingers the separated bass-stem line by default and
+  guitar only fingers a line the musician chose; pitches are never changed.
 
 Raw events and interpretation drafts are read, never modified. Exports are
 dry-run before publication so a saved score is always downloadable.
@@ -59,11 +62,29 @@ from app.score_construction import (
     score_to_midi_bytes,
     score_to_musicxml_text,
 )
-from app.score_sources import score_source_fingerprint, score_source_identity
+from app.score_sources import (
+    effective_tablature_request,
+    score_source_fingerprint,
+    score_source_identity,
+)
+from app.tablature import (
+    TAB_INSTRUMENT_ORDER,
+    TAB_INSTRUMENTS,
+    TABLATURE_VERSION,
+    TablatureError,
+    assign_tablature,
+)
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v2"
-LEGACY_SCORE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
+SCORE_PIPELINE_VERSION = "score-pipeline-v3"
+PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
+PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
+_SOURCE_LABELS = {
+    "vocals": "vocal-stem line",
+    "bass": "bass-stem line",
+    "other": "accompaniment-stem line",
+    "full_mix": "full-mix melody line",
+}
 SCORE_MIDI_EXPORT_VERSION = "smf-type0-v2"
 SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v2"
 
@@ -97,20 +118,26 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def score_outdated_by_pipeline(record: Mapping[str, Any]) -> bool:
-    """Return whether a saved score predates drum notation for this recording.
+def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
+    """Return why a saved score predates a layer this recording would get.
 
-    Scores from ``score-pipeline-v1`` never notated percussion. When the
-    current transcription holds percussion events, that saved score is
-    reported out of date (it stays readable and downloadable).
+    ``drum-notation``: a ``score-pipeline-v1`` score of a recording whose
+    transcription holds percussion events. ``tablature``: a score from before
+    tablature for a recording with separated stems, where the default bass
+    tablature applies. Such scores stay readable and downloadable.
     """
+    version = record.get("score_version")
     count = record.get("percussion_event_count")
-    return (
-        record.get("score_version") in LEGACY_SCORE_PIPELINE_VERSIONS
+    if (
+        version in PRE_DRUM_PIPELINE_VERSIONS
         and isinstance(count, int)
         and not isinstance(count, bool)
         and count > 0
-    )
+    ):
+        return "drum-notation"
+    if version in PRE_TABLATURE_PIPELINE_VERSIONS and record.get("separation_status") == "completed":
+        return "tablature"
+    return None
 
 
 def score_export_document(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -589,6 +616,48 @@ def construct_score(
                 }
             )
 
+    progress("fingering_tablature", "Suggesting guitar and bass fingerings.", 72)
+    tab_request, tab_origin = effective_tablature_request(record)
+    tab_instruments = []
+    for measure in measures:
+        for note in measure["notes"]:
+            note["tab"] = None
+    for instrument_id in TAB_INSTRUMENT_ORDER:
+        source_kind = tab_request[instrument_id]
+        if source_kind is None:
+            continue
+        selected = [
+            note
+            for measure in measures
+            for note in measure["notes"]
+            if note["sourceKind"] == source_kind
+        ]
+        try:
+            positions = assign_tablature(selected, instrument_id)
+        except TablatureError as exc:
+            raise ScorePipelineError("Tablature positions could not be suggested safely.") from exc
+        statuses = {"assigned": 0, "out_of_range": 0, "unplayable": 0}
+        for note in selected:
+            note["tab"] = {"instrument": instrument_id, **positions[note["id"]]}
+            statuses[note["tab"]["status"]] += 1
+        instrument = TAB_INSTRUMENTS[instrument_id]
+        tab_instruments.append(
+            {
+                "instrument": instrument_id,
+                "label": instrument.label,
+                "sourceKind": source_kind,
+                "tuningName": instrument.tuning_name,
+                "strings": list(instrument.strings),
+                "frets": instrument.frets,
+                "noteCount": len(selected),
+                "assignedCount": statuses["assigned"],
+                "outOfRangeCount": statuses["out_of_range"],
+                "unplayableCount": statuses["unplayable"],
+            }
+        )
+    fingered_count = sum(item["assignedCount"] for item in tab_instruments)
+    tab_note_count = sum(item["noteCount"] for item in tab_instruments)
+
     progress("checking_exports", "Checking MIDI and MusicXML exports.", 80)
     timing = {
         "tempoBpm": built["tempoBpm"],
@@ -660,7 +729,35 @@ def construct_score(
             "Drum notation shows broad voices on an eighth-note grid; specific kit "
             "pieces, sticking, ghost notes and accents are not claimed."
         )
-    warnings.append("Tablature is not part of this draft score yet.")
+    for item in tab_instruments:
+        line = _SOURCE_LABELS.get(item["sourceKind"], "selected line")
+        if not item["noteCount"]:
+            if tab_origin == "default":
+                continue
+            warnings.append(
+                f"{item['label']} tablature found no notes on the {line}; choose another line."
+            )
+            continue
+        if item["instrument"] == "guitar":
+            warnings.append(
+                f"Guitar tablature is a fingering suggestion for the {line}; "
+                "PopEx does not detect which part is played on guitar."
+            )
+        if item["outOfRangeCount"]:
+            warnings.append(
+                f"{item['outOfRangeCount']} {item['label'].lower()} note(s) are outside "
+                f"the {item['tuningName']} range and have no tablature position."
+            )
+        if item["unplayableCount"]:
+            warnings.append(
+                f"{item['unplayableCount']} {item['label'].lower()} note(s) could not fit "
+                "a playable chord shape and are left without a position."
+            )
+    if fingered_count:
+        warnings.append(
+            "Tablature positions are suggestions in standard tuning; held notes, "
+            "techniques and alternate fingerings need review."
+        )
     if len(warnings) > _MAX_WARNINGS:
         warnings = warnings[: _MAX_WARNINGS - 1] + [
             "Additional warnings were truncated; review the score carefully."
@@ -672,6 +769,21 @@ def construct_score(
             "Harmonic context was checked, but no measure had one clearly dominant "
             "resolved candidate, so no chord symbols are shown."
         )
+    if fingered_count:
+        tablature_note = (
+            f"{fingered_count} of {tab_note_count} note(s) have a suggested string and fret "
+            "in standard tuning; pitches are unchanged."
+        )
+    elif tab_instruments and tab_note_count:
+        tablature_note = "No selected note fits a playable position, so no tablature is written."
+    elif tab_instruments:
+        tablature_note = (
+            "No notes were transcribed on the selected line"
+            + (" (the separated bass stem)" if tab_origin == "default" else "")
+            + "; choose a line for bass or guitar tablature, then rebuild."
+        )
+    else:
+        tablature_note = "No line was chosen for bass or guitar tablature."
     percussion_count = evidence["percussionEventCount"]
     placed_hits = [hit for measure in measures for hit in measure["percussionHits"]]
     hit_counts = percussion_hit_counts(placed_hits)
@@ -718,13 +830,19 @@ def construct_score(
                 "note": percussion_note,
             },
             "tablature": {
-                "status": "omitted",
-                "note": "Guitar and bass tablature are not generated yet.",
+                "status": "included" if fingered_count else "omitted",
+                "note": tablature_note,
             },
         },
         "timing": timing,
         "parts": parts,
         "percussion": percussion_summary,
+        "tablature": {
+            "version": TABLATURE_VERSION,
+            "origin": tab_origin,
+            "request": tab_request,
+            "instruments": tab_instruments,
+        },
         "measures": measures,
         "counts": {
             "measures": len(measures),
@@ -741,6 +859,8 @@ def construct_score(
             "unresolvedPercussionHits": hit_counts["unresolved"],
             "offGridPercussionHits": hit_counts["offGrid"],
             "unplacedPercussionHits": hit_counts["unplaced"],
+            "tabNotes": tab_note_count,
+            "fingeredTabNotes": fingered_count,
         },
         "warnings": warnings,
         "exports": {
@@ -775,4 +895,5 @@ __all__ = [
     "ScorePipelineResult",
     "construct_score",
     "score_export_document",
+    "score_outdated_reason",
 ]
