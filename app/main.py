@@ -109,6 +109,7 @@ from app.score_pipeline import (
     ScorePipelineResult,
     construct_score,
     score_export_document,
+    score_outdated_by_pipeline,
 )
 from app.score_sources import current_score_fingerprint
 from app.score_api import (
@@ -3134,9 +3135,17 @@ def _saved_score_payload(
     *,
     include_measures: bool,
 ) -> dict[str, Any]:
-    stale = current_score_fingerprint(record) != document["sourceFingerprint"]
+    evidence_changed = current_score_fingerprint(record) != document["sourceFingerprint"]
+    predates_drums = score_outdated_by_pipeline(record)
+    stale = evidence_changed or predates_drums
     warnings = list(document["warnings"])
-    if stale:
+    if predates_drums:
+        warnings.insert(
+            0,
+            "This score was built before drum notation was available; rebuild it "
+            "to add the percussion part.",
+        )
+    if evidence_changed:
         warnings.insert(
             0,
             "Earlier results changed after this score was built; rebuild the score "
@@ -3153,6 +3162,7 @@ def _saved_score_payload(
         "layers": document["layers"],
         "timing": document["timing"],
         "parts": document["parts"],
+        "percussion": document.get("percussion"),
         "counts": document["counts"],
         "warnings": warnings,
         "exports": document["exports"],
@@ -3184,6 +3194,11 @@ def _serialize_score(job: dict) -> dict[str, Any] | None:
     job_id = job["id"]
     current = current_score_fingerprint(job)
     ready = current is not None
+    stale_reason = None
+    if available and current != job.get("score_source_fingerprint"):
+        stale_reason = "evidence"
+    elif available and score_outdated_by_pipeline(job):
+        stale_reason = "drum-notation"
     return {
         "enabled": True,
         "status": status,
@@ -3191,7 +3206,8 @@ def _serialize_score(job: dict) -> dict[str, Any] | None:
         "progress": _safe_progress(job.get("score_progress")),
         "message": job.get("score_message"),
         "available": available,
-        "stale": bool(available and current != job.get("score_source_fingerprint")),
+        "stale": stale_reason is not None,
+        "staleReason": stale_reason,
         "version": job.get("score_version") if available else None,
         "createdAt": job.get("scored_at") if available else None,
         "counts": {

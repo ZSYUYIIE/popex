@@ -9,7 +9,11 @@ The pipeline reuses the reviewed score builder and exporters from
   no competing candidate covers a quarter of it; every overlapping window,
   including unresolved ones, is kept as per-measure review evidence;
 - part labels from a completed, matching editable interpretation: a note is
-  labelled only when its raw event maps to exactly one interpretation part.
+  labelled only when its raw event maps to exactly one interpretation part;
+- a separate percussion part of broad drum voices built from the raw
+  percussion events: voices come from a completed, matching interpretation,
+  otherwise from the documented raw hit-kind table; unresolved hits stay in an
+  explicit unresolved lane and are never assigned to a specific drum.
 
 Raw events and interpretation drafts are read, never modified. Exports are
 dry-run before publication so a saved score is always downloadable.
@@ -44,20 +48,24 @@ from app.score_artifacts import (
     score_attempt_artifact_file_name,
     write_score_artifact,
 )
+from app.percussion_interpretation import broad_voice_for_hit
 from app.score_construction import (
+    PERCUSSION_NOTATION,
     SCORE_BUILDER_VERSION,
     SCORE_SCHEMA_VERSION,
     ScoreConstructionError,
     build_score_document,
+    percussion_hit_counts,
     score_to_midi_bytes,
     score_to_musicxml_text,
 )
 from app.score_sources import score_source_fingerprint, score_source_identity
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v1"
-SCORE_MIDI_EXPORT_VERSION = "smf-type0-v1"
-SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v1"
+SCORE_PIPELINE_VERSION = "score-pipeline-v2"
+LEGACY_SCORE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
+SCORE_MIDI_EXPORT_VERSION = "smf-type0-v2"
+SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v2"
 
 _MAX_WARNINGS = 32
 _MAX_MEASURE_HARMONY = 16
@@ -87,6 +95,22 @@ class ScorePipelineResult:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def score_outdated_by_pipeline(record: Mapping[str, Any]) -> bool:
+    """Return whether a saved score predates drum notation for this recording.
+
+    Scores from ``score-pipeline-v1`` never notated percussion. When the
+    current transcription holds percussion events, that saved score is
+    reported out of date (it stays readable and downloadable).
+    """
+    count = record.get("percussion_event_count")
+    return (
+        record.get("score_version") in LEGACY_SCORE_PIPELINE_VERSIONS
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and count > 0
+    )
 
 
 def score_export_document(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -150,52 +174,75 @@ def _load_matching_harmony(
     return list(artifact.get("segments") or []), "Chord symbols come from resolved local harmonic candidates."
 
 
-def _load_matching_parts(
+def _load_interpretation(
     job_id: str,
     settings: Settings,
     record: Mapping[str, Any],
     identity: Mapping[str, Any],
+) -> tuple[Mapping[str, Any] | None, str | None]:
+    """Load the identity's interpretation draft once, or return why it is absent.
+
+    The reason is one of ``incomplete``, ``invalid``, ``unavailable`` or
+    ``mismatch``; layer-specific notes are worded by the caller.
+    """
+    layer = identity.get("interpretation")
+    if layer is None:
+        return None, "incomplete"
+    try:
+        draft = load_transcription_draft(job_id, settings)
+    except (TranscriptionDraftError, OSError, RuntimeError):
+        return None, "invalid"
+    if draft is None:
+        return None, "unavailable"
+    source = draft.get("sourceTranscription") or {}
+    if (
+        draft.get("draftVersion") != layer["version"]
+        or draft.get("createdAt") != layer["createdAt"]
+        or source.get("transcriptionVersion") != record.get("transcription_version")
+    ):
+        return None, "mismatch"
+    return draft, None
+
+
+def _load_matching_parts(
+    draft: Mapping[str, Any] | None,
+    reason: str | None,
     raw_events: Mapping[str, Mapping[str, Any]],
 ) -> tuple[dict[str, Any] | None, str]:
     """Return interpretation parts and raw-event assignments, or an omission note."""
-    layer = identity.get("interpretation")
-    if layer is None:
+    if reason == "incomplete":
         return None, (
             "Editable interpretation was not complete when this score was built; "
             "notes carry no part labels."
         )
-    try:
-        draft = load_transcription_draft(job_id, settings)
-    except (TranscriptionDraftError, OSError, RuntimeError):
+    if reason == "invalid":
         return None, (
             "Saved editable interpretation could not be validated; part labels were omitted."
         )
-    if draft is None:
+    if reason == "unavailable":
         return None, "Saved editable interpretation is unavailable; part labels were omitted."
+    mismatch_note = (
+        "Saved editable interpretation does not match the current transcription; "
+        "part labels were omitted. Re-run interpretation, then rebuild the score."
+    )
+    if draft is None:
+        return None, mismatch_note
     source = draft.get("sourceTranscription") or {}
     indexed = {
         item["id"]: item
         for item in source.get("sourceEventIndex", ())
         if item.get("eventType") == "pitched"
     }
-    if (
-        draft.get("draftVersion") != layer["version"]
-        or draft.get("createdAt") != layer["createdAt"]
-        or source.get("transcriptionVersion") != record.get("transcription_version")
-        or any(
-            event_id not in raw_events
-            or not math.isclose(
-                float(item["rawStartSeconds"]),
-                float(raw_events[event_id]["startSeconds"]),
-                abs_tol=1e-6,
-            )
-            for event_id, item in indexed.items()
+    if any(
+        event_id not in raw_events
+        or not math.isclose(
+            float(item["rawStartSeconds"]),
+            float(raw_events[event_id]["startSeconds"]),
+            abs_tol=1e-6,
         )
+        for event_id, item in indexed.items()
     ):
-        return None, (
-            "Saved editable interpretation does not match the current transcription; "
-            "part labels were omitted. Re-run interpretation, then rebuild the score."
-        )
+        return None, mismatch_note
     parts = {part["id"]: part for part in draft.get("parts", ())}
     assignments: dict[str, set[str]] = {}
     for item in draft.get("pitchedItems", ()):
@@ -207,6 +254,137 @@ def _load_matching_parts(
     return {"parts": parts, "assignments": assignments}, (
         "Part labels come from the editable interpretation; exports still use "
         "one combined draft part."
+    )
+
+
+def _raw_percussion_hits(raw_percussion: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Map raw hits through the documented broad-voice table."""
+    hits = []
+    for event in raw_percussion:
+        for hit_index, hit in enumerate(event["hits"]):
+            voice, resolved = broad_voice_for_hit(hit["kind"], float(hit["confidence"]))
+            hits.append(
+                {
+                    "eventId": event["id"],
+                    "hitIndex": hit_index,
+                    "sourceKind": event["sourceKind"],
+                    "rawKind": hit["kind"],
+                    "broadVoice": voice,
+                    "resolved": resolved,
+                    "timeSeconds": event["timeSeconds"],
+                    "strength": event["strength"],
+                    "confidence": hit["confidence"],
+                }
+            )
+    return hits
+
+
+def _interpreted_percussion_hits(
+    draft: Mapping[str, Any],
+    raw_percussion: list[Mapping[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Return hits voiced by the interpretation, or ``None`` on any mismatch.
+
+    Every raw hit must appear exactly once with the same kind and confidence,
+    and every interpreted voice must be a known broad voice. Partial matches
+    are rejected instead of being combined with raw evidence.
+    """
+    raw_by_id = {event["id"]: event for event in raw_percussion}
+    source = draft.get("sourceTranscription") or {}
+    indexed = {
+        item["id"]: item
+        for item in source.get("sourceEventIndex", ())
+        if item.get("eventType") == "percussion"
+    }
+    if set(indexed) != set(raw_by_id) or any(
+        not math.isclose(
+            float(item["rawStartSeconds"]),
+            float(raw_by_id[event_id]["timeSeconds"]),
+            abs_tol=1e-6,
+        )
+        for event_id, item in indexed.items()
+    ):
+        return None
+    hits: dict[tuple[str, int], dict[str, Any]] = {}
+    for item in draft.get("percussionItems", ()):
+        event_ids = item.get("sourceEventIds") or []
+        if len(event_ids) != 1 or event_ids[0] not in raw_by_id:
+            return None
+        event = raw_by_id[event_ids[0]]
+        placement = item.get("placementStatus")
+        for hit in item.get("hits", ()):
+            hit_index = hit.get("sourceHitIndex")
+            if (
+                not isinstance(hit_index, int)
+                or not 0 <= hit_index < len(event["hits"])
+                or (event["id"], hit_index) in hits
+            ):
+                return None
+            raw_hit = event["hits"][hit_index]
+            voice = hit.get("broadVoice")
+            if (
+                voice not in PERCUSSION_NOTATION
+                or hit.get("rawKind") != raw_hit["kind"]
+                or not math.isclose(
+                    float(hit.get("confidence", -1.0)),
+                    float(raw_hit["confidence"]),
+                    abs_tol=1e-6,
+                )
+            ):
+                return None
+            hits[(event["id"], hit_index)] = {
+                "eventId": event["id"],
+                "hitIndex": hit_index,
+                "sourceKind": event["sourceKind"],
+                "rawKind": raw_hit["kind"],
+                "broadVoice": voice,
+                "resolved": voice != "unresolved_percussion",
+                "timeSeconds": event["timeSeconds"],
+                "strength": event["strength"],
+                "confidence": raw_hit["confidence"],
+                "interpretationPlacement": (
+                    placement if placement in {"placed", "unassigned"} else None
+                ),
+            }
+    expected = {
+        (event["id"], index)
+        for event in raw_percussion
+        for index in range(len(event["hits"]))
+    }
+    if set(hits) != expected:
+        return None
+    return [hits[key] for key in sorted(hits)]
+
+
+def _percussion_inputs(
+    draft: Mapping[str, Any] | None,
+    reason: str | None,
+    raw_percussion: list[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Return ``(hits, voice source, layer note)`` for the percussion part."""
+    if not raw_percussion:
+        return [], "none", "No percussion events were transcribed, so no drum part is written."
+    table_note = (
+        "Drum voices use the documented raw hit-kind table: broad voices only, "
+        "with unresolved hits kept in their own lane."
+    )
+    if draft is None:
+        if reason == "mismatch":
+            table_note = (
+                "Saved editable interpretation does not match the current transcription, "
+                "so it was not used. " + table_note
+            )
+        return _raw_percussion_hits(raw_percussion), "raw-hit-kinds", table_note
+    interpreted = _interpreted_percussion_hits(draft, raw_percussion)
+    if interpreted is None:
+        return _raw_percussion_hits(raw_percussion), "raw-hit-kinds", (
+            "Saved editable interpretation does not match the current percussion "
+            "evidence, so it was not used. " + table_note
+            + " Re-run interpretation, then rebuild the score."
+        )
+    return interpreted, "interpretation", (
+        "Drum voices come from the editable interpretation's broad voices; "
+        "specific kit pieces are not claimed."
     )
 
 
@@ -343,13 +521,19 @@ def construct_score(
         event["id"]: event
         for event in evidence["rawTranscription"].get("pitchedNoteEvents", ())
     }
+    raw_percussion = list(evidence["rawTranscription"].get("percussionEvents", ()))
+    draft, draft_reason = _load_interpretation(job_id, settings, record, identity)
+    percussion_inputs, voice_source, percussion_note = _percussion_inputs(
+        draft, draft_reason, raw_percussion
+    )
 
-    progress("building_measures", "Placing notes into measures.", 30)
+    progress("building_measures", "Placing notes and drum hits into measures.", 30)
     try:
         built = build_score_document(
             evidence["pitchedInputs"],
             tempo_bpm=evidence["tempoBpm"],
             beats_per_measure=evidence["beatsPerMeasure"],
+            percussion_hits=percussion_inputs,
         )
     except ScoreConstructionError as exc:
         raise ScorePipelineError(
@@ -374,9 +558,7 @@ def construct_score(
         )
 
     progress("labelling_parts", "Applying editable-interpretation part labels.", 65)
-    part_data, parts_note = _load_matching_parts(
-        job_id, settings, record, identity, raw_events
-    )
+    part_data, parts_note = _load_matching_parts(draft, draft_reason, raw_events)
     part_note_counts: dict[str, int] = {}
     multiply_assigned = 0
     for measure in measures:
@@ -427,7 +609,10 @@ def construct_score(
         ) from exc
 
     warnings = score_evidence_warnings(
-        built, evidence, single_draft_part_warning=part_data is None
+        built,
+        evidence,
+        single_draft_part_warning=part_data is None,
+        percussion_notated=True,
     )
     notes_with_part = sum(part_note_counts.values())
     if part_data is not None:
@@ -470,9 +655,12 @@ def construct_score(
                 f"{harmony_stats['truncated']} measure(s) list only their first "
                 f"{_MAX_MEASURE_HARMONY} harmonic windows."
             )
-    warnings.append(
-        "Tablature and drum notation are not part of this draft score yet."
-    )
+    if percussion_inputs:
+        warnings.append(
+            "Drum notation shows broad voices on an eighth-note grid; specific kit "
+            "pieces, sticking, ghost notes and accents are not claimed."
+        )
+    warnings.append("Tablature is not part of this draft score yet.")
     if len(warnings) > _MAX_WARNINGS:
         warnings = warnings[: _MAX_WARNINGS - 1] + [
             "Additional warnings were truncated; review the score carefully."
@@ -485,6 +673,24 @@ def construct_score(
             "resolved candidate, so no chord symbols are shown."
         )
     percussion_count = evidence["percussionEventCount"]
+    placed_hits = [hit for measure in measures for hit in measure["percussionHits"]]
+    hit_counts = percussion_hit_counts(placed_hits)
+    percussion_summary = {
+        "voiceSource": voice_source,
+        "voices": [
+            {
+                "broadVoice": voice,
+                "label": PERCUSSION_NOTATION[voice][4],
+                "displayStep": PERCUSSION_NOTATION[voice][0],
+                "displayOctave": PERCUSSION_NOTATION[voice][1],
+                "notehead": PERCUSSION_NOTATION[voice][2],
+                "gmNote": PERCUSSION_NOTATION[voice][3],
+                "hitCount": hit_counts["byVoice"][voice],
+            }
+            for voice in PERCUSSION_NOTATION
+            if voice in hit_counts["byVoice"]
+        ],
+    }
     payload = {
         "schemaVersion": SCORE_ARTIFACT_SCHEMA_VERSION,
         "artifactType": SCORE_ARTIFACT_TYPE,
@@ -508,13 +714,8 @@ def construct_score(
                 "note": parts_note,
             },
             "percussion": {
-                "status": "omitted",
-                "note": (
-                    f"{percussion_count} raw percussion event(s) are preserved in the "
-                    "transcription but not notated yet."
-                    if percussion_count
-                    else "No percussion events were transcribed; drum notation is not built yet."
-                ),
+                "status": "included" if placed_hits else "omitted",
+                "note": percussion_note,
             },
             "tablature": {
                 "status": "omitted",
@@ -523,6 +724,7 @@ def construct_score(
         },
         "timing": timing,
         "parts": parts,
+        "percussion": percussion_summary,
         "measures": measures,
         "counts": {
             "measures": len(measures),
@@ -533,6 +735,12 @@ def construct_score(
             "ambiguousHarmonyMeasures": harmony_stats["ambiguous"],
             "percussionEvents": percussion_count,
             "notesWithPart": notes_with_part,
+            "percussionHits": hit_counts["hits"],
+            "notatedPercussionHits": hit_counts["notated"],
+            "collapsedPercussionHits": hit_counts["collapsed"],
+            "unresolvedPercussionHits": hit_counts["unresolved"],
+            "offGridPercussionHits": hit_counts["offGrid"],
+            "unplacedPercussionHits": hit_counts["unplaced"],
         },
         "warnings": warnings,
         "exports": {

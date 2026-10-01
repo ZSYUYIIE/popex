@@ -22,3 +22,48 @@ jobs:
         run: python -m compileall -q app tests
       - name: Check browser JavaScript
         run: node --check app/static/app.js
+
+  musicxml-schema:
+    runs-on: ubuntu-latest
+    env:
+      MUSICXML_COMMIT: 8bbe8e50606bf99317a86e9e1637618d6bdd1997
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install
+        run: pip install -e '.[dev]' 'lxml>=5,<7'
+      - name: Fetch pinned MusicXML 3.1 schema (validation only, not redistributed)
+        run: |
+          mkdir -p "$RUNNER_TEMP/musicxml"
+          cd "$RUNNER_TEMP/musicxml"
+          for name in musicxml.xsd xlink.xsd xml.xsd; do
+            curl -sfL -o "$name" "https://raw.githubusercontent.com/w3c/musicxml/$MUSICXML_COMMIT/schema/$name"
+          done
+          sha256sum -c <<'SUMS'
+          49ae9e34e04ba5b72004687994f70d598323eb3353eadb62faedcc9e9dc4bd7f  musicxml.xsd
+          67c7f7a02491babc51e11c10268150b1a76070da36d5abe88e68515009611966  xlink.xsd
+          616a3077df5cfc954ac74a75abe9697b95eef7a85dbe09367d995a483e840eb5  xml.xsd
+          SUMS
+          sed -i 's#http://www.musicxml.org/xsd/xml.xsd#xml.xsd#; s#http://www.musicxml.org/xsd/xlink.xsd#xlink.xsd#' musicxml.xsd
+      - name: Validate generated MusicXML examples
+        env:
+          POPEX_MUSICXML_XSD: ${{ runner.temp }}/musicxml/musicxml.xsd
+        run: pytest -k "musicxml_schema" -rs
+
+  synthetic-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install
+        run: pip install -e '.[dev]'
+      - name: End-to-end synthetic score smoke
+        run: python scripts/smoke_score_pipeline.py

@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available) with MIDI and MusicXML downloads and a structured review panel. It does **not** yet provide engraved notation, individual instrument-part exports, percussion notation, or tablature.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part) with MIDI and MusicXML downloads and a structured review panel. It does **not** yet provide engraved notation, individual instrument-part exports, or tablature.
 
 Implemented capabilities:
 
@@ -417,10 +417,12 @@ Implemented capabilities:
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
 - read-only, versioned pitched-note score previews built from matching completed transcription and analysis evidence;
 - stdlib-only MIDI and MusicXML exports with explicit quantization warnings, raw-event provenance, independent overlapping voices, and ties across measure boundaries;
-- persisted draft scores (`score-pipeline-v1`, document schema 1) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
+- persisted draft scores (`score-pipeline-v2`, document schema 2; schema-1 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
 - chord symbols placed per measure only when one resolved harmonic candidate covers at least half the measure without a competing candidate, with every overlapping window (including unresolved ones) kept as review evidence;
 - editable-interpretation part labels on notes whose raw event maps to exactly one part; MIDI and MusicXML still use one combined draft part;
-- out-of-date detection: a saved score built from older evidence stays readable and downloadable but is flagged for rebuild;
+- a separate drum part built from the raw percussion events on the same eighth-note grid: broad voices (low drum, mid drum, tom-like, closed/open high-frequency, cymbal-like) come from a matching editable interpretation, otherwise from the documented raw hit-kind table; unresolved hits keep their own flagged lane and are never assigned to a drum; every hit keeps its raw event ID, time, strength and confidence, and same-voice duplicates in one slot are kept as evidence but written once;
+- drum exports: a MusicXML percussion part (percussion clef, `unpitched` notes, documented display positions and noteheads, hands and low drum in two voices) and General MIDI channel-10 notes from a documented table; pitched notes never use channel 10;
+- out-of-date detection: a saved score built from older evidence, or a pitched-only score built before drum notation for a recording with percussion, stays readable and downloadable but is flagged for rebuild;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony and scores;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
@@ -445,7 +447,7 @@ local upload or supported URL
 → explicit raw-transcription action (pitched + percussion events)
 → explicit interpretation action (parts, rhythm, drum structure, editable draft)
 → explicit harmony action (evidence-aware harmonic context)
-→ explicit score action (measures, chord symbols, part labels, persisted draft score)
+→ explicit score action (measures, chord symbols, part labels, drum part, persisted draft score)
 → structured score review and MIDI/MusicXML/JSON downloads
 ```
 
@@ -673,6 +675,14 @@ python -m compileall -q app tests
 node --check app/static/app.js
 ```
 
+End-to-end synthetic smoke (requires FFmpeg and ffprobe; generates a tone melody over a drum pattern and drives upload, analysis, transcription, interpretation, harmony, and score construction, then checks the drum part in MIDI and MusicXML):
+
+```bash
+python scripts/smoke_score_pipeline.py
+```
+
+Generated MusicXML can be checked against the official MusicXML 3.1 schema by pointing `POPEX_MUSICXML_XSD` at a local copy of `musicxml.xsd` (with `lxml` installed) and running `pytest -k musicxml_schema`. CI fetches the schema at a pinned W3C commit with SHA-256 checks for validation only; it is not redistributed.
+
 Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordinary repository CI does not install Demucs or PyTorch, access the network for model assets, run real inference, use copyrighted recordings, or commit model caches.
 
 ## Reliability behaviour
@@ -696,7 +706,8 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Known limitations
 
-- No PDF, engraved notation view, individual instrument-part export, percussion notation, or tablature yet.
+- No PDF, engraved notation view, individual instrument-part export, or tablature yet.
+- Drum notation uses broad voices on an eighth-note grid. It does not claim specific kit pieces, sticking, ghost notes, accents, flams, or 16th-note detail; off-grid hits are counted and warned about. Auxiliary percussion detection is limited to what the raw baseline labels.
 - Only the latest successful score is kept; there is no score revision history or user-correction editing yet. Raw predictions and interpretation drafts are never modified by score construction.
 - Score quantization uses a coarse eighth-note grid and global tempo/meter.
 - Chord symbols are review candidates placed at most one per measure; measures with competing or partial harmony show no symbol, and chord symbols are exported as MusicXML words rather than parsed harmony elements.
@@ -715,9 +726,9 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Next planned cycle
 
-The next planned implementation stage is drum and auxiliary-percussion notation in the persisted score (canonical step 5): map the preserved raw percussion events and the interpretation's broad drum structure into a separate percussion part with honest reductions and warnings, keeping pitched and percussion representations distinct and adding the percussion layer to the score's evidence fingerprint.
+The next planned implementation stage is guitar and bass tablature generation (canonical step 6): assign playable string and fret positions to the score's pitched notes from instrument tuning, playable range, and hand-position continuity, keep fingering separate from pitch transcription and structurally editable, and export synchronized standard notation plus tablature.
 
-That stage must keep score construction separate from inference, retain the existing retry/preservation and out-of-date guarantees, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Guitar/bass tablature, synchronized correction, and part extraction follow in canonical order.
+That stage must keep score construction separate from inference, retain the existing retry/preservation and out-of-date guarantees, and avoid adding paid, hosted, or redistribution-unsafe dependencies. Synchronized review and correction, and version grouping, follow in canonical order.
 
 ## License
 

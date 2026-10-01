@@ -33,9 +33,13 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import Settings
+from app.score_construction import PERCUSSION_NOTATION, UNRESOLVED_PERCUSSION_VOICE
 from app.score_sources import is_score_fingerprint, score_source_fingerprint
 
-SCORE_ARTIFACT_SCHEMA_VERSION = 1
+# Schema 2 adds a separate percussion part; schema-1 documents (pitched notes
+# only) remain readable and downloadable.
+SCORE_ARTIFACT_SCHEMA_VERSION = 2
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -53,7 +57,8 @@ _MAX_WARNINGS = 32
 _MAX_TEXT = 500
 _MAX_PARTS = 64
 _MAX_MEASURE_HARMONY = 16
-_TOP_LEVEL_KEYS = frozenset(
+_MAX_PERCUSSION_HITS = 8192
+_TOP_LEVEL_KEYS_V1 = frozenset(
     {
         "schemaVersion",
         "artifactType",
@@ -72,7 +77,8 @@ _TOP_LEVEL_KEYS = frozenset(
         "exports",
     }
 )
-_COUNT_KEYS = frozenset(
+_TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
+_COUNT_KEYS_V1 = frozenset(
     {
         "measures",
         "notes",
@@ -84,6 +90,40 @@ _COUNT_KEYS = frozenset(
         "notesWithPart",
     }
 )
+_PERCUSSION_COUNT_KEYS = frozenset(
+    {
+        "percussionHits",
+        "notatedPercussionHits",
+        "collapsedPercussionHits",
+        "unresolvedPercussionHits",
+        "offGridPercussionHits",
+        "unplacedPercussionHits",
+    }
+)
+_COUNT_KEYS_V2 = _COUNT_KEYS_V1 | _PERCUSSION_COUNT_KEYS
+_MEASURE_KEYS_V1 = frozenset(
+    {"measureIndex", "startSeconds", "endSeconds", "notes", "chordSymbol", "harmony"}
+)
+_MEASURE_KEYS_V2 = _MEASURE_KEYS_V1 | {"percussionHits"}
+_HIT_KEYS = frozenset(
+    {
+        "eventId",
+        "hitIndex",
+        "sourceKind",
+        "rawKind",
+        "broadVoice",
+        "resolved",
+        "rawTimeSeconds",
+        "rawBeat",
+        "quantizedBeat",
+        "quantizationShiftSeconds",
+        "strength",
+        "confidence",
+        "interpretationPlacement",
+        "notation",
+    }
+)
+_VOICE_SOURCES = frozenset({"interpretation", "raw-hit-kinds", "none"})
 _LAYER_KEYS = frozenset(
     {"pitchedNotes", "chordSymbols", "partLabels", "percussion", "tablature"}
 )
@@ -259,29 +299,88 @@ def _validate_parts(value: Any) -> set[str]:
     return ids
 
 
+def _validate_percussion_hit(
+    value: Any,
+    label: str,
+    position: int,
+    meter: int,
+    seen: set[tuple[str, int]],
+    slots: set[tuple[str, float]],
+    totals: dict[str, Any],
+) -> None:
+    hit = _mapping(value, label)
+    _exact_keys(hit, _HIT_KEYS, label)
+    identity = (
+        _text(hit["eventId"], f"{label}.eventId", 256),
+        _integer(hit["hitIndex"], f"{label}.hitIndex", 0, 63),
+    )
+    if identity in seen:
+        raise _fail("measures contain a duplicate percussion hit.")
+    seen.add(identity)
+    for key in ("sourceKind", "rawKind"):
+        _token(hit[key], f"{label}.{key}")
+    voice = hit["broadVoice"]
+    if voice not in PERCUSSION_NOTATION:
+        raise _fail(f"{label}.broadVoice is not a supported broad voice.")
+    if type(hit["resolved"]) is not bool or hit["resolved"] == (
+        voice == UNRESOLVED_PERCUSSION_VOICE
+    ):
+        raise _fail(f"{label} must be unresolved exactly in the unresolved lane.")
+    _number(hit["rawTimeSeconds"], f"{label}.rawTimeSeconds", 0.0, 1e6)
+    _number(hit["rawBeat"], f"{label}.rawBeat", 0.0, 1e7)
+    beat = _number(hit["quantizedBeat"], f"{label}.quantizedBeat", 0.0, 1e7)
+    if int(beat // meter) != position or beat * 2 != int(beat * 2):
+        raise _fail(f"{label}.quantizedBeat is outside the measure grid.")
+    _number(hit["quantizationShiftSeconds"], f"{label}.quantizationShiftSeconds", 0.0, 60.0)
+    _number(hit["strength"], f"{label}.strength", 0.0, 1.0)
+    _number(hit["confidence"], f"{label}.confidence", 0.0, 1.0)
+    if hit["interpretationPlacement"] not in {None, "placed", "unassigned"}:
+        raise _fail(f"{label}.interpretationPlacement is invalid.")
+    if hit["notation"] not in {"notated", "collapsed"}:
+        raise _fail(f"{label}.notation is invalid.")
+    if hit["notation"] == "notated":
+        if (voice, beat) in slots:
+            raise _fail("Two notated percussion hits share one grid slot.")
+        slots.add((voice, beat))
+        totals["notatedPercussionHits"] += 1
+    else:
+        totals["collapsedPercussionHits"] += 1
+    totals["percussionHits"] += 1
+    if not hit["resolved"]:
+        totals["unresolvedPercussionHits"] += 1
+    if hit["quantizationShiftSeconds"] > 0.050:
+        totals["offGridPercussionHits"] += 1
+    if hit["interpretationPlacement"] == "unassigned":
+        totals["unplacedPercussionHits"] += 1
+    totals["byVoice"][voice] = totals["byVoice"].get(voice, 0) + 1
+
+
 def _validate_measures(
     value: Any,
     part_ids: set[str],
     meter: int,
-) -> dict[str, int]:
+    schema_version: int,
+) -> dict[str, Any]:
     measures = _sequence(value, "measures", _MAX_MEASURES)
     if not measures:
         raise _fail("measures must not be empty.")
     note_ids: set[str] = set()
-    totals = {
+    hit_ids: set[tuple[str, int]] = set()
+    hit_slots: set[tuple[str, float]] = set()
+    totals: dict[str, Any] = {
         "notes": 0,
         "chordSymbols": 0,
         "notesWithPart": 0,
         "harmonyEntries": 0,
+        **{key: 0 for key in _PERCUSSION_COUNT_KEYS},
+        "byVoice": {},
     }
     for position, raw in enumerate(measures):
         label = f"measures[{position}]"
         measure = _mapping(raw, label)
         _exact_keys(
             measure,
-            frozenset(
-                {"measureIndex", "startSeconds", "endSeconds", "notes", "chordSymbol", "harmony"}
-            ),
+            _MEASURE_KEYS_V2 if schema_version >= 2 else _MEASURE_KEYS_V1,
             label,
         )
         if _integer(measure["measureIndex"], f"{label}.measureIndex") != position:
@@ -337,18 +436,84 @@ def _validate_measures(
         totals["notes"] += len(notes)
         if totals["notes"] > _MAX_NOTES:
             raise _fail("measures contain too many notes.")
+        if schema_version >= 2:
+            hits = _sequence(
+                measure["percussionHits"], f"{label}.percussionHits", _MAX_PERCUSSION_HITS
+            )
+            for index, raw_hit in enumerate(hits):
+                _validate_percussion_hit(
+                    raw_hit,
+                    f"{label}.percussionHits[{index}]",
+                    position,
+                    meter,
+                    hit_ids,
+                    hit_slots,
+                    totals,
+                )
+            if totals["percussionHits"] > _MAX_PERCUSSION_HITS:
+                raise _fail("measures contain too many percussion hits.")
     totals["measures"] = len(measures)
     return totals
+
+
+def _validate_percussion_summary(value: Any, by_voice: Mapping[str, int]) -> None:
+    summary = _mapping(value, "percussion")
+    _exact_keys(summary, frozenset({"voiceSource", "voices"}), "percussion")
+    if summary["voiceSource"] not in _VOICE_SOURCES:
+        raise _fail("percussion.voiceSource is invalid.")
+    if (summary["voiceSource"] == "none") != (not by_voice):
+        raise _fail("percussion.voiceSource does not match the hits.")
+    voices = _sequence(summary["voices"], "percussion.voices", len(PERCUSSION_NOTATION))
+    listed: dict[str, int] = {}
+    for index, raw in enumerate(voices):
+        label = f"percussion.voices[{index}]"
+        voice = _mapping(raw, label)
+        _exact_keys(
+            voice,
+            frozenset(
+                {
+                    "broadVoice",
+                    "label",
+                    "displayStep",
+                    "displayOctave",
+                    "notehead",
+                    "gmNote",
+                    "hitCount",
+                }
+            ),
+            label,
+        )
+        name = voice["broadVoice"]
+        if name not in PERCUSSION_NOTATION or name in listed:
+            raise _fail(f"{label}.broadVoice is invalid.")
+        step, octave, notehead, gm_note, voice_label = PERCUSSION_NOTATION[name]
+        if (
+            voice["label"],
+            voice["displayStep"],
+            voice["displayOctave"],
+            voice["notehead"],
+            voice["gmNote"],
+        ) != (voice_label, step, octave, notehead, gm_note):
+            raise _fail(f"{label} does not match the documented notation table.")
+        listed[name] = _integer(voice["hitCount"], f"{label}.hitCount", 1, _MAX_PERCUSSION_HITS)
+    if listed != dict(by_voice):
+        raise _fail("percussion.voices does not match the measures.")
 
 
 def validate_score_artifact(payload: Any) -> dict[str, Any]:
     """Validate one persisted score document and return a detached copy."""
     document = _mapping(payload, "score document")
-    _exact_keys(document, _TOP_LEVEL_KEYS, "score document")
-    if document["schemaVersion"] != SCORE_ARTIFACT_SCHEMA_VERSION or type(
-        document["schemaVersion"]
-    ) is not int:
+    schema_version = document.get("schemaVersion")
+    if (
+        type(schema_version) is not int
+        or schema_version not in SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS
+    ):
         raise _fail("Unsupported score document schema version.")
+    _exact_keys(
+        document,
+        _TOP_LEVEL_KEYS_V2 if schema_version >= 2 else _TOP_LEVEL_KEYS_V1,
+        "score document",
+    )
     if document["artifactType"] != SCORE_ARTIFACT_TYPE:
         raise _fail("Unsupported score document type.")
     if not isinstance(document["jobId"], str) or not _JOB_ID.fullmatch(document["jobId"]):
@@ -366,14 +531,24 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     layers = _validate_layers(document["layers"])
     _tempo, meter = _validate_timing(document["timing"])
     part_ids = _validate_parts(document["parts"])
-    totals = _validate_measures(document["measures"], part_ids, meter)
+    totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
     counts = _mapping(document["counts"], "counts")
-    _exact_keys(counts, _COUNT_KEYS, "counts")
-    for key in sorted(_COUNT_KEYS):
+    count_keys = _COUNT_KEYS_V2 if schema_version >= 2 else _COUNT_KEYS_V1
+    _exact_keys(counts, count_keys, "counts")
+    for key in sorted(count_keys):
         _integer(counts[key], f"counts.{key}", 0, 1_000_000)
-    for key in ("measures", "notes", "chordSymbols", "notesWithPart"):
+    checked = ["measures", "notes", "chordSymbols", "notesWithPart"]
+    if schema_version >= 2:
+        checked += sorted(_PERCUSSION_COUNT_KEYS)
+    for key in checked:
         if counts[key] != totals[key]:
             raise _fail(f"counts.{key} does not match the measures.")
+    if schema_version >= 2:
+        _validate_percussion_summary(document["percussion"], totals["byVoice"])
+        if (layers["percussion"] == "included") != bool(totals["percussionHits"]):
+            raise _fail("The percussion layer status does not match its hits.")
+    elif layers["percussion"] != "omitted":
+        raise _fail("Schema-1 score documents cannot carry percussion.")
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (

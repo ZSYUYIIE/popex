@@ -8,8 +8,29 @@ from already-validated pitched-note evidence, tempo, and meter.
 Scope limits (deliberate):
 - read-only pure functions; no database, filesystem, or network access;
 - stdlib only (``struct``, ``xml.etree``); no music21/pretty_midi dependency;
-- pitched notes only in this slice; percussion, tabs, and parts follow later;
+- pitched notes plus an optional, separate percussion layer of broad drum
+  voices; tabs and instrument-specific parts follow later;
 - quantization is explicit and warnings are preserved, never fabricated.
+
+Percussion notation tables (documented, fixed):
+
+=======================  ==============  ========  ===============  ==========
+Broad voice              Display step    Notehead  GM drum note     MIDI name
+=======================  ==============  ========  ===============  ==========
+low_drum                 F4              normal    36               Bass Drum 1
+mid_drum                 C5              normal    38               Acoustic Snare
+tom_like                 D5              normal    45               Low Tom
+closed_high_frequency    G5              x         42               Closed Hi-Hat
+open_high_frequency      G5              circle-x  46               Open Hi-Hat
+cymbal_like              A5              x         49               Crash Cymbal 1
+unresolved_percussion    B4              triangle  76               Hi Wood Block
+=======================  ==============  ========  ===============  ==========
+
+Broad voices stay broad: a ``tom_like`` hit is not claimed to be a particular
+tom, and ``unresolved_percussion`` hits use a deliberately neutral, non-kit
+lane (middle line, triangle notehead, wood-block sound) so they are visible as
+unresolved rather than silently assigned to a drum. Percussion is written to
+General MIDI channel 10 only; pitched notes never use that channel.
 """
 
 from __future__ import annotations
@@ -23,9 +44,28 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v1"
+SCORE_BUILDER_VERSION = "score-construction-v2"
+
+# broad voice -> (display step, display octave, notehead, GM drum note, label)
+PERCUSSION_NOTATION: dict[str, tuple[str, int, str, int, str]] = {
+    "low_drum": ("F", 4, "normal", 36, "Low drum"),
+    "mid_drum": ("C", 5, "normal", 38, "Mid drum"),
+    "tom_like": ("D", 5, "normal", 45, "Tom-like voice"),
+    "closed_high_frequency": ("G", 5, "x", 42, "Closed high-frequency voice"),
+    "open_high_frequency": ("G", 5, "circle-x", 46, "Open high-frequency voice"),
+    "cymbal_like": ("A", 5, "x", 49, "Cymbal-like voice"),
+    "unresolved_percussion": ("B", 4, "triangle", 76, "Unresolved percussion"),
+}
+UNRESOLVED_PERCUSSION_VOICE = "unresolved_percussion"
+PERCUSSION_MIDI_CHANNEL = 9  # zero-based; General MIDI channel 10
+_PERCUSSION_FOOT_VOICES = frozenset({"low_drum"})
+_PERCUSSION_MIDI_TICKS = 120  # a sixteenth: hits are points, not sustains
+_PERCUSSION_PLACEMENTS = frozenset({"placed", "unassigned"})
+_PERCUSSION_NOTATION_STATES = frozenset({"notated", "collapsed"})
+_OFF_GRID_SECONDS = 0.050
 
 _MAX_NOTES = 5000
+_MAX_PERCUSSION_HITS = 8192
 _MAX_MEASURES = 2048
 _MAX_MUSICXML_FRAGMENTS = 10000
 _MAX_TEXT = 500
@@ -123,14 +163,147 @@ def _parse_note(value: Any, index: int) -> dict[str, Any]:
     return result
 
 
+def _parse_percussion_hit(value: Any, index: int) -> dict[str, Any]:
+    label = f"percussionHits[{index}]"
+    if not isinstance(value, Mapping):
+        raise ScoreConstructionError(f"{label} must be a mapping.")
+    required = {
+        "eventId",
+        "hitIndex",
+        "sourceKind",
+        "rawKind",
+        "broadVoice",
+        "resolved",
+        "timeSeconds",
+        "strength",
+        "confidence",
+    }
+    allowed = required | {"interpretationPlacement"}
+    if set(value.keys()) - allowed:
+        raise ScoreConstructionError(f"{label} has unsupported fields.")
+    for key in required:
+        if key not in value:
+            raise ScoreConstructionError(f"{label} is missing {key}.")
+    broad_voice = value["broadVoice"]
+    if broad_voice not in PERCUSSION_NOTATION:
+        raise ScoreConstructionError(f"{label}.broadVoice is not a supported broad voice.")
+    resolved = value["resolved"]
+    if type(resolved) is not bool:
+        raise ScoreConstructionError(f"{label}.resolved must be a boolean.")
+    if resolved == (broad_voice == UNRESOLVED_PERCUSSION_VOICE):
+        raise ScoreConstructionError(
+            f"{label} must be unresolved exactly when it uses the unresolved lane."
+        )
+    placement = value.get("interpretationPlacement")
+    if placement is not None and placement not in _PERCUSSION_PLACEMENTS:
+        raise ScoreConstructionError(f"{label}.interpretationPlacement is invalid.")
+    source_kind = _text(value["sourceKind"], f"{label}.sourceKind")
+    raw_kind = _text(value["rawKind"], f"{label}.rawKind")
+    for name, token in (("sourceKind", source_kind), ("rawKind", raw_kind)):
+        if not _SAFE_SOURCE_KIND.fullmatch(token):
+            raise ScoreConstructionError(f"{label}.{name} is invalid.")
+    return {
+        "eventId": _text(value["eventId"], f"{label}.eventId"),
+        "hitIndex": _integer(value["hitIndex"], f"{label}.hitIndex", minimum=0, maximum=63),
+        "sourceKind": source_kind,
+        "rawKind": raw_kind,
+        "broadVoice": broad_voice,
+        "resolved": resolved,
+        "timeSeconds": _number(
+            value["timeSeconds"], f"{label}.timeSeconds", minimum=0.0, maximum=36000.0
+        ),
+        "strength": _number(value["strength"], f"{label}.strength", minimum=0.0, maximum=1.0),
+        "confidence": _number(
+            value["confidence"], f"{label}.confidence", minimum=0.0, maximum=1.0
+        ),
+        "interpretationPlacement": placement,
+    }
+
+
+def _place_percussion_hits(
+    percussion_hits: Sequence[Mapping[str, Any]],
+    *,
+    seconds_per_beat: float,
+) -> list[dict[str, Any]]:
+    """Quantize hits to the eighth grid and collapse same-voice duplicates.
+
+    Every hit is kept with its raw provenance. When two hits of one broad
+    voice land in the same grid slot, the most confident one is notated and
+    the others are kept as ``collapsed`` evidence instead of being dropped.
+    """
+    if not isinstance(percussion_hits, Sequence) or isinstance(
+        percussion_hits, (str, bytes)
+    ):
+        raise ScoreConstructionError("percussionHits must be a sequence.")
+    if len(percussion_hits) > _MAX_PERCUSSION_HITS:
+        raise ScoreConstructionError("Too many percussion hits.")
+    hits = [_parse_percussion_hit(item, index) for index, item in enumerate(percussion_hits)]
+    keys = [(hit["eventId"], hit["hitIndex"]) for hit in hits]
+    if len(keys) != len(set(keys)):
+        raise ScoreConstructionError("Duplicate percussion hit identity.")
+    placed: list[dict[str, Any]] = []
+    for hit in hits:
+        raw_beat = hit["timeSeconds"] / seconds_per_beat
+        quantized = round(raw_beat * 2.0) / 2.0
+        placed.append(
+            {
+                "eventId": hit["eventId"],
+                "hitIndex": hit["hitIndex"],
+                "sourceKind": hit["sourceKind"],
+                "rawKind": hit["rawKind"],
+                "broadVoice": hit["broadVoice"],
+                "resolved": hit["resolved"],
+                "rawTimeSeconds": hit["timeSeconds"],
+                "rawBeat": round(raw_beat, 4),
+                "quantizedBeat": quantized,
+                "quantizationShiftSeconds": round(
+                    abs(quantized - raw_beat) * seconds_per_beat, 4
+                ),
+                "strength": hit["strength"],
+                "confidence": hit["confidence"],
+                "interpretationPlacement": hit["interpretationPlacement"],
+                "notation": "notated",
+            }
+        )
+    by_slot: dict[tuple[str, float], list[dict[str, Any]]] = {}
+    for hit in placed:
+        by_slot.setdefault((hit["broadVoice"], hit["quantizedBeat"]), []).append(hit)
+    for slot_hits in by_slot.values():
+        slot_hits.sort(
+            key=lambda item: (
+                -item["confidence"],
+                item["quantizationShiftSeconds"],
+                item["eventId"],
+                item["hitIndex"],
+            )
+        )
+        for duplicate in slot_hits[1:]:
+            duplicate["notation"] = "collapsed"
+    placed.sort(
+        key=lambda item: (
+            item["quantizedBeat"],
+            item["rawTimeSeconds"],
+            item["eventId"],
+            item["hitIndex"],
+        )
+    )
+    return placed
+
+
 def build_score_document(
     pitched_events: Sequence[Mapping[str, Any]],
     *,
     tempo_bpm: float,
     beats_per_measure: int = 4,
     chord_symbols: Sequence[str] | None = None,
+    percussion_hits: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Build a versioned draft score document with explicit quantization."""
+    """Build a versioned draft score document with explicit quantization.
+
+    When ``percussion_hits`` is supplied, every measure gains a separate
+    ``percussionHits`` list on the same eighth-note grid; pitched notes and
+    percussion hits never share a representation.
+    """
     tempo = _number(tempo_bpm, "tempoBpm", minimum=20.0, maximum=300.0)
     meter = _integer(beats_per_measure, "beatsPerMeasure", minimum=1, maximum=12)
     if not isinstance(pitched_events, Sequence) or isinstance(pitched_events, (str, bytes)):
@@ -171,9 +344,17 @@ def build_score_document(
             note["quantizedEndBeat"] - note["rawEndBeat"]
         ) * seconds_per_beat
 
+    placed_hits = (
+        None
+        if percussion_hits is None
+        else _place_percussion_hits(percussion_hits, seconds_per_beat=seconds_per_beat)
+    )
     latest_end_beat = max(
         (note["quantizedEndBeat"] for note in sorted_notes), default=0.0
     )
+    if placed_hits:
+        # A hit occupies one grid slot, so its bar must contain that slot.
+        latest_end_beat = max(latest_end_beat, placed_hits[-1]["quantizedBeat"] + 0.5)
     required_measure_count = max(1, int(math.ceil(latest_end_beat / meter)))
     if required_measure_count > _MAX_MEASURES:
         raise ScoreConstructionError(
@@ -242,6 +423,15 @@ def build_score_document(
         )
     if not sorted_notes:
         warnings.append("No pitched-note evidence was available; the draft contains empty measures.")
+    if placed_hits is not None:
+        for measure in measures:
+            measure["percussionHits"] = []
+        for hit in placed_hits:
+            measure_index = int(hit["quantizedBeat"] // meter)
+            if not 0 <= measure_index < measure_count:
+                raise ScoreConstructionError("Quantized hit is outside the measure range.")
+            measures[measure_index]["percussionHits"].append(dict(hit))
+        warnings.extend(percussion_warnings(placed_hits))
     warnings = warnings[:16]
 
     document = {
@@ -255,7 +445,61 @@ def build_score_document(
         "measures": measures,
         "warnings": warnings,
     }
+    if placed_hits is not None:
+        document["percussionHitCount"] = len(placed_hits)
     return copy.deepcopy(document)
+
+
+def percussion_hit_counts(hits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize placed percussion hits for review: per voice and honesty counts."""
+    by_voice = {voice: 0 for voice in PERCUSSION_NOTATION}
+    counts = {
+        "hits": 0,
+        "notated": 0,
+        "collapsed": 0,
+        "unresolved": 0,
+        "offGrid": 0,
+        "unplaced": 0,
+    }
+    for hit in hits:
+        counts["hits"] += 1
+        by_voice[hit["broadVoice"]] += 1
+        counts["notated" if hit["notation"] == "notated" else "collapsed"] += 1
+        if not hit["resolved"]:
+            counts["unresolved"] += 1
+        if hit["quantizationShiftSeconds"] > _OFF_GRID_SECONDS:
+            counts["offGrid"] += 1
+        if hit.get("interpretationPlacement") == "unassigned":
+            counts["unplaced"] += 1
+    counts["byVoice"] = {voice: count for voice, count in by_voice.items() if count}
+    return counts
+
+
+def percussion_warnings(hits: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Return honest review warnings for one placed percussion layer."""
+    counts = percussion_hit_counts(hits)
+    warnings: list[str] = []
+    if counts["unresolved"]:
+        warnings.append(
+            f"{counts['unresolved']} percussion hit(s) are unresolved; they are written "
+            "as triangle noteheads on the middle line, not assigned to a drum."
+        )
+    if counts["offGrid"]:
+        warnings.append(
+            f"{counts['offGrid']} percussion hit(s) shifted by more than 50ms during "
+            "8th-note quantization; fills and 16th-note figures need review."
+        )
+    if counts["collapsed"]:
+        warnings.append(
+            f"{counts['collapsed']} percussion hit(s) share a grid slot with a hit of "
+            "the same voice and are kept as evidence but not written twice."
+        )
+    if counts["unplaced"]:
+        warnings.append(
+            f"{counts['unplaced']} percussion hit(s) had no confident rhythm-grid "
+            "placement in the interpretation; they are notated at their quantized raw time."
+        )
+    return warnings
 
 
 def _midi_varlen(value: int) -> bytes:
@@ -267,6 +511,52 @@ def _midi_varlen(value: int) -> bytes:
         encoded = bytes([(value & 0x7F) | 0x80]) + encoded
         value >>= 7
     return encoded
+
+
+def _notated_percussion_hits(
+    measure: Mapping[str, Any],
+    position: int,
+    *,
+    meter: int,
+    total_beats: int,
+    seen: set[tuple[str, int]],
+    slots: set[tuple[str, float]],
+) -> list[dict[str, Any]]:
+    """Validate one measure's optional percussion hits; return notated ones."""
+    hits = measure.get("percussionHits")
+    if hits is None:
+        return []
+    if not isinstance(hits, Sequence) or isinstance(hits, (str, bytes)):
+        raise ScoreConstructionError("Measure percussion hits must be a sequence.")
+    notated: list[dict[str, Any]] = []
+    for hit in hits:
+        if not isinstance(hit, Mapping):
+            raise ScoreConstructionError("Score percussion hit must be a mapping.")
+        identity = (
+            _text(hit.get("eventId"), "percussion eventId"),
+            _integer(hit.get("hitIndex"), "percussion hitIndex", minimum=0, maximum=63),
+        )
+        if identity in seen:
+            raise ScoreConstructionError("Duplicate score percussion hit.")
+        seen.add(identity)
+        voice = hit.get("broadVoice")
+        if voice not in PERCUSSION_NOTATION:
+            raise ScoreConstructionError("Score percussion hit has an unsupported voice.")
+        beat = _number(
+            hit.get("quantizedBeat"), "percussion quantizedBeat", minimum=0.0, maximum=total_beats
+        )
+        if int(beat // meter) != position or beat * 2 != int(beat * 2):
+            raise ScoreConstructionError("Score percussion hit timing is inconsistent.")
+        strength = _number(hit.get("strength"), "percussion strength", minimum=0.0, maximum=1.0)
+        if hit.get("notation") not in _PERCUSSION_NOTATION_STATES:
+            raise ScoreConstructionError("Score percussion hit notation state is invalid.")
+        if hit["notation"] != "notated":
+            continue
+        if (voice, beat) in slots:
+            raise ScoreConstructionError("Two notated percussion hits share one slot.")
+        slots.add((voice, beat))
+        notated.append({"broadVoice": voice, "quantizedBeat": beat, "strength": strength})
+    return notated
 
 
 def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
@@ -289,6 +579,9 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
         raise ScoreConstructionError("Score measure count is inconsistent.")
     total_beats = measure_count * meter
     notes: list[tuple[int, int, int, str]] = []
+    drum_hits: list[dict[str, Any]] = []
+    hit_ids: set[tuple[str, int]] = set()
+    hit_slots: set[tuple[str, float]] = set()
     event_ids: set[str] = set()
     for position, measure in enumerate(measures):
         if not isinstance(measure, Mapping):
@@ -301,6 +594,16 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
         )
         if measure_index != position:
             raise ScoreConstructionError("Score measure index is inconsistent.")
+        drum_hits.extend(
+            _notated_percussion_hits(
+                measure,
+                position,
+                meter=meter,
+                total_beats=total_beats,
+                seen=hit_ids,
+                slots=hit_slots,
+            )
+        )
         measure_notes = measure.get("notes", [])
         if not isinstance(measure_notes, Sequence) or isinstance(measure_notes, (str, bytes)):
             raise ScoreConstructionError("Measure notes must be a sequence.")
@@ -349,6 +652,21 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
         ends[available] = end_tick
         events.append((start_tick, bytes((0x90 | channel, midi_note, 80))))
         events.append((end_tick, bytes((0x80 | channel, midi_note, 0x40))))
+    # Percussion uses only General MIDI channel 10 and the documented table.
+    # Velocity follows measured onset strength; nothing else is inferred.
+    for hit in drum_hits:
+        gm_note = PERCUSSION_NOTATION[hit["broadVoice"]][3]
+        start_tick = int(round(hit["quantizedBeat"] * _DIVISIONS))
+        velocity = max(1, min(127, int(round(40 + 80 * hit["strength"]))))
+        events.append(
+            (start_tick, bytes((0x90 | PERCUSSION_MIDI_CHANNEL, gm_note, velocity)))
+        )
+        events.append(
+            (
+                start_tick + _PERCUSSION_MIDI_TICKS,
+                bytes((0x80 | PERCUSSION_MIDI_CHANNEL, gm_note, 0x40)),
+            )
+        )
     events.sort(key=lambda item: (item[0], item[1]))
 
     track = bytearray()
@@ -401,6 +719,105 @@ def _musicxml_note(
             ET.SubElement(notations, "tied", type=tie_type)
 
 
+def _percussion_instrument_id(voice: str) -> str:
+    return f"P2-I{PERCUSSION_NOTATION[voice][3]}"
+
+
+def _musicxml_percussion_score_part(part_list: ET.Element, voices: Sequence[str]) -> None:
+    score_part = ET.SubElement(part_list, "score-part", id="P2")
+    ET.SubElement(score_part, "part-name").text = "Drum Kit (draft, broad voices)"
+    for voice in voices:
+        instrument = ET.SubElement(
+            score_part, "score-instrument", id=_percussion_instrument_id(voice)
+        )
+        label = PERCUSSION_NOTATION[voice][4]
+        if voice == UNRESOLVED_PERCUSSION_VOICE:
+            label += " (review)"
+        ET.SubElement(instrument, "instrument-name").text = label
+    for voice in voices:
+        midi = ET.SubElement(
+            score_part, "midi-instrument", id=_percussion_instrument_id(voice)
+        )
+        ET.SubElement(midi, "midi-channel").text = str(PERCUSSION_MIDI_CHANNEL + 1)
+        # MusicXML numbers unpitched MIDI keys from 1.
+        ET.SubElement(midi, "midi-unpitched").text = str(PERCUSSION_NOTATION[voice][3] + 1)
+
+
+def _musicxml_percussion_part(
+    root: ET.Element,
+    hits_by_measure: Sequence[Sequence[Mapping[str, Any]]],
+    *,
+    meter: int,
+    unresolved_present: bool,
+) -> None:
+    """Write broad drum voices as unpitched notes on a percussion staff.
+
+    Hands and the low drum use two conventional voices (stems up and down).
+    Every hit fills one eighth-note grid slot; empty time uses ``forward``
+    spacers rather than claiming that the recording proves a rest.
+    """
+    slot_ticks = _DIVISIONS // 2
+    bar_ticks = meter * _DIVISIONS
+    part = ET.SubElement(root, "part", id="P2")
+    order = list(PERCUSSION_NOTATION)
+    for position, hits in enumerate(hits_by_measure):
+        measure_el = ET.SubElement(part, "measure", number=str(position + 1))
+        if position == 0:
+            attrs = ET.SubElement(measure_el, "attributes")
+            ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
+            time_el = ET.SubElement(attrs, "time")
+            ET.SubElement(time_el, "beats").text = str(meter)
+            ET.SubElement(time_el, "beat-type").text = "4"
+            ET.SubElement(ET.SubElement(attrs, "clef"), "sign").text = "percussion"
+            if unresolved_present:
+                direction = ET.SubElement(measure_el, "direction", placement="above")
+                ET.SubElement(
+                    ET.SubElement(direction, "direction-type"), "words"
+                ).text = "Triangle noteheads on the middle line are unresolved percussion; review them."
+        groups = (
+            (1, "up", [hit for hit in hits if hit["broadVoice"] not in _PERCUSSION_FOOT_VOICES]),
+            (2, "down", [hit for hit in hits if hit["broadVoice"] in _PERCUSSION_FOOT_VOICES]),
+        )
+        written = False
+        for voice_number, stem, group in groups:
+            if not group:
+                continue
+            if written:
+                ET.SubElement(ET.SubElement(measure_el, "backup"), "duration").text = str(
+                    bar_ticks
+                )
+            written = True
+            by_tick: dict[int, list[Mapping[str, Any]]] = {}
+            for hit in group:
+                tick = int(round((hit["quantizedBeat"] - position * meter) * _DIVISIONS))
+                by_tick.setdefault(tick, []).append(hit)
+            cursor = 0
+            for tick in sorted(by_tick):
+                _append_forward(measure_el, tick - cursor)
+                chord_hits = sorted(by_tick[tick], key=lambda item: order.index(item["broadVoice"]))
+                for chord_index, hit in enumerate(chord_hits):
+                    step, octave, notehead, _gm, _label = PERCUSSION_NOTATION[hit["broadVoice"]]
+                    note_el = ET.SubElement(measure_el, "note")
+                    if chord_index:
+                        ET.SubElement(note_el, "chord")
+                    unpitched = ET.SubElement(note_el, "unpitched")
+                    ET.SubElement(unpitched, "display-step").text = step
+                    ET.SubElement(unpitched, "display-octave").text = str(octave)
+                    ET.SubElement(note_el, "duration").text = str(slot_ticks)
+                    ET.SubElement(
+                        note_el, "instrument", id=_percussion_instrument_id(hit["broadVoice"])
+                    )
+                    ET.SubElement(note_el, "voice").text = str(voice_number)
+                    ET.SubElement(note_el, "type").text = "eighth"
+                    ET.SubElement(note_el, "stem").text = stem
+                    if notehead != "normal":
+                        ET.SubElement(note_el, "notehead").text = notehead
+                cursor = tick + slot_ticks
+            _append_forward(measure_el, bar_ticks - cursor)
+        if not written:
+            _append_forward(measure_el, bar_ticks)
+
+
 def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
     """Render standards-shaped MusicXML with measured timing and tied bars."""
     if not isinstance(document, Mapping):
@@ -423,6 +840,9 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
     all_notes: list[dict[str, Any]] = []
     event_ids: set[str] = set()
     validated_measures: list[Mapping[str, Any]] = []
+    drum_hits_by_measure: list[list[dict[str, Any]]] = []
+    hit_ids: set[tuple[str, int]] = set()
+    hit_slots: set[tuple[str, float]] = set()
     total_beats = measure_count * meter
     for position, measure in enumerate(measures):
         if not isinstance(measure, Mapping):
@@ -436,6 +856,16 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
         if measure_index != position:
             raise ScoreConstructionError("Score measure index is inconsistent.")
         validated_measures.append(measure)
+        drum_hits_by_measure.append(
+            _notated_percussion_hits(
+                measure,
+                position,
+                meter=meter,
+                total_beats=total_beats,
+                seen=hit_ids,
+                slots=hit_slots,
+            )
+        )
         notes = measure.get("notes", [])
         if not isinstance(notes, Sequence) or isinstance(notes, (str, bytes)):
             raise ScoreConstructionError("Measure notes must be a sequence.")
@@ -551,6 +981,12 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
     ET.SubElement(encoding, "encoding-description").text = "Draft; review required"
     part_list = ET.SubElement(root, "part-list")
     ET.SubElement(ET.SubElement(part_list, "score-part", id="P1"), "part-name").text = "Draft Pitched Events"
+    drum_voices = sorted(
+        {hit["broadVoice"] for hits in drum_hits_by_measure for hit in hits},
+        key=list(PERCUSSION_NOTATION).index,
+    )
+    if drum_voices:
+        _musicxml_percussion_score_part(part_list, drum_voices)
     part = ET.SubElement(root, "part", id="P1")
     bar_ticks = meter * _DIVISIONS
     for position, measure in enumerate(validated_measures):
@@ -614,6 +1050,14 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
                 cursor_ticks = end_ticks
             _append_forward(measure_el, bar_ticks - cursor_ticks)
 
+    if drum_voices:
+        _musicxml_percussion_part(
+            root,
+            drum_hits_by_measure,
+            meter=meter,
+            unresolved_present=UNRESOLVED_PERCUSSION_VOICE in drum_voices,
+        )
+
     text = ET.tostring(root, encoding="unicode")
     if len(text) > 2_000_000:
         raise ScoreConstructionError("Generated MusicXML is too large.")
@@ -621,10 +1065,15 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "PERCUSSION_MIDI_CHANNEL",
+    "PERCUSSION_NOTATION",
     "SCORE_BUILDER_VERSION",
     "SCORE_SCHEMA_VERSION",
     "ScoreConstructionError",
+    "UNRESOLVED_PERCUSSION_VOICE",
     "build_score_document",
+    "percussion_hit_counts",
+    "percussion_warnings",
     "score_to_midi_bytes",
     "score_to_musicxml_text",
 ]
