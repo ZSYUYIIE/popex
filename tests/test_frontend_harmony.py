@@ -863,11 +863,22 @@ def test_no_final_score_export_or_voicing_claims() -> None:
         "final chord chart",
         "exact voicing",
         "guitar voicing",
-        "tablature",
-        "musicxml",
+        "tablature ready",
+        "tablature is ready",
         "midi export",
         "engraving",
         "publication-ready",
         "publication ready",
     ):
         assert phrase not in source
+    # MusicXML is only offered by the persisted draft-score panel, never by
+    # the harmony review or other stages.
+    score_functions = (
+        "function renderscore(",
+        "function renderscoremeasures(",
+        "function scorestatustext(",
+        "function scorestagetext(",
+    )
+    for line in source.splitlines():
+        if "musicxml" in line:
+            assert line.startswith(score_functions), line[:80]

@@ -342,6 +342,48 @@ progress {
   min-width:0;
   overflow-wrap:anywhere
 }
+.score-layers {
+  margin-top:1rem
+}
+.score-layers ul,.score-notes,.score-harmony {
+  margin:.25rem 0 0;
+  padding-left:1.1rem
+}
+.score-layers li {
+  overflow-wrap:anywhere
+}
+.score-notes li,.score-harmony li {
+  overflow-wrap:break-word
+}
+.score-low {
+  color:var(--warn);
+  font-weight:600
+}
+.score-measures {
+  margin-top:1rem
+}
+.table-scroll {
+  overflow-x:auto;
+  width:0;
+  min-width:100%
+}
+.score-measures table {
+  width:100%;
+  min-width:36rem;
+  border-collapse:collapse;
+  font-size:.92rem
+}
+.score-measures caption {
+  text-align:left;
+  color:var(--muted);
+  padding:.5rem 0
+}
+.score-measures th,.score-measures td {
+  border-top:1px solid var(--line);
+  padding:.45rem .5rem;
+  text-align:left;
+  vertical-align:top
+}
 .artifacts ul,.stem-list {
   list-style:none;
   padding:0;

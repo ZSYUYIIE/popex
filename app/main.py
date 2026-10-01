@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 import mimetypes
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -71,6 +73,8 @@ from app.interpretation_pipeline import (
     interpret_transcription_job,
 )
 from app.harmony_artifacts import (
+    harmony_raw_evidence,
+    harmony_raw_evidence_matches,
     HARMONY_ARTIFACT_RELATIVE_PATH,
     HarmonyArtifactError,
     HarmonyArtifactUnavailableError,
@@ -87,6 +91,26 @@ from app.harmony_pipeline import (
     HarmonyPipelineResult,
     infer_harmony_job,
 )
+from app.score_artifacts import (
+    ScoreArtifactError,
+    is_score_artifact_file_name,
+    load_score_artifact,
+    remove_unowned_score_artifacts,
+    score_attempt_artifact_file_name,
+)
+from app.score_construction import (
+    ScoreConstructionError,
+    score_to_midi_bytes,
+    score_to_musicxml_text,
+)
+from app.score_pipeline import (
+    SCORE_PIPELINE_VERSION,
+    ScorePipelineError,
+    ScorePipelineResult,
+    construct_score,
+    score_export_document,
+)
+from app.score_sources import current_score_fingerprint
 from app.score_api import (
     ScorePreviewError,
     ScorePreviewUnavailableError,
@@ -135,6 +159,7 @@ InterpretationProcessor = Callable[
     InterpretationPipelineResult,
 ]
 HarmonyProcessor = Callable[..., HarmonyPipelineResult]
+ScoreProcessor = Callable[..., ScorePipelineResult]
 
 BASE_DIR = Path(__file__).resolve().parent
 ALLOWED_MIME_PREFIXES = ("audio/", "video/")
@@ -152,20 +177,6 @@ ANALYSIS_STAGES = {
 }
 PREPARATION_PROGRESS_LIMIT = 64.0
 ANALYSIS_FAILURE_PROGRESS = 95.0
-_HARMONY_PITCH_CLASS_NAMES = (
-    "C",
-    "C#",
-    "D",
-    "D#",
-    "E",
-    "F",
-    "F#",
-    "G",
-    "G#",
-    "A",
-    "A#",
-    "B",
-)
 _HARMONY_ARTIFACT_FILE_RE = re.compile(
     r"harmony/harmonic-context(?:\.[a-f0-9]{32})?\.json"
 )
@@ -242,6 +253,31 @@ _INTERNAL_HARMONY_FIELDS = frozenset(
     }
 )
 
+_INTERNAL_SCORE_FIELDS = frozenset(
+    {
+        "score_status",
+        "score_stage",
+        "score_progress",
+        "score_message",
+        "score_attempt_id",
+        "score_attempt_fingerprint",
+        "score_version",
+        "score_artifact_file_name",
+        "scored_at",
+        "score_source_fingerprint",
+        "score_measure_count",
+        "score_note_count",
+        "score_chord_symbol_count",
+        "score_warning_count",
+        "score_error",
+    }
+)
+_SCORE_DOWNLOADS = {
+    "midi": ("draft-score.mid", "audio/midi"),
+    "musicxml": ("draft-score.musicxml", "application/vnd.recordare.musicxml+xml"),
+    "json": ("draft-score.json", "application/json"),
+}
+
 
 class JobCreate(BaseModel):
     url: HttpUrl
@@ -263,6 +299,7 @@ def create_app(
     transcription_processor: TranscriptionProcessor = transcribe_job,
     interpretation_processor: InterpretationProcessor = interpret_transcription_job,
     harmony_processor: HarmonyProcessor = infer_harmony_job,
+    score_processor: ScoreProcessor = construct_score,
 ) -> FastAPI:
     app_settings = settings or Settings.from_env()
     separation_service = SeparationService(
@@ -1067,6 +1104,116 @@ def create_app(
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.post(
+        "/api/jobs/{job_id}/score/construct",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def construct_job_score(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        force: str | None = Query(None),
+    ) -> dict:
+        force_value = _strict_query_bool(force, field="force", default=False)
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if current_score_fingerprint(record) is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Completed audio analysis and raw transcription are required "
+                    "before building a score."
+                ),
+            )
+        score_status = record.get("score_status") or "not_started"
+        if score_status == "processing":
+            raise HTTPException(
+                status_code=409,
+                detail="Score construction is already running.",
+            )
+        if score_status == "completed" and not force_value:
+            raise HTTPException(
+                status_code=409,
+                detail="A draft score is already saved; use force=true to rebuild it.",
+            )
+        attempt_id = db.claim_score_attempt(
+            app_settings.database_path,
+            job_id,
+            score_version=SCORE_PIPELINE_VERSION,
+            force=force_value,
+        )
+        if attempt_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Score construction could not be started in the current state.",
+            )
+        background_tasks.add_task(
+            _run_score_job,
+            job_id,
+            app_settings,
+            score_processor,
+            attempt_id,
+        )
+        current = db.get_job(app_settings.database_path, job_id)
+        return serialize_job(current or record)
+
+    @app.get("/api/jobs/{job_id}/score/saved")
+    def get_saved_score(
+        job_id: str,
+        include_measures: str | None = Query(None, alias="includeMeasures"),
+    ) -> dict:
+        include_measures_value = _strict_query_bool(
+            include_measures,
+            field="includeMeasures",
+            default=False,
+        )
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        document = _load_saved_score_for_http(job_id, app_settings, record)
+        return _saved_score_payload(
+            job_id,
+            document,
+            record,
+            include_measures=include_measures_value,
+        )
+
+    @app.get("/api/jobs/{job_id}/score/saved/download")
+    def download_saved_score(
+        job_id: str,
+        format: str | None = Query(None),
+    ) -> Response:
+        if format not in _SCORE_DOWNLOADS:
+            raise HTTPException(
+                status_code=422,
+                detail="Query parameter 'format' must be 'midi', 'musicxml', or 'json'.",
+            )
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        document = _load_saved_score_for_http(job_id, app_settings, record)
+        filename, media_type = _SCORE_DOWNLOADS[format]
+        try:
+            if format == "json":
+                content = _public_score_document_bytes(document)
+            elif format == "midi":
+                content = score_to_midi_bytes(score_export_document(document))
+            else:
+                content = score_to_musicxml_text(
+                    score_export_document(document)
+                ).encode("utf-8")
+        except (ScoreArtifactError, ScoreConstructionError):
+            logging.exception("Saved score export failed for job %s", job_id)
+            raise HTTPException(
+                status_code=500,
+                detail="The saved draft score could not be exported.",
+            ) from None
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.get("/api/jobs/{job_id}/stems")
     def get_stems(job_id: str) -> dict:
         record = db.get_job(app_settings.database_path, job_id)
@@ -1826,7 +1973,7 @@ def _run_harmony_job(
         if (
             raw_transcription is None
             or result.payload.get("rawEvidence")
-            != _harmony_raw_evidence(raw_transcription)
+            != harmony_raw_evidence(raw_transcription)
         ):
             logging.warning(
                 "Discarded stale harmonic-context result for job %s",
@@ -2128,6 +2275,7 @@ def _serialize_job(
         and key not in _INTERNAL_TRANSCRIPTION_FIELDS
         and key not in _INTERNAL_INTERPRETATION_FIELDS
         and key not in _INTERNAL_HARMONY_FIELDS
+        and key not in _INTERNAL_SCORE_FIELDS
     }
     payload["files"] = []
     job_dir = settings.exports_dir / job["id"]
@@ -2175,6 +2323,9 @@ def _serialize_job(
     harmony = _serialize_harmony(job)
     if harmony is not None:
         payload["harmony"] = harmony
+    score = _serialize_score(job)
+    if score is not None:
+        payload["score"] = score
     return payload
 
 
@@ -2451,58 +2602,6 @@ def _load_matching_raw_transcription_for_harmony(
     ) else None
 
 
-def _harmony_raw_evidence(
-    raw_transcription: dict[str, Any],
-) -> list[dict[str, Any]]:
-    evidence = [
-        {
-            "id": event["id"],
-            "sourceKind": event["sourceKind"],
-            "rawStartSeconds": event["startSeconds"],
-            "rawEndSeconds": event["endSeconds"],
-            "midiNote": event["midiNote"],
-            "midiPitch": event["midiPitch"],
-            "pitchClass": event["midiNote"] % 12,
-            "pitchName": _HARMONY_PITCH_CLASS_NAMES[event["midiNote"] % 12],
-            "confidence": event["confidence"],
-            "warnings": list(event.get("warnings", [])),
-        }
-        for event in raw_transcription.get("pitchedNoteEvents", ())
-    ]
-    evidence.sort(
-        key=lambda item: (
-            item["rawStartSeconds"],
-            item["rawEndSeconds"],
-            item["id"],
-        )
-    )
-    return evidence
-
-
-def _harmony_raw_evidence_matches_current(
-    artifact_evidence: object,
-    current_evidence: list[dict[str, Any]],
-    *,
-    allow_legacy_missing_warnings: bool,
-) -> bool:
-    if not isinstance(artifact_evidence, list) or len(artifact_evidence) != len(
-        current_evidence
-    ):
-        return False
-    for artifact_item, current_item in zip(artifact_evidence, current_evidence):
-        if not isinstance(artifact_item, dict):
-            return False
-        if artifact_item == current_item:
-            continue
-        if allow_legacy_missing_warnings and "warnings" not in artifact_item:
-            expected_without_warnings = dict(current_item)
-            expected_without_warnings.pop("warnings", None)
-            if artifact_item == expected_without_warnings:
-                continue
-        return False
-    return True
-
-
 def _is_harmony_artifact_file_name(value: object) -> bool:
     return isinstance(value, str) and _HARMONY_ARTIFACT_FILE_RE.fullmatch(value) is not None
 
@@ -2593,9 +2692,9 @@ def _harmony_artifact_matches_record(
     }
     raw_evidence_matches = True
     if raw_transcription is not None:
-        raw_evidence_matches = _harmony_raw_evidence_matches_current(
+        raw_evidence_matches = harmony_raw_evidence_matches(
             artifact.get("rawEvidence"),
-            _harmony_raw_evidence(raw_transcription),
+            harmony_raw_evidence(raw_transcription),
             allow_legacy_missing_warnings=(
                 record.get("harmony_artifact_file_name")
                 == HARMONY_ARTIFACT_RELATIVE_PATH
@@ -2743,3 +2842,376 @@ def _safe_download_name(value: str) -> str:
 
 
 app = create_app()
+
+
+def _cleanup_score_artifacts(settings: Settings, job_id: str) -> None:
+    """Remove score files that are neither durable nor owned by an active attempt."""
+    try:
+        remove_unowned_score_artifacts(
+            job_id,
+            settings,
+            lambda: db.score_cleanup_lease(settings.database_path, job_id),
+        )
+    except (ScoreArtifactError, ValueError, OSError):
+        logging.warning("Could not clean superseded score files for job %s", job_id)
+
+
+def _fail_score_attempt_safely(
+    settings: Settings,
+    job_id: str,
+    attempt_id: str,
+    error: str,
+) -> None:
+    """Record an attempt failure; a database error is logged, never raised."""
+    try:
+        db.fail_score_attempt(
+            settings.database_path,
+            job_id,
+            attempt_id=attempt_id,
+            error=error,
+        )
+    except (ValueError, sqlite3.Error):
+        logging.exception("Could not record score failure for job %s", job_id)
+
+
+def _score_attempt_is_active(record: dict[str, Any] | None, attempt_id: str) -> bool:
+    return (
+        record is not None
+        and record.get("score_status") == "processing"
+        and record.get("score_attempt_id") == attempt_id
+    )
+
+
+def _run_score_job(
+    job_id: str,
+    settings: Settings,
+    processor: ScoreProcessor,
+    attempt_id: str,
+) -> None:
+    try:
+        expected_artifact_file_name = score_attempt_artifact_file_name(attempt_id)
+        started = db.start_score_attempt(
+            settings.database_path,
+            job_id,
+            attempt_id=attempt_id,
+        )
+    except (ScoreArtifactError, ValueError):
+        logging.error("Score worker received an invalid attempt for job %s", job_id)
+        return
+    except sqlite3.Error:
+        logging.exception("Score worker could not start for job %s", job_id)
+        _fail_score_attempt_safely(
+            settings, job_id, attempt_id, "Score construction could not start."
+        )
+        return
+    if not started:
+        return
+    record = db.get_job(settings.database_path, job_id)
+    if not _score_attempt_is_active(record, attempt_id):
+        return
+    expected_fingerprint = record.get("score_attempt_fingerprint")
+    _cleanup_score_artifacts(settings, job_id)
+    last_progress = 2.0
+
+    def update_stage(stage: str, message: str, progress: float) -> None:
+        nonlocal last_progress
+        next_progress = round(max(last_progress, min(99.0, float(progress))), 1)
+        if not db.update_score_progress(
+            settings.database_path,
+            job_id,
+            attempt_id=attempt_id,
+            stage=stage,
+            progress=next_progress,
+            message=message,
+        ):
+            raise ScorePipelineError("This score attempt is no longer active.")
+        last_progress = next_progress
+
+    def fail(error: str) -> None:
+        _fail_score_attempt_safely(settings, job_id, attempt_id, error)
+        _cleanup_score_artifacts(settings, job_id)
+
+    try:
+        result = processor(
+            job_id,
+            settings,
+            record,
+            update_stage,
+            attempt_id=attempt_id,
+            expected_fingerprint=expected_fingerprint,
+        )
+    except ScorePipelineError as exc:
+        fail(_safe_score_error(str(exc), settings))
+        return
+    except Exception:
+        logging.exception("Unexpected score-construction failure for job %s", job_id)
+        fail("Unexpected score-construction failure. Check server logs.")
+        return
+
+    if not _validate_score_result(
+        job_id,
+        settings,
+        result,
+        expected_artifact_file_name=expected_artifact_file_name,
+        expected_fingerprint=expected_fingerprint,
+    ):
+        logging.error("Score processor returned an invalid result for job %s", job_id)
+        fail("Score construction returned an invalid result.")
+        return
+    try:
+        completion = db.complete_score_attempt(
+            settings.database_path,
+            job_id,
+            attempt_id=attempt_id,
+            score_version=result.pipeline_version,
+            artifact_file_name=result.artifact_file_name,
+            scored_at=result.created_at,
+            source_fingerprint=result.source_fingerprint,
+            measure_count=result.measure_count,
+            note_count=result.note_count,
+            chord_symbol_count=result.chord_symbol_count,
+            warning_count=result.warning_count,
+        )
+    except (ValueError, sqlite3.Error):
+        logging.exception("Score completion failed for job %s", job_id)
+        fail("The draft score could not be saved safely.")
+        return
+    if not completion.completed:
+        logging.warning("Discarded stale score result for job %s", job_id)
+        fail(
+            "Score evidence changed while the score was being built; "
+            "build the score again."
+        )
+        return
+    _cleanup_score_artifacts(settings, job_id)
+
+
+def _validate_score_result(
+    job_id: str,
+    settings: Settings,
+    result: object,
+    *,
+    expected_artifact_file_name: str,
+    expected_fingerprint: object,
+) -> bool:
+    if not isinstance(result, ScorePipelineResult):
+        return False
+    counts = (
+        result.measure_count,
+        result.note_count,
+        result.chord_symbol_count,
+        result.warning_count,
+    )
+    if (
+        result.artifact_file_name != expected_artifact_file_name
+        or result.source_fingerprint != expected_fingerprint
+        or result.pipeline_version != SCORE_PIPELINE_VERSION
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in counts)
+    ):
+        return False
+    try:
+        document = load_score_artifact(
+            job_id,
+            settings,
+            artifact_file_name=result.artifact_file_name,
+        )
+    except ScoreArtifactError:
+        return False
+    return (
+        document is not None
+        and document == result.payload
+        and _score_document_matches(
+            document,
+            version=result.pipeline_version,
+            created_at=result.created_at,
+            fingerprint=result.source_fingerprint,
+            counts=counts,
+        )
+    )
+
+
+def _score_document_matches(
+    document: dict[str, Any],
+    *,
+    version: object,
+    created_at: object,
+    fingerprint: object,
+    counts: tuple[object, ...],
+) -> bool:
+    document_counts = document["counts"]
+    return (
+        document["pipelineVersion"] == version
+        and document["createdAt"] == created_at
+        and document["sourceFingerprint"] == fingerprint
+        and (
+            document_counts["measures"],
+            document_counts["notes"],
+            document_counts["chordSymbols"],
+            len(document["warnings"]),
+        )
+        == counts
+    )
+
+
+def _safe_score_error(value: str, settings: Settings) -> str:
+    try:
+        cleaned = friendly_error(str(value), settings=settings)
+    except (OSError, RuntimeError, ValueError):
+        return "Score construction failed."
+    cleaned = " ".join(cleaned.replace("\x00", "").split()).strip()
+    return cleaned[:500] if cleaned else "Score construction failed."
+
+
+def _load_saved_score_for_http(
+    job_id: str,
+    settings: Settings,
+    record: dict,
+) -> dict[str, Any]:
+    pointer = record.get("score_artifact_file_name")
+    if not is_score_artifact_file_name(pointer):
+        raise HTTPException(status_code=404, detail="No saved draft score is available.")
+    try:
+        document = load_score_artifact(job_id, settings, artifact_file_name=pointer)
+    except ScoreArtifactError:
+        logging.exception("Saved draft score failed validation for job %s", job_id)
+        raise HTTPException(
+            status_code=500,
+            detail="The saved draft score could not be validated.",
+        ) from None
+    if document is None:
+        raise HTTPException(status_code=404, detail="The saved draft score is unavailable.")
+    if not _score_document_matches(
+        document,
+        version=record.get("score_version"),
+        created_at=record.get("scored_at"),
+        fingerprint=record.get("score_source_fingerprint"),
+        counts=(
+            record.get("score_measure_count"),
+            record.get("score_note_count"),
+            record.get("score_chord_symbol_count"),
+            record.get("score_warning_count"),
+        ),
+    ):
+        logging.error("Saved draft score metadata mismatch for job %s", job_id)
+        raise HTTPException(
+            status_code=500,
+            detail="The saved draft score could not be validated.",
+        )
+    return document
+
+
+def _public_score_sources(sources: dict[str, Any]) -> dict[str, Any]:
+    """Expose layer versions and times without internal artifact names."""
+    return {
+        name: (
+            None
+            if sources.get(name) is None
+            else {
+                "version": sources[name]["version"],
+                "createdAt": sources[name]["createdAt"],
+            }
+        )
+        for name in ("analysis", "transcription", "interpretation", "harmony")
+    }
+
+
+def _public_score_document_bytes(document: dict[str, Any]) -> bytes:
+    public = {key: value for key, value in document.items() if key != "sources"}
+    public["sources"] = _public_score_sources(document["sources"])
+    return json.dumps(
+        public,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        indent=2,
+    ).encode("utf-8")
+
+
+def _saved_score_payload(
+    job_id: str,
+    document: dict[str, Any],
+    record: dict,
+    *,
+    include_measures: bool,
+) -> dict[str, Any]:
+    stale = current_score_fingerprint(record) != document["sourceFingerprint"]
+    warnings = list(document["warnings"])
+    if stale:
+        warnings.insert(
+            0,
+            "Earlier results changed after this score was built; rebuild the score "
+            "to use the current analysis, transcription, interpretation and harmony.",
+        )
+    payload: dict[str, Any] = {
+        "available": True,
+        "status": record.get("score_status") or "not_started",
+        "stale": stale,
+        "version": document["pipelineVersion"],
+        "builderVersion": document["builderVersion"],
+        "createdAt": document["createdAt"],
+        "sources": _public_score_sources(document["sources"]),
+        "layers": document["layers"],
+        "timing": document["timing"],
+        "parts": document["parts"],
+        "counts": document["counts"],
+        "warnings": warnings,
+        "exports": document["exports"],
+        "downloadUrls": {
+            name: f"/api/jobs/{job_id}/score/saved/download?format={name}"
+            for name in _SCORE_DOWNLOADS
+        },
+    }
+    if include_measures:
+        payload["measures"] = document["measures"]
+    return payload
+
+
+def _serialize_score(job: dict) -> dict[str, Any] | None:
+    status_value = job.get("score_status")
+    status = (
+        status_value
+        if isinstance(status_value, str)
+        and status_value in {"not_started", "processing", "completed", "failed"}
+        else "not_started"
+    )
+    available = is_score_artifact_file_name(job.get("score_artifact_file_name"))
+    if (
+        job.get("transcription_status") != "completed"
+        and status == "not_started"
+        and not available
+    ):
+        return None
+    job_id = job["id"]
+    current = current_score_fingerprint(job)
+    ready = current is not None
+    return {
+        "enabled": True,
+        "status": status,
+        "stage": job.get("score_stage") or "not_started",
+        "progress": _safe_progress(job.get("score_progress")),
+        "message": job.get("score_message"),
+        "available": available,
+        "stale": bool(available and current != job.get("score_source_fingerprint")),
+        "version": job.get("score_version") if available else None,
+        "createdAt": job.get("scored_at") if available else None,
+        "counts": {
+            "measures": _safe_count(job.get("score_measure_count")),
+            "notes": _safe_count(job.get("score_note_count")),
+            "chordSymbols": _safe_count(job.get("score_chord_symbol_count")),
+            "warnings": _safe_count(job.get("score_warning_count")),
+        },
+        "canStart": ready and status in {"not_started", "failed"},
+        "canRebuild": ready and status == "completed",
+        "startUrl": f"/api/jobs/{job_id}/score/construct",
+        "detailsUrl": f"/api/jobs/{job_id}/score/saved?includeMeasures=false",
+        "fullDetailsUrl": f"/api/jobs/{job_id}/score/saved?includeMeasures=true",
+        "downloadUrls": (
+            {
+                name: f"/api/jobs/{job_id}/score/saved/download?format={name}"
+                for name in _SCORE_DOWNLOADS
+            }
+            if available
+            else None
+        ),
+        "error": job.get("score_error") if status == "failed" else None,
+    }
