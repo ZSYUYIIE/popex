@@ -224,6 +224,12 @@ def test_start_rejects_evidence_changed_after_claim(tmp_path: Path) -> None:
     attempt = db.claim_score_attempt(database, job["id"], score_version=VERSION)
     db.update_job(database, job["id"], transcribed_at="2026-08-15T00:00:00+00:00")
     assert not db.start_score_attempt(database, job["id"], attempt_id=attempt)
+    # The attempt is closed immediately, never left queued forever.
+    closed = db.get_job(database, job["id"])
+    assert closed["score_status"] == "failed"
+    assert closed["score_attempt_id"] is None
+    assert "changed" in closed["score_error"]
+    assert db.claim_score_attempt(database, job["id"], score_version=VERSION)
 
 
 def test_progress_is_monotonic_and_attempt_bound(tmp_path: Path) -> None:
@@ -353,3 +359,24 @@ def test_update_job_validates_score_fields(tmp_path: Path) -> None:
     ):
         with pytest.raises(ValueError):
             db.update_job(database, job["id"], **{field: value})
+
+
+def test_unverifiable_saved_pointer_is_not_reported_available(tmp_path: Path) -> None:
+    database = tmp_path / "popex.sqlite3"
+    job = create_ready_job(database)
+    attempt = db.claim_score_attempt(database, job["id"], score_version=VERSION)
+    complete(database, job["id"], attempt)
+    for status in ("completed", "failed"):
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE jobs SET score_status = ?, scored_at = NULL WHERE id = ?",
+                (status, job["id"]),
+            )
+        db.init_database(database)
+        normalized = db.get_job(database, job["id"])
+        assert normalized["score_status"] == "failed"
+        assert normalized["score_artifact_file_name"] is None
+        assert normalized["score_source_fingerprint"] is None
+        # Restore a valid completed row for the next iteration.
+        attempt = db.claim_score_attempt(database, job["id"], score_version=VERSION)
+        complete(database, job["id"], attempt)

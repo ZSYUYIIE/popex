@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -25,12 +26,14 @@ from app.score_pipeline import (
 )
 from app.score_sources import current_score_fingerprint
 from app.transcription_draft import write_transcription_draft
+from app.transcription_events import write_raw_transcription
 from test_harmony_api import (
     RAW_CREATED_AT,
     create_job,
     make_settings,
     publish_harmony,
     raw_events,
+    raw_payload,
 )
 from test_interpretation_api import draft_payload
 
@@ -641,3 +644,89 @@ def test_chord_symbol_needs_a_dominant_uncontested_candidate() -> None:
         "beyond": 1,
         "truncated": 0,
     }
+
+
+
+def test_evidence_change_before_worker_start_fails_instead_of_sticking(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    settings.ensure_directories()
+    attempt = db.claim_score_attempt(
+        settings.database_path, job_id, score_version="score-pipeline-v1"
+    )
+    publish_harmony(settings, job_id)  # harmony completes before the worker runs
+    calls = []
+    _run_score_job(job_id, settings, lambda *a, **k: calls.append(1), attempt)
+    record = db.get_job(settings.database_path, job_id)
+    assert calls == []
+    assert record["score_status"] == "failed"
+    assert record["score_attempt_id"] is None
+    with client_for(settings) as client:
+        assert build(client, job_id).status_code == 202
+        assert job_json(client, job_id)["score"]["status"] == "completed"
+
+
+def test_database_error_at_completion_fails_attempt_and_keeps_previous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    with client_for(settings) as client:
+        assert build(client, job_id).status_code == 202
+    durable = db.get_job(settings.database_path, job_id)["score_artifact_file_name"]
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "complete_score_attempt", locked)
+    with client_for(settings) as client:
+        assert build(client, job_id, force=True).status_code == 202
+        job = job_json(client, job_id)
+    record = db.get_job(settings.database_path, job_id)
+    assert record["score_status"] == "failed"
+    assert record["score_attempt_id"] is None
+    assert record["score_error"] == "The draft score could not be saved safely."
+    assert record["score_artifact_file_name"] == durable
+    assert job["score"]["available"] is True
+    assert score_files(settings, job_id) == [durable.split("/")[1]]
+
+
+def test_harmony_with_changed_raw_evidence_is_omitted(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    publish_harmony(settings, job_id)
+    changed = raw_payload()
+    changed["pitchedNoteEvents"][0]["midiPitch"] = 60.4  # same IDs, new pitch
+    write_raw_transcription(job_id, settings, changed)
+    with client_for(settings) as client:
+        assert build(client, job_id).status_code == 202
+        details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+    assert details["layers"]["chordSymbols"]["status"] == "omitted"
+    assert "does not match" in details["layers"]["chordSymbols"]["note"]
+    assert all(measure["chordSymbol"] is None for measure in details["measures"])
+
+
+def test_overlong_chord_symbol_is_not_placed_and_score_still_saves() -> None:
+    from app.score_pipeline import _map_harmony
+
+    measures = [{"measureIndex": 0, "startSeconds": 0.0, "endSeconds": 4.0}]
+    stats = _map_harmony(
+        measures,
+        [
+            {
+                "id": "seg_long",
+                "rawStartSeconds": 0.0,
+                "rawEndSeconds": 4.0,
+                "unresolved": False,
+                "primaryCandidate": {"symbol": "C" * 200, "confidence": 0.9},
+            }
+        ],
+        seconds_per_beat=1.0,
+        beats_per_measure=4,
+    )
+    assert measures[0]["chordSymbol"] is None
+    assert measures[0]["harmony"][0]["unresolved"] is True
+    assert measures[0]["harmony"][0]["symbol"] is None
+    assert stats["unresolved"] == 1

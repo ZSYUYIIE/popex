@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import math
 import mimetypes
 import re
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -73,6 +73,8 @@ from app.interpretation_pipeline import (
     interpret_transcription_job,
 )
 from app.harmony_artifacts import (
+    harmony_raw_evidence,
+    harmony_raw_evidence_matches,
     HARMONY_ARTIFACT_RELATIVE_PATH,
     HarmonyArtifactError,
     HarmonyArtifactUnavailableError,
@@ -175,20 +177,6 @@ ANALYSIS_STAGES = {
 }
 PREPARATION_PROGRESS_LIMIT = 64.0
 ANALYSIS_FAILURE_PROGRESS = 95.0
-_HARMONY_PITCH_CLASS_NAMES = (
-    "C",
-    "C#",
-    "D",
-    "D#",
-    "E",
-    "F",
-    "F#",
-    "G",
-    "G#",
-    "A",
-    "A#",
-    "B",
-)
 _HARMONY_ARTIFACT_FILE_RE = re.compile(
     r"harmony/harmonic-context(?:\.[a-f0-9]{32})?\.json"
 )
@@ -1985,7 +1973,7 @@ def _run_harmony_job(
         if (
             raw_transcription is None
             or result.payload.get("rawEvidence")
-            != _harmony_raw_evidence(raw_transcription)
+            != harmony_raw_evidence(raw_transcription)
         ):
             logging.warning(
                 "Discarded stale harmonic-context result for job %s",
@@ -2614,58 +2602,6 @@ def _load_matching_raw_transcription_for_harmony(
     ) else None
 
 
-def _harmony_raw_evidence(
-    raw_transcription: dict[str, Any],
-) -> list[dict[str, Any]]:
-    evidence = [
-        {
-            "id": event["id"],
-            "sourceKind": event["sourceKind"],
-            "rawStartSeconds": event["startSeconds"],
-            "rawEndSeconds": event["endSeconds"],
-            "midiNote": event["midiNote"],
-            "midiPitch": event["midiPitch"],
-            "pitchClass": event["midiNote"] % 12,
-            "pitchName": _HARMONY_PITCH_CLASS_NAMES[event["midiNote"] % 12],
-            "confidence": event["confidence"],
-            "warnings": list(event.get("warnings", [])),
-        }
-        for event in raw_transcription.get("pitchedNoteEvents", ())
-    ]
-    evidence.sort(
-        key=lambda item: (
-            item["rawStartSeconds"],
-            item["rawEndSeconds"],
-            item["id"],
-        )
-    )
-    return evidence
-
-
-def _harmony_raw_evidence_matches_current(
-    artifact_evidence: object,
-    current_evidence: list[dict[str, Any]],
-    *,
-    allow_legacy_missing_warnings: bool,
-) -> bool:
-    if not isinstance(artifact_evidence, list) or len(artifact_evidence) != len(
-        current_evidence
-    ):
-        return False
-    for artifact_item, current_item in zip(artifact_evidence, current_evidence):
-        if not isinstance(artifact_item, dict):
-            return False
-        if artifact_item == current_item:
-            continue
-        if allow_legacy_missing_warnings and "warnings" not in artifact_item:
-            expected_without_warnings = dict(current_item)
-            expected_without_warnings.pop("warnings", None)
-            if artifact_item == expected_without_warnings:
-                continue
-        return False
-    return True
-
-
 def _is_harmony_artifact_file_name(value: object) -> bool:
     return isinstance(value, str) and _HARMONY_ARTIFACT_FILE_RE.fullmatch(value) is not None
 
@@ -2756,9 +2692,9 @@ def _harmony_artifact_matches_record(
     }
     raw_evidence_matches = True
     if raw_transcription is not None:
-        raw_evidence_matches = _harmony_raw_evidence_matches_current(
+        raw_evidence_matches = harmony_raw_evidence_matches(
             artifact.get("rawEvidence"),
-            _harmony_raw_evidence(raw_transcription),
+            harmony_raw_evidence(raw_transcription),
             allow_legacy_missing_warnings=(
                 record.get("harmony_artifact_file_name")
                 == HARMONY_ARTIFACT_RELATIVE_PATH
@@ -2920,6 +2856,24 @@ def _cleanup_score_artifacts(settings: Settings, job_id: str) -> None:
         logging.warning("Could not clean superseded score files for job %s", job_id)
 
 
+def _fail_score_attempt_safely(
+    settings: Settings,
+    job_id: str,
+    attempt_id: str,
+    error: str,
+) -> None:
+    """Record an attempt failure; a database error is logged, never raised."""
+    try:
+        db.fail_score_attempt(
+            settings.database_path,
+            job_id,
+            attempt_id=attempt_id,
+            error=error,
+        )
+    except (ValueError, sqlite3.Error):
+        logging.exception("Could not record score failure for job %s", job_id)
+
+
 def _score_attempt_is_active(record: dict[str, Any] | None, attempt_id: str) -> bool:
     return (
         record is not None
@@ -2943,6 +2897,12 @@ def _run_score_job(
         )
     except (ScoreArtifactError, ValueError):
         logging.error("Score worker received an invalid attempt for job %s", job_id)
+        return
+    except sqlite3.Error:
+        logging.exception("Score worker could not start for job %s", job_id)
+        _fail_score_attempt_safely(
+            settings, job_id, attempt_id, "Score construction could not start."
+        )
         return
     if not started:
         return
@@ -2968,12 +2928,7 @@ def _run_score_job(
         last_progress = next_progress
 
     def fail(error: str) -> None:
-        db.fail_score_attempt(
-            settings.database_path,
-            job_id,
-            attempt_id=attempt_id,
-            error=error,
-        )
+        _fail_score_attempt_safely(settings, job_id, attempt_id, error)
         _cleanup_score_artifacts(settings, job_id)
 
     try:
@@ -3003,19 +2958,24 @@ def _run_score_job(
         logging.error("Score processor returned an invalid result for job %s", job_id)
         fail("Score construction returned an invalid result.")
         return
-    completion = db.complete_score_attempt(
-        settings.database_path,
-        job_id,
-        attempt_id=attempt_id,
-        score_version=result.pipeline_version,
-        artifact_file_name=result.artifact_file_name,
-        scored_at=result.created_at,
-        source_fingerprint=result.source_fingerprint,
-        measure_count=result.measure_count,
-        note_count=result.note_count,
-        chord_symbol_count=result.chord_symbol_count,
-        warning_count=result.warning_count,
-    )
+    try:
+        completion = db.complete_score_attempt(
+            settings.database_path,
+            job_id,
+            attempt_id=attempt_id,
+            score_version=result.pipeline_version,
+            artifact_file_name=result.artifact_file_name,
+            scored_at=result.created_at,
+            source_fingerprint=result.source_fingerprint,
+            measure_count=result.measure_count,
+            note_count=result.note_count,
+            chord_symbol_count=result.chord_symbol_count,
+            warning_count=result.warning_count,
+        )
+    except (ValueError, sqlite3.Error):
+        logging.exception("Score completion failed for job %s", job_id)
+        fail("The draft score could not be saved safely.")
+        return
     if not completion.completed:
         logging.warning("Discarded stale score result for job %s", job_id)
         fail(
@@ -3190,19 +3150,19 @@ def _saved_score_payload(
         "builderVersion": document["builderVersion"],
         "createdAt": document["createdAt"],
         "sources": _public_score_sources(document["sources"]),
-        "layers": copy.deepcopy(document["layers"]),
-        "timing": copy.deepcopy(document["timing"]),
-        "parts": copy.deepcopy(document["parts"]),
-        "counts": copy.deepcopy(document["counts"]),
+        "layers": document["layers"],
+        "timing": document["timing"],
+        "parts": document["parts"],
+        "counts": document["counts"],
         "warnings": warnings,
-        "exports": copy.deepcopy(document["exports"]),
+        "exports": document["exports"],
         "downloadUrls": {
             name: f"/api/jobs/{job_id}/score/saved/download?format={name}"
             for name in _SCORE_DOWNLOADS
         },
     }
     if include_measures:
-        payload["measures"] = copy.deepcopy(document["measures"])
+        payload["measures"] = document["measures"]
     return payload
 
 

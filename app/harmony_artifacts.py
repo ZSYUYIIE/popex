@@ -427,6 +427,60 @@ def _accept_existing_immutable_artifact(
     return destination.resolve(strict=True)
 
 
+def harmony_raw_evidence(
+    raw_transcription: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return the canonical raw pitch evidence a harmony artifact must embed."""
+    evidence = [
+        {
+            "id": event["id"],
+            "sourceKind": event["sourceKind"],
+            "rawStartSeconds": event["startSeconds"],
+            "rawEndSeconds": event["endSeconds"],
+            "midiNote": event["midiNote"],
+            "midiPitch": event["midiPitch"],
+            "pitchClass": event["midiNote"] % 12,
+            "pitchName": _PITCH_CLASS_NAMES[event["midiNote"] % 12],
+            "confidence": event["confidence"],
+            "warnings": list(event.get("warnings", [])),
+        }
+        for event in raw_transcription.get("pitchedNoteEvents", ())
+    ]
+    evidence.sort(
+        key=lambda item: (
+            item["rawStartSeconds"],
+            item["rawEndSeconds"],
+            item["id"],
+        )
+    )
+    return evidence
+
+
+def harmony_raw_evidence_matches(
+    artifact_evidence: object,
+    current_evidence: list[dict[str, Any]],
+    *,
+    allow_legacy_missing_warnings: bool,
+) -> bool:
+    """Return whether embedded raw evidence still equals the current transcription."""
+    if not isinstance(artifact_evidence, list) or len(artifact_evidence) != len(
+        current_evidence
+    ):
+        return False
+    for artifact_item, current_item in zip(artifact_evidence, current_evidence):
+        if not isinstance(artifact_item, dict):
+            return False
+        if artifact_item == current_item:
+            continue
+        if allow_legacy_missing_warnings and "warnings" not in artifact_item:
+            expected_without_warnings = dict(current_item)
+            expected_without_warnings.pop("warnings", None)
+            if artifact_item == expected_without_warnings:
+                continue
+        return False
+    return True
+
+
 def load_harmony_artifact(
     job_id: str,
     settings: Settings,
@@ -2652,6 +2706,8 @@ __all__ = [
     "harmony_artifact_path",
     "harmony_artifact_scope",
     "harmony_attempt_artifact_file_name",
+    "harmony_raw_evidence",
+    "harmony_raw_evidence_matches",
     "load_harmony_artifact",
     "reconcile_harmony_attempt_artifacts",
     "remove_harmony_artifact",

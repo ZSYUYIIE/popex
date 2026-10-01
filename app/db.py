@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.score_artifacts import (
+    is_score_artifact_file_name as _is_valid_score_artifact_file_name,
+    score_attempt_artifact_file_name,
+)
 from app.score_sources import current_score_fingerprint, is_score_fingerprint
 
 
@@ -66,9 +70,6 @@ _SCORE_COUNT_FIELDS = frozenset(
     }
 )
 _SCORE_STATUSES = frozenset({"not_started", "processing", "completed", "failed"})
-_SCORE_ATTEMPT_ARTIFACT_RE = re.compile(
-    r"score/score-document\.([a-f0-9]{32})\.json"
-)
 _SCORE_VERSION_RE = _HARMONY_VERSION_RE
 
 NEW_COLUMNS: dict[str, str] = {
@@ -669,14 +670,27 @@ def _normalize_score_columns(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         UPDATE jobs
-        SET score_status = 'failed',
-            score_stage = 'failed',
+        SET score_status = CASE
+                WHEN score_status = 'completed' THEN 'failed' ELSE score_status
+            END,
+            score_stage = CASE
+                WHEN score_status = 'completed' THEN 'failed' ELSE score_stage
+            END,
             score_progress = CASE
                 WHEN score_progress >= 100 THEN 99 ELSE score_progress
             END,
             score_message = 'Saved score metadata is incomplete; the score can be rebuilt.',
-            score_error = 'Saved score metadata is incomplete.'
-        WHERE score_status = 'completed'
+            score_error = 'Saved score metadata is incomplete.',
+            score_artifact_file_name = NULL,
+            score_version = NULL,
+            scored_at = NULL,
+            score_source_fingerprint = NULL,
+            score_measure_count = NULL,
+            score_note_count = NULL,
+            score_chord_symbol_count = NULL,
+            score_warning_count = NULL
+        WHERE (score_status = 'completed' OR score_artifact_file_name IS NOT NULL)
+          AND score_status != 'processing'
           AND (
                 score_artifact_file_name IS NULL
                 OR score_version IS NULL
@@ -1491,14 +1505,6 @@ class ScoreCompletion:
     previous_artifact_file_name: str | None = None
 
 
-def score_attempt_artifact_file_name(attempt_id: str) -> str:
-    """Return the immutable artifact pointer owned by one score attempt."""
-    safe_attempt_id = _validate_score_attempt_id(attempt_id)
-    if safe_attempt_id is None:
-        raise ValueError("score_attempt_id is required.")
-    return f"score/score-document.{safe_attempt_id}.json"
-
-
 @contextmanager
 def _score_write_transaction(
     database_path: Path,
@@ -1587,8 +1593,34 @@ def start_score_attempt(
             or row.get("score_status") != "processing"
             or row.get("score_stage") != "queued"
             or row.get("score_attempt_id") != safe_attempt_id
-            or current_score_fingerprint(row) != row.get("score_attempt_fingerprint")
         ):
+            return False
+        if current_score_fingerprint(row) != row.get("score_attempt_fingerprint"):
+            # The evidence changed between the claim and the worker start:
+            # close this attempt now so it can be retried, never left queued.
+            connection.execute(
+                """
+                UPDATE jobs
+                SET score_status = 'failed',
+                    score_stage = 'failed',
+                    score_message = ?,
+                    score_attempt_id = NULL,
+                    score_attempt_fingerprint = NULL,
+                    score_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                  AND score_status = 'processing'
+                  AND score_attempt_id = ?
+                """,
+                (
+                    "Score construction stopped; earlier results remain available.",
+                    "Score evidence changed before construction started; "
+                    "build the score again.",
+                    utc_now(),
+                    job_id,
+                    safe_attempt_id,
+                ),
+            )
             return False
         cursor = connection.execute(
             """
@@ -1985,13 +2017,6 @@ def _validate_score_progress(value: Any) -> float:
     if not math.isfinite(number) or not 0 <= number <= 100:
         raise ValueError("score progress must be a number from 0 through 100.")
     return number
-
-
-def _is_valid_score_artifact_file_name(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and _SCORE_ATTEMPT_ARTIFACT_RE.fullmatch(value) is not None
-    )
 
 
 def _validate_utc_timestamp(value: Any, label: str) -> str:

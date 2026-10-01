@@ -275,13 +275,16 @@ def collect_score_evidence(
 def score_evidence_warnings(
     document: Mapping[str, Any],
     evidence: Mapping[str, Any],
+    *,
+    single_draft_part_warning: bool = True,
 ) -> list[str]:
     """Return builder warnings plus explicit timing and omitted-layer warnings."""
     warnings = list(document["warnings"])
-    warnings.append(
-        "Pitched events are shown as one draft part; instrument-specific part "
-        "assignment is not included."
-    )
+    if single_draft_part_warning:
+        warnings.append(
+            "Pitched events are shown as one draft part; instrument-specific part "
+            "assignment is not included."
+        )
     tempo_confidence = evidence["tempoConfidence"]
     meter_confidence = evidence["meterConfidence"]
     meter_source = evidence["meterSource"]

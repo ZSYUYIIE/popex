@@ -327,3 +327,24 @@ console.log(JSON.stringify({
         "harmony": "Inferring harmony",
         "building": "Building score",
     }
+
+
+
+def test_failed_detail_load_is_retried_after_a_new_saved_score() -> None:
+    result = _run_node(
+        f"""
+let fail=true;
+t.setFetch(async () => {{if(fail)throw new Error("offline");return {{ok:true,status:200,json:async()=>({json.dumps(DETAIL)})}};}});
+const jobs=[{{id:"done",score:{json.dumps(SUMMARY)}}}];
+await t.hydrateCompletedScores(jobs);
+t.invalidateStaleScoreDetails(jobs);
+const keptForSameScore=t.hasDetail("done")&&t.getDetail("done")===null;
+fail=false;
+const rebuilt=[{{id:"done",score:{{...{json.dumps(SUMMARY)},createdAt:"2026-10-01T00:00:00+00:00"}}}}];
+t.invalidateStaleScoreDetails(rebuilt);
+const cleared=!t.hasDetail("done");
+await t.hydrateCompletedScores(rebuilt);
+console.log(JSON.stringify({{keptForSameScore,cleared,loaded:t.getDetail("done")!==null}}));
+"""
+    )
+    assert result == {"keptForSameScore": True, "cleared": True, "loaded": True}

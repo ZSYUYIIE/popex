@@ -24,7 +24,13 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import Settings
-from app.harmony_artifacts import HarmonyArtifactError, load_harmony_artifact
+from app.harmony_artifacts import (
+    HARMONY_ARTIFACT_RELATIVE_PATH,
+    HarmonyArtifactError,
+    harmony_raw_evidence,
+    harmony_raw_evidence_matches,
+    load_harmony_artifact,
+)
 from app.score_api import (
     ScorePreviewError,
     ScorePreviewUnavailableError,
@@ -55,6 +61,7 @@ SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v1"
 
 _MAX_WARNINGS = 32
 _MAX_MEASURE_HARMONY = 16
+_MAX_SYMBOL_LENGTH = 64
 _DOMINANT_COVERAGE = 0.5
 _COMPETING_COVERAGE = 0.25
 
@@ -100,7 +107,7 @@ def _load_matching_harmony(
     settings: Settings,
     record: Mapping[str, Any],
     identity: Mapping[str, Any],
-    raw_ids: set[str],
+    raw_transcription: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]] | None, str]:
     """Return harmony segments that match current evidence, or an omission note."""
     layer = identity.get("harmony")
@@ -121,7 +128,6 @@ def _load_matching_harmony(
         return None, "Saved harmonic context is unavailable; chord symbols were omitted."
     source_transcription = artifact.get("sourceTranscription") or {}
     source_analysis = artifact.get("sourceAnalysis") or {}
-    raw_evidence = artifact.get("rawEvidence") or []
     if (
         artifact.get("harmonyVersion") != layer["version"]
         or artifact.get("createdAt") != layer["createdAt"]
@@ -131,7 +137,11 @@ def _load_matching_harmony(
         != record.get("transcription_version")
         or record.get("harmony_source_transcribed_at") != record.get("transcribed_at")
         or source_analysis.get("analysisVersion") != record.get("analysis_version")
-        or not {item.get("id") for item in raw_evidence} <= raw_ids
+        or not harmony_raw_evidence_matches(
+            artifact.get("rawEvidence"),
+            harmony_raw_evidence(raw_transcription),
+            allow_legacy_missing_warnings=layer["fileName"] == HARMONY_ARTIFACT_RELATIVE_PATH,
+        )
     ):
         return None, (
             "Saved harmonic context does not match the current transcription; "
@@ -210,27 +220,42 @@ def _map_harmony(
     stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0}
     seconds_per_measure = seconds_per_beat * beats_per_measure
     notated_end = len(measures) * seconds_per_measure
-    for segment in segments:
-        start = float(segment["rawStartSeconds"])
-        if start >= notated_end:
+    ordered = sorted(
+        segments,
+        key=lambda item: (float(item["rawStartSeconds"]), str(item["id"])),
+    )
+    for segment in ordered:
+        if float(segment["rawStartSeconds"]) >= notated_end:
             stats["beyond"] += 1
             continue
         stats["windows"] += 1
-        if segment.get("unresolved"):
+        if segment.get("unresolved") or _segment_symbol(segment) is None:
             stats["unresolved"] += 1
+    # Sweep measures in time order, keeping only windows that can still
+    # overlap, so the work is proportional to measures plus overlaps.
+    active: list[dict[str, Any]] = []
+    next_index = 0
     for measure in measures:
         measure_start = measure["startSeconds"]
         measure_end = measure["endSeconds"]
+        while (
+            next_index < len(ordered)
+            and float(ordered[next_index]["rawStartSeconds"]) < measure_end
+        ):
+            active.append(ordered[next_index])
+            next_index += 1
+        active = [
+            segment for segment in active
+            if float(segment["rawEndSeconds"]) > measure_start
+        ]
         coverage: dict[str, float] = {}
         entries = []
-        for segment in segments:
+        for segment in active:
             start = max(measure_start, float(segment["rawStartSeconds"]))
             end = min(measure_end, float(segment["rawEndSeconds"]))
             if end <= start:
                 continue
-            candidate = segment.get("primaryCandidate")
-            unresolved = bool(segment.get("unresolved")) or not isinstance(candidate, Mapping)
-            symbol = None if unresolved else str(candidate["symbol"])
+            symbol = _segment_symbol(segment)
             if symbol is not None:
                 coverage[symbol] = coverage.get(symbol, 0.0) + (end - start)
             entries.append(
@@ -239,8 +264,12 @@ def _map_harmony(
                     "startBeat": round((start - measure_start) / seconds_per_beat, 3),
                     "endBeat": round((end - measure_start) / seconds_per_beat, 3),
                     "symbol": symbol,
-                    "confidence": None if unresolved else float(candidate["confidence"]),
-                    "unresolved": unresolved,
+                    "confidence": (
+                        None
+                        if symbol is None
+                        else float(segment["primaryCandidate"]["confidence"])
+                    ),
+                    "unresolved": symbol is None,
                 }
             )
         entries.sort(key=lambda item: (item["startBeat"], item["endBeat"], item["segmentId"]))
@@ -260,6 +289,21 @@ def _map_harmony(
         if chosen is None and coverage:
             stats["ambiguous"] += 1
     return stats
+
+
+def _segment_symbol(segment: Mapping[str, Any]) -> str | None:
+    """Return a resolved, displayable chord symbol, or ``None``.
+
+    A symbol longer than the score's text bound is treated as unresolved for
+    placement rather than failing the whole score.
+    """
+    candidate = segment.get("primaryCandidate")
+    if segment.get("unresolved") or not isinstance(candidate, Mapping):
+        return None
+    symbol = candidate.get("symbol")
+    if not isinstance(symbol, str) or not symbol or len(symbol) > _MAX_SYMBOL_LENGTH:
+        return None
+    return symbol
 
 
 def construct_score(
@@ -318,7 +362,7 @@ def construct_score(
 
     progress("mapping_harmony", "Mapping harmonic candidates to measures.", 50)
     segments, harmony_note = _load_matching_harmony(
-        job_id, settings, record, identity, set(raw_events)
+        job_id, settings, record, identity, evidence["rawTranscription"]
     )
     harmony_stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0}
     if segments is not None:
@@ -382,15 +426,11 @@ def construct_score(
             "The score could not be exported to MIDI and MusicXML safely."
         ) from exc
 
-    warnings = score_evidence_warnings(built, evidence)
+    warnings = score_evidence_warnings(
+        built, evidence, single_draft_part_warning=part_data is None
+    )
     notes_with_part = sum(part_note_counts.values())
     if part_data is not None:
-        # The generic single-part warning is superseded by an explicit note.
-        warnings = [
-            warning
-            for warning in warnings
-            if not warning.startswith("Pitched events are shown as one draft part")
-        ]
         warnings.append(
             f"{notes_with_part} of {built['noteCount']} note(s) carry an editable-"
             "interpretation part label; MIDI and MusicXML still use one combined draft part."
