@@ -596,3 +596,8 @@ button.mini.danger {
 body.has-review-player {
   padding-bottom:7rem
 }
+@media (max-width:600px) {
+  body.has-review-player {
+    padding-bottom:11rem
+  }
+}

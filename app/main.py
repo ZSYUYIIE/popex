@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -301,6 +302,14 @@ class JobCreate(BaseModel):
     url: HttpUrl
 
 
+def _fingerprinted_index_html() -> str:
+    html = (BASE_DIR / "templates" / "index.html").read_text(encoding="utf-8")
+    for asset in ("styles.css", "app.js"):
+        digest = hashlib.sha256((BASE_DIR / "static" / asset).read_bytes()).hexdigest()[:12]
+        html = html.replace(f"/static/{asset}\"", f"/static/{asset}?v={digest}\"")
+    return html
+
+
 class SeparationStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -405,9 +414,17 @@ def create_app(
     def serialize_job(record: dict) -> dict:
         return _serialize_job(record, app_settings, separation_service)
 
+    index_html = _fingerprinted_index_html()
+
     @app.get("/", include_in_schema=False)
-    def index() -> FileResponse:
-        return FileResponse(BASE_DIR / "templates" / "index.html")
+    def index() -> Response:
+        # Asset URLs carry a content hash so an upgraded app never runs a
+        # stale cached script or stylesheet against a newer API.
+        return Response(
+            content=index_html,
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/api/health")
     def health() -> dict:
