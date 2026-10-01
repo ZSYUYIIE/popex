@@ -277,6 +277,7 @@ def score_evidence_warnings(
     evidence: Mapping[str, Any],
     *,
     single_draft_part_warning: bool = True,
+    percussion_notated: bool = False,
 ) -> list[str]:
     """Return builder warnings plus explicit timing and omitted-layer warnings."""
     warnings = list(document["warnings"])
@@ -306,7 +307,7 @@ def score_evidence_warnings(
         warnings.append(
             "Meter confidence is low or unavailable; review the measure grouping."
         )
-    if evidence["percussionEventCount"]:
+    if evidence["percussionEventCount"] and not percussion_notated:
         warnings.append(
             "Percussion events are present but are not rendered in this pitched-note draft."
         )

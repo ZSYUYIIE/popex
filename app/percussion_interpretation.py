@@ -80,6 +80,29 @@ _HIT_KIND_TO_VOICE = {
 }
 _MIN_RESOLVED_CONFIDENCE = 0.35
 
+BROAD_PERCUSSION_VOICES: tuple[str, ...] = _VOICE_ORDER
+
+
+def broad_voice_label(voice_kind: str) -> str:
+    """Return the musician-facing label of one broad percussion voice."""
+    return _VOICE_DEFINITIONS[voice_kind][1]
+
+
+def broad_voice_for_hit(raw_kind: str, confidence: float) -> tuple[str, bool]:
+    """Map one raw hit to ``(broad voice, resolved)`` using the documented table.
+
+    Unknown kinds and hits below the resolution threshold stay
+    ``unresolved_percussion``; they are never assigned to a specific drum.
+    """
+    mapped = _HIT_KIND_TO_VOICE.get(raw_kind)
+    resolved = (
+        mapped is not None
+        and mapped != "unresolved_percussion"
+        and confidence >= _MIN_RESOLVED_CONFIDENCE
+    )
+    return (mapped if resolved else "unresolved_percussion"), resolved
+
+
 _ALIGNMENT_KEYS = {
     "eventId",
     "eventType",
@@ -153,13 +176,7 @@ def interpret_percussion(
                 )
             raw_kind = hit["kind"]
             confidence = hit["confidence"]
-            mapped_kind = _HIT_KIND_TO_VOICE.get(raw_kind)
-            resolved = (
-                mapped_kind is not None
-                and mapped_kind != "unresolved_percussion"
-                and confidence >= _MIN_RESOLVED_CONFIDENCE
-            )
-            voice_kind = mapped_kind if resolved else "unresolved_percussion"
+            voice_kind, resolved = broad_voice_for_hit(raw_kind, confidence)
             voice_id, _ = _VOICE_DEFINITIONS[voice_kind]
             used_voice_kinds.setdefault(voice_kind, set()).add(raw_kind)
             has_resolved = has_resolved or resolved

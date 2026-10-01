@@ -59,7 +59,12 @@ eval(source);
 }});
 """
     completed = subprocess.run(
-        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True
+        ["node", "-e", script],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
     )
     return json.loads(completed.stdout)
 
@@ -348,3 +353,78 @@ console.log(JSON.stringify({{keptForSameScore,cleared,loaded:t.getDetail("done")
 """
     )
     assert result == {"keptForSameScore": True, "cleared": True, "loaded": True}
+
+
+DRUM_DETAIL = {
+    **DETAIL,
+    "percussion": {
+        "voiceSource": "raw-hit-kinds",
+        "voices": [
+            {"broadVoice": "low_drum", "label": "Low drum", "displayStep": "F",
+             "displayOctave": 4, "notehead": "normal", "gmNote": 36, "hitCount": 2},
+            {"broadVoice": "unresolved_percussion", "label": "Unresolved percussion",
+             "displayStep": "B", "displayOctave": 4, "notehead": "triangle",
+             "gmNote": 76, "hitCount": 1},
+        ],
+    },
+    "counts": {**DETAIL["counts"], "percussionHits": 4, "notatedPercussionHits": 3,
+               "collapsedPercussionHits": 1, "unresolvedPercussionHits": 1,
+               "offGridPercussionHits": 0, "unplacedPercussionHits": 2},
+    "measures": [
+        {**DETAIL["measures"][0], "percussionHits": [
+            {"broadVoice": "low_drum", "quantizedBeat": 0.0, "notation": "notated"},
+            {"broadVoice": "low_drum", "quantizedBeat": 2.0, "notation": "notated"},
+            {"broadVoice": "low_drum", "quantizedBeat": 2.0, "notation": "collapsed"},
+            {"broadVoice": "unresolved_percussion", "quantizedBeat": 3.5,
+             "notation": "notated"},
+        ]},
+        {**DETAIL["measures"][1], "percussionHits": []},
+    ],
+}
+
+
+def test_drum_notation_summary_and_per_bar_hits_render() -> None:
+    result = _run_node(
+        f"""
+t.setDetail("drums", {json.dumps(DRUM_DETAIL)});
+const html=t.renderScore({{id:"drums",score:{json.dumps(SUMMARY)}}});
+console.log(JSON.stringify({{html}}));
+"""
+    )
+    html = result["html"]
+    assert "<dt>Drum hits</dt><dd>3</dd>" in html
+    assert "<strong>Drum notation by voice</strong>" in html
+    assert "Voices come from the detected hit types" in html
+    assert "<li>Low drum: 2 hits</li>" in html
+    assert "Unresolved percussion: 1 hit · <span class=\"score-low\">not assigned to a drum</span>" in html
+    assert "1 unresolved · 2 unplaced (no confident rhythm placement)" in html
+    assert "1 merged with a hit in the same slot" in html
+    assert '<th scope="col">Drum hits</th>' in html
+    assert "<li>Low drum · beats 1, 3</li>" in html
+    assert 'Unresolved percussion <span class="score-low">(unresolved)</span> · beat 4.5' in html
+    assert "drum hits, and harmonic evidence per measure" in html
+
+
+def test_schema_one_detail_has_no_drum_column() -> None:
+    result = _run_node(
+        f"""
+t.setDetail("old", {json.dumps(DETAIL)});
+const html=t.renderScore({{id:"old",score:{json.dumps(SUMMARY)}}});
+console.log(JSON.stringify({{html}}));
+"""
+    )
+    assert "Drum hits" not in result["html"]
+    assert "Drum notation by voice" not in result["html"]
+
+
+def test_score_built_before_drum_notation_explains_the_rebuild() -> None:
+    stale = {**SUMMARY, "stale": True, "staleReason": "drum-notation"}
+    result = _run_node(
+        f"""
+const html=t.renderScore({{id:"s",score:{json.dumps(stale)}}});
+console.log(JSON.stringify({{html}}));
+"""
+    )
+    assert "This score is out of date." in result["html"]
+    assert "built before drum notation was available" in result["html"]
+    assert ">Rebuild score</button>" in result["html"]
