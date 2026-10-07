@@ -193,6 +193,12 @@ def run(data_dir: Path) -> dict:
             "musicxmlParts": parts,
             "musicxmlDrumNotes": len(drum_notes),
             "tablature": details["tablature"],
+            "tonalContext": {
+                "primary": (details["tonality"]["primaryCandidate"] or {}).get("displayName"),
+                "confidence": (details["tonality"]["primaryCandidate"] or {}).get("confidence"),
+                "keySignature": details["tonality"]["keySignature"],
+                "localRegions": len(details["tonality"]["localRegions"]),
+            },
             "musicxmlGuitarTabNotes": len(tab_notes),
             "corrections": {
                 "active": corrected_details["corrections"]["activeCount"],

@@ -417,7 +417,7 @@ Implemented capabilities:
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
 - read-only, versioned pitched-note score previews built from matching completed transcription and analysis evidence;
 - stdlib-only MIDI and MusicXML exports with explicit quantization warnings, raw-event provenance, independent overlapping voices, and ties across measure boundaries;
-- persisted draft scores (`score-pipeline-v3`, document schema 3; schema-1 and schema-2 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
+- persisted draft scores (`score-pipeline-v4`, document schema 4; schema-1 to schema-3 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
 - chord symbols placed per measure only when one resolved harmonic candidate covers at least half the measure without a competing candidate, with every overlapping window (including unresolved ones) kept as review evidence;
 - editable-interpretation part labels on notes whose raw event maps to exactly one part; MIDI and MusicXML still use one combined draft part;
 - a separate drum part built from the raw percussion events on the same eighth-note grid: broad voices (low drum, mid drum, tom-like, closed/open high-frequency, cymbal-like) come from a matching editable interpretation, otherwise from the documented raw hit-kind table; unresolved hits keep their own flagged lane and are never assigned to a drum; every hit keeps its raw event ID, time, strength and confidence, and same-voice duplicates in one slot are kept as evidence but written once;
@@ -429,6 +429,8 @@ Implemented capabilities:
 - synchronized review: a persistent review player plays any bar of the recording (or of a separated stem) from the measure table and marks the bar that is playing;
 - musician corrections (pitch by semitone or octave, delete note, tablature position, chord symbol, drum voice, delete drum hit) kept as a versioned, revision-checked operation log in SQLite, separate from the immutable saved prediction; undo, redo, and an undoable reset; corrections survive score rebuilds by stable event IDs, and ones whose target disappeared are reported rather than dropped;
 - corrected and original views of the saved score and of every MIDI, MusicXML, and JSON download;
+- a modal tonal context (`modal-collections-v1`) per score: ranked candidates across Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, harmonic and melodic minor, major and minor pentatonic, and blues collections, from duration- and confidence-weighted notes, bass emphasis, and the analysis chroma; ambiguity between relative modes, local regions (possible modulation or modal mixture), and a chromaticism score; the global analysis baseline is unchanged;
+- key signatures with mode in MusicXML and MIDI only when the tonal context reaches 0.50 confidence, with flat or sharp spelling to match and accidentals only where a note differs from the key;
 - a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
 - side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
@@ -456,7 +458,7 @@ local upload or supported URL
 → explicit interpretation action (parts, rhythm, drum structure, editable draft)
 → explicit harmony action (evidence-aware harmonic context)
 → optional tablature choices (bass line by default, guitar line chosen by the musician)
-→ explicit score action (measures, chord symbols, part labels, drum part, tablature, persisted draft score)
+→ explicit score action (measures, chord symbols, part labels, drum part, tablature, tonal context, persisted draft score)
 → bar-by-bar review against the recording, separate undoable corrections
 → corrected (or original) MIDI/MusicXML/JSON downloads
 → optional grouping under a song and arrangement, and side-by-side comparison of versions
@@ -743,14 +745,14 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Separation quality varies by recording and does not guarantee complete instrument isolation.
 - Optional runtime installation is separately managed and platform-specific; the base application does not install it automatically.
 - The model checkpoint is not bundled and requires explicit first-use authorization for local cache preparation.
-- Current global tonal estimation evaluates Ionian/major and Aeolian/minor profiles only.
+- The global analysis key estimate evaluates Ionian/major and Aeolian/minor profiles only; modal candidates come from the score's tonal context, which depends on transcription quality and treats relative modes as ambiguous when tonic evidence is weak. Tuning systems other than 12-tone equal temperament are not modelled.
 - Dense pop arrangements cannot yet be represented as reliable instrument parts.
 - URL ingestion depends on external platform availability and must only be used where the user is authorized to process the source.
 - Version grouping is manual; PopEx does not detect that two recordings are the same song, and the comparison does not align sections or bars across versions.
 
 ## Next planned cycle
 
-The next planned implementation stage is instrument-specific and modal-analysis accuracy (canonical step 9): extend tonal analysis beyond Ionian/Aeolian to ranked modal candidates (Dorian, Phrygian, Lydian, Mixolydian, Locrian, harmonic and melodic minor, pentatonic and blues collections) with local tonal regions, and improve per-stem transcription settings where evidence supports it, always reporting confidence and keeping broad honest labels when the audio does not support precision.
+The next planned implementation stage continues canonical step 9 with instrument-specific accuracy: per-stem pitch-transcription settings (range and voicing limits for the vocal and bass stems), sixteenth-note rhythm grids where onset evidence supports them, and accompaniment-reduction labelling for the other/accompaniment stem, always reporting confidence and keeping broad honest labels when the audio does not support precision.
 
 A later chord-oriented play-along view and any separately designed public-library features remain out of the current roadmap unless approved.
 

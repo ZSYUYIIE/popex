@@ -40,11 +40,12 @@ from app.score_sources import (
     validate_tablature_request,
 )
 from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consistent
+from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature
 
-# Schema 2 adds a separate percussion part and schema 3 a tablature layer;
-# schema-1 and schema-2 documents remain readable and downloadable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 3
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3})
+# Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
+# schema 4 the modal tonal context; earlier documents remain readable.
+SCORE_ARTIFACT_SCHEMA_VERSION = 4
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -84,6 +85,22 @@ _TOP_LEVEL_KEYS_V1 = frozenset(
 )
 _TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
 _TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {"tablature"}
+_TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V3 | {"tonality"}
+_CANDIDATE_KEYS = frozenset(
+    {"tonalCenter", "rootPitchClass", "collection", "displayName", "score", "confidence"}
+)
+_REGION_KEYS = frozenset(
+    {
+        "startMeasure",
+        "endMeasure",
+        "tonalCenter",
+        "rootPitchClass",
+        "collection",
+        "displayName",
+        "confidence",
+        "differsFromWhole",
+    }
+)
 _TAB_COUNT_KEYS = frozenset({"tabNotes", "fingeredTabNotes"})
 _TAB_INSTRUMENT_KEYS = frozenset(
     {
@@ -469,6 +486,91 @@ def _validate_tablature_summary(
         raise _fail("tablature.instruments does not match the request.")
 
 
+def _validate_candidate(value: Any, label: str, keys: frozenset[str]) -> Mapping[str, Any]:
+    item = _mapping(value, label)
+    _exact_keys(item, keys, label)
+    if item["collection"] not in COLLECTIONS:
+        raise _fail(f"{label}.collection is not supported.")
+    _integer(item["rootPitchClass"], f"{label}.rootPitchClass", 0, 11)
+    _text(item["tonalCenter"], f"{label}.tonalCenter", 3)
+    _text(item["displayName"], f"{label}.displayName", 64)
+    _number(item["confidence"], f"{label}.confidence", 0.0, 1.0)
+    return item
+
+
+def _validate_tonality(value: Any, measure_count: int) -> None:
+    tonality = _mapping(value, "tonality")
+    _exact_keys(
+        tonality,
+        frozenset(
+            {
+                "version",
+                "evidence",
+                "primaryCandidate",
+                "candidates",
+                "ambiguousWith",
+                "localRegions",
+                "chromaticismScore",
+                "keySignature",
+                "notes",
+            }
+        ),
+        "tonality",
+    )
+    if not isinstance(tonality["version"], str) or not _VERSION.fullmatch(tonality["version"]):
+        raise _fail("tonality.version is invalid.")
+    evidence = _mapping(tonality["evidence"], "tonality.evidence")
+    _exact_keys(
+        evidence,
+        frozenset({"noteCount", "weightedBeats", "bassSource", "usesAnalysisChroma"}),
+        "tonality.evidence",
+    )
+    _integer(evidence["noteCount"], "tonality.evidence.noteCount", 0, _MAX_NOTES)
+    _number(evidence["weightedBeats"], "tonality.evidence.weightedBeats", 0.0, 1e7)
+    if evidence["bassSource"] is not None:
+        _text(evidence["bassSource"], "tonality.evidence.bassSource", 64)
+    if type(evidence["usesAnalysisChroma"]) is not bool:
+        raise _fail("tonality.evidence.usesAnalysisChroma is invalid.")
+    candidates = _sequence(tonality["candidates"], "tonality.candidates", 8)
+    keys = _CANDIDATE_KEYS
+    for index, raw in enumerate(candidates):
+        candidate = _validate_candidate(raw, f"tonality.candidates[{index}]", keys)
+        _number(candidate["score"], f"tonality.candidates[{index}].score", -1e6, 1e6)
+    primary = tonality["primaryCandidate"]
+    if primary is None:
+        if candidates or tonality["keySignature"] is not None:
+            raise _fail("tonality without a primary candidate cannot rank candidates.")
+    else:
+        primary = _validate_candidate(primary, "tonality.primaryCandidate", keys)
+        if not candidates or dict(candidates[0]) != dict(primary):
+            raise _fail("tonality.primaryCandidate must lead the candidates.")
+    for index, name in enumerate(_sequence(tonality["ambiguousWith"], "tonality.ambiguousWith", 3)):
+        _text(name, f"tonality.ambiguousWith[{index}]", 64)
+    previous_start = -1
+    for index, raw in enumerate(_sequence(tonality["localRegions"], "tonality.localRegions", 32)):
+        label = f"tonality.localRegions[{index}]"
+        region = _validate_candidate(raw, label, _REGION_KEYS)
+        start = _integer(region["startMeasure"], f"{label}.startMeasure", 0, measure_count - 1)
+        end = _integer(region["endMeasure"], f"{label}.endMeasure", start, measure_count - 1)
+        if start <= previous_start or end < start:
+            raise _fail(f"{label} is out of order.")
+        previous_start = start
+        if type(region["differsFromWhole"]) is not bool:
+            raise _fail(f"{label}.differsFromWhole is invalid.")
+    if tonality["chromaticismScore"] is not None:
+        _number(tonality["chromaticismScore"], "tonality.chromaticismScore", 0.0, 1.0)
+    signature = tonality["keySignature"]
+    expected = (
+        key_signature(primary["rootPitchClass"], primary["collection"])
+        if primary is not None and primary["confidence"] >= KEY_SIGNATURE_MIN_CONFIDENCE
+        else None
+    )
+    if signature != expected:
+        raise _fail("tonality.keySignature does not follow the primary candidate.")
+    for index, note in enumerate(_sequence(tonality["notes"], "tonality.notes", 4)):
+        _text(note, f"tonality.notes[{index}]")
+
+
 def _validate_measures(
     value: Any,
     part_ids: set[str],
@@ -630,7 +732,9 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         raise _fail("Unsupported score document schema version.")
     _exact_keys(
         document,
-        {1: _TOP_LEVEL_KEYS_V1, 2: _TOP_LEVEL_KEYS_V2, 3: _TOP_LEVEL_KEYS_V3}[schema_version],
+        {1: _TOP_LEVEL_KEYS_V1, 2: _TOP_LEVEL_KEYS_V2, 3: _TOP_LEVEL_KEYS_V3, 4: _TOP_LEVEL_KEYS_V4}[
+            schema_version
+        ],
         "score document",
     )
     if document["artifactType"] != SCORE_ARTIFACT_TYPE:
@@ -652,7 +756,9 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     part_ids = _validate_parts(document["parts"])
     totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
     counts = _mapping(document["counts"], "counts")
-    count_keys = {1: _COUNT_KEYS_V1, 2: _COUNT_KEYS_V2, 3: _COUNT_KEYS_V3}[schema_version]
+    count_keys = {1: _COUNT_KEYS_V1, 2: _COUNT_KEYS_V2, 3: _COUNT_KEYS_V3, 4: _COUNT_KEYS_V3}[
+        schema_version
+    ]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
         _integer(counts[key], f"counts.{key}", 0, 1_000_000)
@@ -676,6 +782,8 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         )
         if (layers["tablature"] == "included") != bool(totals["fingeredTabNotes"]):
             raise _fail("The tablature layer status does not match its notes.")
+    if schema_version >= 4:
+        _validate_tonality(document["tonality"], len(document["measures"]))
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (

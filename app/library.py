@@ -89,6 +89,19 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
+def _tonal_summary(tonality: Any) -> dict[str, Any] | None:
+    if not isinstance(tonality, Mapping) or not isinstance(tonality.get("primaryCandidate"), Mapping):
+        return None
+    primary = tonality["primaryCandidate"]
+    return {
+        "displayName": primary.get("displayName"),
+        "confidence": primary.get("confidence"),
+        "regionsDiffering": sum(
+            1 for region in tonality.get("localRegions") or () if region.get("differsFromWhole")
+        ),
+    }
+
+
 def version_summary(
     record: Mapping[str, Any],
     document: Mapping[str, Any] | None,
@@ -128,6 +141,7 @@ def version_summary(
             "percussionHits": counts.get("percussionHits"),
             "fingeredTabNotes": counts.get("fingeredTabNotes"),
             "correctionsActive": corrections_active,
+            "tonalContext": _tonal_summary(document.get("tonality")),
             "chordsUsed": chords[:_MAX_CHORDS_LISTED],
             "chordsTruncated": len(chords) > _MAX_CHORDS_LISTED,
         },

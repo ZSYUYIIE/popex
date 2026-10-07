@@ -483,7 +483,7 @@ def test_score_without_interpretation_maps_raw_hit_kinds(tmp_path: Path) -> None
     job_id = create_drum_job(settings)
     job, details = build_and_load(settings, job_id)
 
-    assert details["version"] == "score-pipeline-v3"
+    assert details["version"] == "score-pipeline-v4"
     assert details["layers"]["percussion"]["status"] == "included"
     assert "raw hit-kind table" in details["layers"]["percussion"]["note"]
     assert details["percussion"]["voiceSource"] == "raw-hit-kinds"
@@ -606,6 +606,7 @@ def _downgrade_to_schema_one(document: dict) -> dict:
     legacy["builderVersion"] = "score-construction-v1"
     del legacy["percussion"]
     del legacy["tablature"]
+    del legacy["tonality"]
     del legacy["counts"]["tabNotes"]
     del legacy["counts"]["fingeredTabNotes"]
     for key in (
@@ -674,7 +675,7 @@ def test_schema_one_score_without_percussion_events_is_not_stale(tmp_path: Path)
     db.update_job(settings.database_path, job_id, score_version="score-pipeline-v1")
     from app.score_pipeline import score_outdated_reason
 
-    assert score_outdated_reason(db.get_job(settings.database_path, job_id)) is None
+    assert score_outdated_reason(db.get_job(settings.database_path, job_id)) != "drum-notation"
 
 
 @pytest.mark.parametrize(
@@ -690,7 +691,7 @@ def test_schema_one_score_without_percussion_events_is_not_stale(tmp_path: Path)
         lambda doc: doc["measures"][0]["percussionHits"].append(
             copy.deepcopy(doc["measures"][0]["percussionHits"][0])
         ),
-        lambda doc: doc.update(schemaVersion=4),
+        lambda doc: doc.update(schemaVersion=5),
     ],
 )
 def test_tampered_percussion_documents_are_rejected(tmp_path: Path, mutate) -> None:
