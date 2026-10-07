@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f4f5f7">
-  <title>PopEx — audio preparation and analysis</title>
+  <title>PopEx — version-specific sheet music</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
 </head>
@@ -12,16 +12,16 @@
   <a class="skip-link" href="#main-content">Skip to main content</a>
   <header class="app-header" role="banner">
     <div class="header-inner">
-      <a class="brand" href="/" aria-label="PopEx home"><span class="brand-mark" aria-hidden="true">P</span><span><strong>PopEx</strong><small>Audio preparation and analysis</small></span></a>
+      <a class="brand" href="/" aria-label="PopEx home"><span class="brand-mark" aria-hidden="true">P</span><span><strong>PopEx</strong><small>Version-specific sheet music</small></span></a>
       <span class="workspace-state"><span aria-hidden="true">●</span> Local workspace</span>
     </div>
   </header>
   <main id="main-content" class="page-shell">
     <section class="intro" aria-labelledby="page-title">
-      <p class="eyebrow">Analysis foundation</p>
-      <h1 id="page-title">Prepare a recording and inspect its first musical estimates.</h1>
-      <p>Upload local audio or video, or import a supported video link. PopEx retains the source, creates analysis-ready WAV audio, and estimates timing and tonal candidates.</p>
-      <p class="scope-note">The eventual product goal is version-specific sheet music, parts, tabs, drums, percussion, and chord symbols. This MVP does not yet generate notation or separated stems.</p>
+      <p class="eyebrow">Local, private, free</p>
+      <h1 id="page-title">Turn a specific recording into a reviewable draft score.</h1>
+      <p>Add local audio or video, or a supported video link. PopEx analyses timing and key, can separate stems, transcribes notes and drum hits, suggests chord symbols and tablature, and builds a draft score you can review against the recording, correct, and export as MusicXML or MIDI.</p>
+      <p class="scope-note">Results are AI-assisted drafts with honest warnings, not publication-ready engraving. Different recordings of the same song stay separate versions with their own scores.</p>
     </section>
     <section aria-labelledby="source-title">
       <div class="section-heading"><div><p class="section-kicker">New source</p><h2 id="source-title">Add media</h2><p>Both methods use the same preparation and analysis pipeline.</p></div></div>
@@ -54,8 +54,21 @@
     </section>
     <aside class="panel process-panel" aria-labelledby="process-title">
       <h2 id="process-title">Current workflow</h2>
-      <ol><li><strong>Prepare source</strong><span>Validate, retain, and normalize the media.</span></li><li><strong>Analyze audio</strong><span>Estimate signal quality, tempo, beats, tuning, and tonal candidates.</span></li><li><strong>Review results</strong><span>Download source artifacts, analysis WAV, metadata, and versioned analysis JSON.</span></li></ol>
+      <ol><li><strong>Prepare and analyse</strong><span>Keep the source, create analysis audio, estimate tempo, meter, tuning, and key.</span></li><li><strong>Transcribe</strong><span>Optionally separate stems, then detect notes, drum hits, parts, and harmony.</span></li><li><strong>Build the score</strong><span>Measures, chord symbols, drum part, and guitar or bass tablature.</span></li><li><strong>Review and correct</strong><span>Play each bar, fix mistakes, and export MusicXML or MIDI.</span></li><li><strong>Group versions</strong><span>File studio, live, and other versions under one song and compare them.</span></li></ol>
     </aside>
+    <section class="library-section" aria-labelledby="library-title">
+      <div class="section-heading"><div><p class="section-kicker">Private library</p><h2 id="library-title">Song library</h2><p>Group recordings of the same song by arrangement and version. Each version keeps its own analysis, score, and corrections; nothing is merged.</p></div></div>
+      <form id="song-form" class="panel song-form" aria-describedby="song-message">
+        <div class="song-fields">
+          <div><label for="song-title">Song title</label><input id="song-title" name="title" required maxlength="160" autocomplete="off"></div>
+          <div><label for="song-credits">Credits <span class="hint">(optional)</span></label><input id="song-credits" name="credits" maxlength="300" autocomplete="off" placeholder="Composer, original artist"></div>
+          <div><label for="song-arrangement">First arrangement <span class="hint">(optional)</span></label><input id="song-arrangement" name="arrangement" maxlength="120" autocomplete="off" placeholder="Main arrangement"></div>
+        </div>
+        <button id="song-button" type="submit">Add song</button>
+        <p id="song-message" class="form-message" role="status" aria-live="polite"></p>
+      </form>
+      <div id="library" class="library"><p class="detail-note">Loading the song library…</p></div>
+    </section>
     <section class="jobs-section" aria-labelledby="jobs-title">
       <div class="section-heading"><div><p class="section-kicker">Workspace</p><h2 id="jobs-title" tabindex="-1">Recent audio</h2><p>Active jobs update automatically. Backend stage, message, and progress are shown directly.</p></div><button id="refresh-button" class="secondary" type="button">Refresh</button></div>
       <p id="jobs-message" class="form-message" role="status" aria-live="polite"></p>

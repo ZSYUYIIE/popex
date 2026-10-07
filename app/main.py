@@ -113,6 +113,17 @@ from app.score_pipeline import (
     score_export_document,
     score_outdated_reason,
 )
+from app.library import (
+    VERSION_KINDS,
+    LibraryError,
+    clean_arrangement_name,
+    clean_credits,
+    clean_title,
+    clean_version,
+    compare_versions,
+    is_library_id,
+    version_summary,
+)
 from app.score_corrections import (
     MAX_OPERATIONS,
     CorrectionError,
@@ -271,6 +282,8 @@ _INTERNAL_HARMONY_FIELDS = frozenset(
     }
 )
 
+_VERSION_FIELDS = frozenset({"arrangement_id", "version_label", "version_kind"})
+
 _INTERNAL_SCORE_FIELDS = frozenset(
     {
         "score_status",
@@ -327,6 +340,35 @@ class CorrectionRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expectedRevision: StrictInt
+
+
+class CompositionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    credits: str | None = None
+    arrangementName: str | None = None
+
+
+class CompositionUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    credits: str | None = None
+
+
+class ArrangementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class JobVersionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    arrangementId: str | None
+    label: str | None = None
+    kind: str | None = None
 
 
 class TablatureChoiceRequest(BaseModel):
@@ -592,6 +634,206 @@ def create_app(
             serialize_job(job)
             for job in db.list_jobs(app_settings.database_path)
         ]
+
+    def _library_payload() -> dict[str, Any]:
+        snapshot = db.library_snapshot(app_settings.database_path)
+        versions: dict[str, list[dict[str, Any]]] = {}
+        unassigned = []
+        for recording in snapshot["recordings"]:
+            entry = {
+                "jobId": recording["id"],
+                "title": recording["title"] or recording["original_filename"] or "Untitled recording",
+                "label": recording["version_label"],
+                "kind": recording["version_kind"],
+                "scoreStatus": recording["score_status"] or "not_started",
+                "createdAt": recording["created_at"],
+            }
+            if recording["arrangement_id"]:
+                versions.setdefault(recording["arrangement_id"], []).append(entry)
+            else:
+                unassigned.append(entry)
+        arrangements: dict[str, list[dict[str, Any]]] = {}
+        for arrangement in snapshot["arrangements"]:
+            arrangements.setdefault(arrangement["composition_id"], []).append(
+                {
+                    "id": arrangement["id"],
+                    "name": arrangement["name"],
+                    "versions": versions.get(arrangement["id"], []),
+                    "url": f"/api/arrangements/{arrangement['id']}",
+                }
+            )
+        return {
+            "versionKinds": [{"id": key, "label": label} for key, label in VERSION_KINDS.items()],
+            "compositions": [
+                {
+                    "id": composition["id"],
+                    "title": composition["title"],
+                    "credits": composition["credits"],
+                    "createdAt": composition["created_at"],
+                    "arrangements": arrangements.get(composition["id"], []),
+                    "url": f"/api/compositions/{composition['id']}",
+                    "comparisonUrl": f"/api/compositions/{composition['id']}/comparison",
+                }
+                for composition in snapshot["compositions"]
+            ],
+            "unassigned": unassigned,
+        }
+
+    def _library_id(value: str, label: str) -> str:
+        if not is_library_id(value):
+            raise HTTPException(status_code=404, detail=f"{label} not found")
+        return value
+
+    @app.get("/api/library")
+    def get_library() -> dict:
+        return _library_payload()
+
+    @app.post("/api/compositions", status_code=status.HTTP_201_CREATED)
+    def create_composition(payload: CompositionCreateRequest) -> dict:
+        try:
+            title = clean_title(payload.title)
+            credits = clean_credits(payload.credits)
+            arrangement = (
+                clean_arrangement_name(payload.arrangementName)
+                if payload.arrangementName is not None and payload.arrangementName.strip()
+                else "Main arrangement"
+            )
+        except LibraryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        composition_id, arrangement_id = db.create_composition(
+            app_settings.database_path, title=title, credits=credits, arrangement_name=arrangement
+        )
+        return {"id": composition_id, "arrangementId": arrangement_id, "library": _library_payload()}
+
+    @app.patch("/api/compositions/{composition_id}")
+    def update_composition(composition_id: str, payload: CompositionUpdateRequest) -> dict:
+        _library_id(composition_id, "Song")
+        try:
+            title, credits = clean_title(payload.title), clean_credits(payload.credits)
+        except LibraryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if not db.update_composition(
+            app_settings.database_path, composition_id, title=title, credits=credits
+        ):
+            raise HTTPException(status_code=404, detail="Song not found")
+        return _library_payload()
+
+    @app.delete("/api/compositions/{composition_id}")
+    def delete_composition(composition_id: str) -> dict:
+        _library_id(composition_id, "Song")
+        outcome = db.delete_composition(app_settings.database_path, composition_id)
+        if outcome == "missing":
+            raise HTTPException(status_code=404, detail="Song not found")
+        if outcome == "in_use":
+            raise HTTPException(
+                status_code=409,
+                detail="Move or ungroup this song's recordings before deleting it.",
+            )
+        return _library_payload()
+
+    @app.post("/api/compositions/{composition_id}/arrangements", status_code=status.HTTP_201_CREATED)
+    def create_arrangement(composition_id: str, payload: ArrangementRequest) -> dict:
+        _library_id(composition_id, "Song")
+        try:
+            name = clean_arrangement_name(payload.name)
+        except LibraryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        arrangement_id = db.create_arrangement(app_settings.database_path, composition_id, name=name)
+        if arrangement_id is None:
+            raise HTTPException(status_code=404, detail="Song not found")
+        return {"id": arrangement_id, "library": _library_payload()}
+
+    @app.patch("/api/arrangements/{arrangement_id}")
+    def update_arrangement(arrangement_id: str, payload: ArrangementRequest) -> dict:
+        _library_id(arrangement_id, "Arrangement")
+        try:
+            name = clean_arrangement_name(payload.name)
+        except LibraryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if not db.update_arrangement(app_settings.database_path, arrangement_id, name=name):
+            raise HTTPException(status_code=404, detail="Arrangement not found")
+        return _library_payload()
+
+    @app.delete("/api/arrangements/{arrangement_id}")
+    def delete_arrangement(arrangement_id: str) -> dict:
+        _library_id(arrangement_id, "Arrangement")
+        outcome = db.delete_arrangement(app_settings.database_path, arrangement_id)
+        if outcome == "missing":
+            raise HTTPException(status_code=404, detail="Arrangement not found")
+        if outcome == "in_use":
+            raise HTTPException(
+                status_code=409,
+                detail="Move or ungroup this arrangement's recordings before deleting it.",
+            )
+        return _library_payload()
+
+    @app.put("/api/jobs/{job_id}/version")
+    def put_job_version(job_id: str, payload: JobVersionRequest) -> dict:
+        if payload.arrangementId is not None and not is_library_id(payload.arrangementId):
+            raise HTTPException(status_code=422, detail="The arrangement is not valid.")
+        try:
+            label, kind = clean_version(payload.label, payload.kind)
+        except LibraryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if payload.arrangementId is None:
+            label, kind = None, None  # an ungrouped recording keeps no version metadata
+        outcome = db.set_job_version(
+            app_settings.database_path,
+            job_id,
+            arrangement_id=payload.arrangementId,
+            label=label,
+            kind=kind,
+        )
+        if outcome == "missing_job":
+            raise HTTPException(status_code=404, detail="Job not found")
+        if outcome == "missing_arrangement":
+            raise HTTPException(status_code=422, detail="The arrangement does not exist.")
+        return serialize_job(db.get_job(app_settings.database_path, job_id) or {})
+
+    @app.get("/api/compositions/{composition_id}/comparison")
+    def compare_composition(composition_id: str) -> dict:
+        _library_id(composition_id, "Song")
+        composition = db.get_composition(app_settings.database_path, composition_id)
+        if composition is None:
+            raise HTTPException(status_code=404, detail="Song not found")
+        summaries = []
+        for record in db.list_composition_jobs(app_settings.database_path, composition_id):
+            document, stale, active, unreadable = None, False, 0, False
+            pointer = record.get("score_artifact_file_name")
+            if is_score_artifact_file_name(pointer):
+                try:
+                    saved = load_score_artifact(
+                        record["id"], app_settings, artifact_file_name=pointer
+                    )
+                    if saved is not None:
+                        document, state = _score_view_document(
+                            app_settings, record["id"], saved, "corrected"
+                        )
+                        active = state["activeCount"] if state else 0
+                        stale = (
+                            current_score_fingerprint(record) != saved["sourceFingerprint"]
+                            or score_outdated_reason(record) is not None
+                        )
+                except (ScoreArtifactError, HTTPException):
+                    logging.exception("Comparison could not read the score for job %s", record["id"])
+                    document, unreadable = None, True
+            summary = version_summary(record, document, stale=stale, corrections_active=active)
+            summary["arrangementId"] = record["arrangement_id"]
+            summary["arrangementName"] = record["arrangement_name"]
+            summary["scoreUnreadable"] = unreadable
+            summaries.append(summary)
+        return {
+            "composition": {
+                "id": composition["id"],
+                "title": composition["title"],
+                "credits": composition["credits"],
+            },
+            "note": (
+                "Each recording version keeps its own analysis, score, and corrections. "
+                "This comparison places their estimates side by side and never merges parts."
+            ),
+            "versions": compare_versions(summaries),
+        }
 
     @app.get("/api/jobs/{job_id}")
     def job(job_id: str) -> dict:
@@ -2531,6 +2773,13 @@ def _serialize_job(
         and key not in _INTERNAL_INTERPRETATION_FIELDS
         and key not in _INTERNAL_HARMONY_FIELDS
         and key not in _INTERNAL_SCORE_FIELDS
+        and key not in _VERSION_FIELDS
+    }
+    payload["version"] = {
+        "arrangementId": job.get("arrangement_id"),
+        "label": job.get("version_label"),
+        "kind": job.get("version_kind"),
+        "url": f"/api/jobs/{job['id']}/version",
     }
     payload["files"] = []
     job_dir = settings.exports_dir / job["id"]
