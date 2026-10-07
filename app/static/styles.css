@@ -721,3 +721,7 @@ body.has-review-player {
   width:auto;
   min-height:36px
 }
+.inline-link {
+  font-weight:600;
+  overflow-wrap:anywhere
+}

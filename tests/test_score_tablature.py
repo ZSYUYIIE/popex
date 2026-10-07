@@ -90,7 +90,7 @@ def test_default_tabs_only_the_bass_stem_line(tmp_path: Path) -> None:
         details = build(client, job_id)
         root = musicxml(client, job_id)
 
-    assert details["version"] == "score-pipeline-v4"
+    assert details["version"] == "score-pipeline-v5"
     tablature = details["tablature"]
     assert tablature["origin"] == "default"
     assert tablature["request"] == {"bass": "bass", "guitar": None}
@@ -113,7 +113,7 @@ def test_default_tabs_only_the_bass_stem_line(tmp_path: Path) -> None:
     assert any("outside the Standard 4-string" in warning for warning in details["warnings"])
 
     names = {part.get("id"): part.findtext("part-name") for part in root.findall("part-list/score-part")}
-    assert names == {"P1": "Other Pitched Lines", "P3": "Bass (draft, with TAB)"}
+    assert names == {"P1": "Pitched lines (full mix, draft)", "P3": "Bass (draft, with TAB)"}
     bass_part = root.find("part[@id='P3']")
     attributes = bass_part.find("measure/attributes")
     assert attributes.findtext("staves") == "2"
@@ -221,7 +221,7 @@ def test_choices_cannot_change_during_a_build_or_for_unknown_jobs(tmp_path: Path
     job_id = create_job(settings)
     with client_for(settings) as client:
         # Claim after startup: restart recovery fails attempts left from before.
-        assert db.claim_score_attempt(settings.database_path, job_id, score_version="score-pipeline-v4")
+        assert db.claim_score_attempt(settings.database_path, job_id, score_version="score-pipeline-v5")
         busy = client.put(f"/api/jobs/{job_id}/score/tablature", json={"bass": None, "guitar": "full_mix"})
         missing = client.put(f"/api/jobs/{'0' * 32}/score/tablature", json={"bass": None, "guitar": None})
         choices = client.get(f"/api/jobs/{job_id}/score/tablature").json()
@@ -283,6 +283,7 @@ def test_schema_two_scores_stay_readable_and_report_missing_tablature(tmp_path: 
     legacy["pipelineVersion"] = "score-pipeline-v2"
     del legacy["tablature"]
     del legacy["tonality"]
+    del legacy["scoreParts"]
     del legacy["counts"]["tabNotes"], legacy["counts"]["fingeredTabNotes"]
     for note in notes_of(legacy):
         del note["tab"]

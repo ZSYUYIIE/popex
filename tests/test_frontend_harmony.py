@@ -878,6 +878,7 @@ def test_no_final_score_export_or_voicing_claims() -> None:
         "function renderscoremeasures(",
         "function scorestatustext(",
         "function scorestagetext(",
+        "function renderscoreparts(",
     )
     for line in source.splitlines():
         if "musicxml" in line:

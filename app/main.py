@@ -1670,6 +1670,7 @@ def create_app(
         job_id: str,
         format: str | None = Query(None),
         view: str | None = Query(None),
+        part: str | None = Query(None),
     ) -> Response:
         if format not in _SCORE_DOWNLOADS:
             raise HTTPException(
@@ -1687,8 +1688,15 @@ def create_app(
             view_value,
         )
         filename, media_type = _SCORE_DOWNLOADS[format]
+        if part is not None:
+            if format != "musicxml" or part not in {item["id"] for item in _export_parts(job_id, document)}:
+                raise HTTPException(
+                    status_code=404,
+                    detail="That part is not in this score, or only MusicXML parts are available.",
+                )
+            filename = f"draft-score-{part}.musicxml"
         if view_value == "original":
-            stem, _, suffix = filename.partition(".")
+            stem, _, suffix = filename.rpartition(".")
             filename = f"{stem}-original.{suffix}"
         try:
             if format == "json":
@@ -1697,7 +1705,7 @@ def create_app(
                 content = score_to_midi_bytes(score_export_document(document))
             else:
                 content = score_to_musicxml_text(
-                    score_export_document(document)
+                    score_export_document(document), only_part=part
                 ).encode("utf-8")
         except (ScoreArtifactError, ScoreConstructionError):
             logging.exception("Saved score export failed for job %s", job_id)
@@ -3712,6 +3720,36 @@ def _score_view_document(
     return corrected, state
 
 
+def _export_parts(job_id: str, document: dict[str, Any]) -> list[dict[str, Any]]:
+    """List the parts a MusicXML export contains, each with a part download."""
+    base = f"/api/jobs/{job_id}/score/saved/download?format=musicxml&part="
+    parts: list[dict[str, Any]] = []
+    if "scoreParts" in document:
+        parts += [
+            {"id": item["id"], "name": item["name"], "kind": "pitched", "clef": item["clef"],
+             "noteCount": item["noteCount"]}
+            for item in document["scoreParts"]
+        ]
+    else:
+        notes = sum(
+            1 for measure in document["measures"] for note in measure["notes"]
+            if note.get("tab") is None
+        )
+        parts.append({"id": "combined", "name": "Draft pitched events", "kind": "pitched",
+                      "clef": "treble", "noteCount": notes})
+    for instrument in (document.get("tablature") or {}).get("instruments", ()):
+        if instrument["noteCount"]:
+            parts.append({"id": f"{instrument['instrument']}-tab", "name": f"{instrument['label']} with TAB",
+                          "kind": "tablature", "clef": "tab", "noteCount": instrument["noteCount"]})
+    counts = document["counts"]
+    if counts.get("notatedPercussionHits"):
+        parts.append({"id": "drums", "name": "Drum kit", "kind": "percussion", "clef": "percussion",
+                      "noteCount": counts["notatedPercussionHits"]})
+    for item in parts:
+        item["downloadUrl"] = base + item["id"]
+    return parts
+
+
 def _saved_score_payload(
     job_id: str,
     document: dict[str, Any],
@@ -3734,6 +3772,12 @@ def _saved_score_payload(
             0,
             "This score was built before tablature was available; rebuild it "
             "to add bass tablature for the separated bass line.",
+        )
+    elif outdated == "parts":
+        warnings.insert(
+            0,
+            "This score was built before separate instrument parts were available; "
+            "rebuild it to split lead vocal, accompaniment reduction and bass line.",
         )
     elif outdated == "tonal-context":
         warnings.insert(
@@ -3761,6 +3805,8 @@ def _saved_score_payload(
         "percussion": document.get("percussion"),
         "tablature": document.get("tablature"),
         "tonality": document.get("tonality"),
+        "scoreParts": document.get("scoreParts"),
+        "exportParts": _export_parts(job_id, document),
         "counts": document["counts"],
         "warnings": warnings,
         "exports": document["exports"],

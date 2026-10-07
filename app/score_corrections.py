@@ -34,6 +34,7 @@ from app.score_construction import (
     PERCUSSION_NOTATION,
     UNRESOLVED_PERCUSSION_VOICE,
     percussion_hit_counts,
+    plan_score_parts,
 )
 from app.tablature import TAB_INSTRUMENTS, positions_for, tab_position_is_consistent
 
@@ -430,6 +431,11 @@ def _recompute(document: dict[str, Any], edited_hits: set[tuple[str, int]], sche
                 "status": "omitted",
                 "note": "No tablature position remains after corrections.",
             }
+
+    if schema >= 5:
+        document["scoreParts"] = plan_score_parts(
+            [note for note in all_notes if note.get("tab") is None]
+        )
 
     if changed:
         warnings = ["Musician corrections are applied; the original prediction is kept and can be downloaded."]
