@@ -3735,6 +3735,12 @@ def _saved_score_payload(
             "This score was built before tablature was available; rebuild it "
             "to add bass tablature for the separated bass line.",
         )
+    elif outdated == "tonal-context":
+        warnings.insert(
+            0,
+            "This score was built before the modal tonal context was available; "
+            "rebuild it to add mode candidates and a key signature where supported.",
+        )
     if evidence_changed:
         warnings.insert(
             0,
@@ -3754,6 +3760,7 @@ def _saved_score_payload(
         "parts": document["parts"],
         "percussion": document.get("percussion"),
         "tablature": document.get("tablature"),
+        "tonality": document.get("tonality"),
         "counts": document["counts"],
         "warnings": warnings,
         "exports": document["exports"],

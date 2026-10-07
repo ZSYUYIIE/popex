@@ -51,7 +51,7 @@ from app.tablature import (
 )
 
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v3"
+SCORE_BUILDER_VERSION = "score-construction-v4"
 # Fixed MusicXML part identities: combined pitched part, drums, then one part
 # per fretted instrument (standard staff plus a synchronized TAB staff).
 _TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
@@ -86,6 +86,13 @@ _MAX_EVENT_WARNINGS = 128
 _DIVISIONS = 480  # ticks per quarter note for MIDI + MusicXML divisions
 
 _STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+_FLAT_STEP_BASE = ("C", "D", "D", "E", "E", "F", "G", "G", "A", "A", "B", "B")
+_FLAT_STEP_ALTER = (0, -1, 0, -1, 0, 0, -1, 0, -1, 0, -1, 0)
+_SHARP_ORDER = ("F", "C", "G", "D", "A", "E", "B")
+_KEY_MODES = frozenset(
+    {"major", "minor", "dorian", "phrygian", "lydian", "mixolydian", "aeolian", "ionian", "locrian"}
+)
+_MIDI_MINOR_MODES = frozenset({"minor", "aeolian"})
 _STEP_BASE = ("C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B")
 _STEP_ALTER = (0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0)
 _SAFE_SOURCE_KIND = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -686,6 +693,11 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
     microseconds = int(round(60_000_000 / tempo))
     track += b"\x00\xff\x51\x03" + struct.pack(">I", microseconds)[1:]
     track += b"\x00\xff\x58\x04" + bytes((meter, 2, 24, 8))
+    key = _parse_key_signature(document.get("keySignature"))
+    if key:
+        # MIDI knows only major/minor: modes use their parent major signature.
+        minor = 1 if key["mode"] in _MIDI_MINOR_MODES else 0
+        track += b"\x00\xff\x59\x02" + struct.pack(">bB", key["fifths"], minor)
     last_tick = 0
     for tick, payload in events:
         track += _midi_varlen(tick - last_tick) + payload
@@ -702,6 +714,43 @@ def _append_forward(parent: ET.Element, duration_ticks: int) -> None:
     ET.SubElement(forward, "duration").text = str(duration_ticks)
 
 
+def _parse_key_signature(value: Any) -> dict[str, Any] | None:
+    """Validate an optional ``{fifths, mode}`` key signature."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) != {"fifths", "mode"}:
+        raise ScoreConstructionError("Key signature is malformed.")
+    fifths = _integer(value["fifths"], "keySignature.fifths", minimum=-7, maximum=7)
+    if value["mode"] not in _KEY_MODES:
+        raise ScoreConstructionError("Key signature mode is unsupported.")
+    return {"fifths": fifths, "mode": value["mode"]}
+
+
+def _key_alterations(key: Mapping[str, Any] | None) -> dict[str, int]:
+    """Return the step alterations implied by a key signature."""
+    if not key:
+        return {}
+    fifths = key["fifths"]
+    if fifths >= 0:
+        return {step: 1 for step in _SHARP_ORDER[:fifths]}
+    return {step: -1 for step in tuple(reversed(_SHARP_ORDER))[: -fifths]}
+
+
+def _spell(midi_note: int, key: Mapping[str, Any] | None) -> tuple[str, int]:
+    """Spell with flats in flat keys and sharps otherwise."""
+    pitch_class = midi_note % 12
+    if key and key["fifths"] < 0:
+        return _FLAT_STEP_BASE[pitch_class], _FLAT_STEP_ALTER[pitch_class]
+    return _STEP_BASE[pitch_class], _STEP_ALTER[pitch_class]
+
+
+def _append_key(attrs: ET.Element, key: Mapping[str, Any] | None) -> None:
+    if key:
+        key_el = ET.SubElement(attrs, "key")
+        ET.SubElement(key_el, "fifths").text = str(key["fifths"])
+        ET.SubElement(key_el, "mode").text = key["mode"]
+
+
 def _musicxml_note(
     measure: ET.Element,
     *,
@@ -712,21 +761,23 @@ def _musicxml_note(
     tie_start: bool,
     staff: int = 1,
     technical: tuple[int, int] | None = None,
+    key: Mapping[str, Any] | None = None,
 ) -> None:
-    pitch_class = midi_note % 12
+    step, alter = _spell(midi_note, key)
+    # B# / Cb never arise from these spellings, so the octave is unchanged.
     note_el = ET.SubElement(measure, "note")
     pitch_el = ET.SubElement(note_el, "pitch")
-    ET.SubElement(pitch_el, "step").text = _STEP_BASE[pitch_class]
-    if _STEP_ALTER[pitch_class]:
-        ET.SubElement(pitch_el, "alter").text = "1"
+    ET.SubElement(pitch_el, "step").text = step
+    if alter:
+        ET.SubElement(pitch_el, "alter").text = str(alter)
     ET.SubElement(pitch_el, "octave").text = str(midi_note // 12 - 1)
     ET.SubElement(note_el, "duration").text = str(duration_ticks)
     tie_types = (["stop"] if tie_stop else []) + (["start"] if tie_start else [])
     for tie_type in tie_types:
         ET.SubElement(note_el, "tie", type=tie_type)
     ET.SubElement(note_el, "voice").text = str(voice)
-    if _STEP_ALTER[pitch_class] and technical is None:
-        ET.SubElement(note_el, "accidental").text = "sharp"
+    if technical is None and alter != _key_alterations(key).get(step, 0):
+        ET.SubElement(note_el, "accidental").text = {1: "sharp", -1: "flat", 0: "natural"}[alter]
     ET.SubElement(note_el, "staff").text = str(staff)
     if tie_types or technical is not None:
         notations = ET.SubElement(note_el, "notations")
@@ -830,6 +881,7 @@ def _write_measure_voices(
     measure_el: ET.Element,
     voices: Sequence[tuple[int, Sequence[Mapping[str, Any]], int, bool]],
     bar_ticks: int,
+    key: Mapping[str, Any] | None = None,
 ) -> None:
     """Write ``(voice, fragments, staff, with_tab)`` lanes separated by backups.
 
@@ -861,6 +913,7 @@ def _write_measure_voices(
                 tie_start=fragment["tieStart"],
                 staff=staff,
                 technical=(tab["string"], tab["fret"]) if with_tab else None,
+                key=key,
             )
             cursor_ticks = end_ticks
         _append_forward(measure_el, bar_ticks - cursor_ticks)
@@ -884,6 +937,7 @@ def _musicxml_tab_part(
     measure_count: int,
     meter: int,
     budget: list[int],
+    key: Mapping[str, Any] | None = None,
 ) -> None:
     """Write one fretted instrument: standard staff 1 and TAB staff 2.
 
@@ -906,6 +960,7 @@ def _musicxml_tab_part(
         if position == 0:
             attrs = ET.SubElement(measure_el, "attributes")
             ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
+            _append_key(attrs, key)
             time_el = ET.SubElement(attrs, "time")
             ET.SubElement(time_el, "beats").text = str(meter)
             ET.SubElement(time_el, "beat-type").text = "4"
@@ -936,7 +991,7 @@ def _musicxml_tab_part(
             (voice, fragments, 2, True)
             for voice, fragments in sorted(tab.get(position, {}).items())
         ]
-        _write_measure_voices(measure_el, lanes, bar_ticks)
+        _write_measure_voices(measure_el, lanes, bar_ticks, key)
 
 
 def _percussion_instrument_id(voice: str) -> str:
@@ -1056,6 +1111,7 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
         raise ScoreConstructionError("Score measure count is inconsistent.")
     if document.get("divisions") != _DIVISIONS:
         raise ScoreConstructionError("Unsupported score divisions.")
+    key = _parse_key_signature(document.get("keySignature"))
 
     all_notes: list[dict[str, Any]] = []
     event_ids: set[str] = set()
@@ -1167,6 +1223,7 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
         if position == 0:
             attrs = ET.SubElement(measure_el, "attributes")
             ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
+            _append_key(attrs, key)
             time_el = ET.SubElement(attrs, "time")
             ET.SubElement(time_el, "beats").text = str(meter)
             ET.SubElement(time_el, "beat-type").text = "4"
@@ -1192,6 +1249,7 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
                 for voice, fragments in sorted(fragments_by_measure.get(position, {}).items())
             ],
             bar_ticks,
+            key,
         )
 
     for instrument in tab_instruments:
@@ -1202,6 +1260,7 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
             measure_count=measure_count,
             meter=meter,
             budget=budget,
+            key=key,
         )
 
     if drum_voices:

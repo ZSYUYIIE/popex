@@ -67,6 +67,10 @@ from app.score_sources import (
     score_source_fingerprint,
     score_source_identity,
 )
+from app.tonal_context import (
+    KEY_SIGNATURE_MIN_CONFIDENCE,
+    build_tonal_context,
+)
 from app.tablature import (
     TAB_INSTRUMENT_ORDER,
     TAB_INSTRUMENTS,
@@ -76,9 +80,12 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v3"
+SCORE_PIPELINE_VERSION = "score-pipeline-v4"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
+PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
+    {"score-pipeline-v1", "score-pipeline-v2", "score-pipeline-v3"}
+)
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -124,7 +131,8 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     ``drum-notation``: a ``score-pipeline-v1`` score of a recording whose
     transcription holds percussion events. ``tablature``: a score from before
     tablature for a recording with separated stems, where the default bass
-    tablature applies. Such scores stay readable and downloadable.
+    tablature applies. ``tonal-context``: a score with notes from before the
+    modal tonal context. Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -137,6 +145,14 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         return "drum-notation"
     if version in PRE_TABLATURE_PIPELINE_VERSIONS and record.get("separation_status") == "completed":
         return "tablature"
+    notes = record.get("score_note_count")
+    if (
+        version in PRE_TONAL_CONTEXT_PIPELINE_VERSIONS
+        and isinstance(notes, int)
+        and not isinstance(notes, bool)
+        and notes > 0
+    ):
+        return "tonal-context"
     return None
 
 
@@ -150,6 +166,7 @@ def score_export_document(document: Mapping[str, Any]) -> dict[str, Any]:
         "divisions": timing["divisions"],
         "measureCount": len(document["measures"]),
         "measures": document["measures"],
+        "keySignature": (document.get("tonality") or {}).get("keySignature"),
     }
 
 
@@ -658,6 +675,13 @@ def construct_score(
     fingered_count = sum(item["assignedCount"] for item in tab_instruments)
     tab_note_count = sum(item["noteCount"] for item in tab_instruments)
 
+    progress("tonal_context", "Ranking scale and mode candidates.", 76)
+    analysis_tonality = evidence["analysis"].get("tonality")
+    chroma = analysis_tonality.get("chromaMean") if isinstance(analysis_tonality, Mapping) else None
+    tonality = build_tonal_context(
+        measures, chroma_mean=chroma if isinstance(chroma, list) else None
+    )
+
     progress("checking_exports", "Checking MIDI and MusicXML exports.", 80)
     timing = {
         "tempoBpm": built["tempoBpm"],
@@ -668,7 +692,9 @@ def construct_score(
         "tempoStable": evidence["tempoStable"],
         "meterConfidence": evidence["meterConfidence"],
     }
-    export_document = score_export_document({"timing": timing, "measures": measures})
+    export_document = score_export_document(
+        {"timing": timing, "measures": measures, "tonality": tonality}
+    )
     try:
         score_to_midi_bytes(export_document)
         score_to_musicxml_text(export_document)
@@ -758,6 +784,17 @@ def construct_score(
             "Tablature positions are suggestions in standard tuning; held notes, "
             "techniques and alternate fingerings need review."
         )
+    primary_tonality = tonality["primaryCandidate"]
+    if primary_tonality is not None:
+        warnings.append(
+            f"Tonal context suggests {primary_tonality['displayName']} "
+            f"({round(primary_tonality['confidence'] * 100)}% confidence); "
+            + (
+                "the key signature follows it, but it is a suggestion to review."
+                if tonality["keySignature"] is not None
+                else f"below {KEY_SIGNATURE_MIN_CONFIDENCE:.2f}, so no key signature is written."
+            )
+        )
     if len(warnings) > _MAX_WARNINGS:
         warnings = warnings[: _MAX_WARNINGS - 1] + [
             "Additional warnings were truncated; review the score carefully."
@@ -837,6 +874,7 @@ def construct_score(
         "timing": timing,
         "parts": parts,
         "percussion": percussion_summary,
+        "tonality": tonality,
         "tablature": {
             "version": TABLATURE_VERSION,
             "origin": tab_origin,
