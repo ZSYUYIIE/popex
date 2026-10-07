@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads and a structured review panel. Musicians can review each bar against the recording and correct the draft; corrections are stored separately from predictions and can be undone. It does **not** yet provide engraved notation or reliable instrument-specific parts beyond the separated bass line.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads and a structured review panel. Musicians can review each bar against the recording and correct the draft; corrections are stored separately from predictions and can be undone. Recordings of the same song can be grouped privately by arrangement and version and compared side by side. It does **not** yet provide engraved notation or reliable instrument-specific parts beyond the separated bass line.
 
 Implemented capabilities:
 
@@ -429,6 +429,8 @@ Implemented capabilities:
 - synchronized review: a persistent review player plays any bar of the recording (or of a separated stem) from the measure table and marks the bar that is playing;
 - musician corrections (pitch by semitone or octave, delete note, tablature position, chord symbol, drum voice, delete drum hit) kept as a versioned, revision-checked operation log in SQLite, separate from the immutable saved prediction; undo, redo, and an undoable reset; corrections survive score rebuilds by stable event IDs, and ones whose target disappeared are reported rather than dropped;
 - corrected and original views of the saved score and of every MIDI, MusicXML, and JSON download;
+- a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
+- side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony and scores;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
@@ -457,6 +459,7 @@ local upload or supported URL
 → explicit score action (measures, chord symbols, part labels, drum part, tablature, persisted draft score)
 → bar-by-bar review against the recording, separate undoable corrections
 → corrected (or original) MIDI/MusicXML/JSON downloads
+→ optional grouping under a song and arrangement, and side-by-side comparison of versions
 ```
 
 Supported upload formats: MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, and WebM.
@@ -578,6 +581,11 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `GET /api/jobs/{job_id}/score/corrections`
 - `POST /api/jobs/{job_id}/score/corrections` with strict JSON `{ "expectedRevision": n, "operation": {...} }` (`set_pitch`, `delete_note`, `set_tab`, `set_chord`, `set_drum_voice`, `delete_hit`)
 - `POST /api/jobs/{job_id}/score/corrections/undo`, `/redo`, and `/reset` with `{ "expectedRevision": n }`; a stale revision returns 409
+- `GET /api/library`
+- `POST /api/compositions` with `{ "title", "credits"?, "arrangementName"? }`; `PATCH` and `DELETE /api/compositions/{id}` (delete is refused while recordings are grouped under the song)
+- `POST /api/compositions/{id}/arrangements` with `{ "name" }`; `PATCH` and `DELETE /api/arrangements/{id}`
+- `PUT /api/jobs/{job_id}/version` with `{ "arrangementId": id | null, "label"?, "kind"? }`
+- `GET /api/compositions/{id}/comparison`
 - `GET /api/jobs/{job_id}/score/tablature`
 - `PUT /api/jobs/{job_id}/score/tablature` with strict JSON `{ "bass": line | null, "guitar": line | null }`, where a line is `vocals`, `bass`, `other`, or `full_mix`; rejected while a score is being built
 - `GET /api/jobs/{job_id}/files/{file_name}`
@@ -738,12 +746,13 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Current global tonal estimation evaluates Ionian/major and Aeolian/minor profiles only.
 - Dense pop arrangements cannot yet be represented as reliable instrument parts.
 - URL ingestion depends on external platform availability and must only be used where the user is authorized to process the source.
+- Version grouping is manual; PopEx does not detect that two recordings are the same song, and the comparison does not align sections or bars across versions.
 
 ## Next planned cycle
 
-The next planned implementation stage is private arrangement and recording-version grouping (canonical step 8): group local recordings under a composition and arrangement, label each recording version, keep every version's analysis, score, and corrections independent, and compare versions side by side (tempo, key, structure, and score statistics) without ever combining their parts.
+The next planned implementation stage is instrument-specific and modal-analysis accuracy (canonical step 9): extend tonal analysis beyond Ionian/Aeolian to ranked modal candidates (Dorian, Phrygian, Lydian, Mixolydian, Locrian, harmonic and melodic minor, pentatonic and blues collections) with local tonal regions, and improve per-stem transcription settings where evidence supports it, always reporting confidence and keeping broad honest labels when the audio does not support precision.
 
-That stage must keep versions separate, remain local-only and private, and avoid adding public-library, account, or hosted features. Instrument-specific and modal-analysis accuracy improvements follow in canonical order.
+A later chord-oriented play-along view and any separately designed public-library features remain out of the current roadmap unless approved.
 
 ## License
 

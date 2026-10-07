@@ -211,6 +211,9 @@ NEW_COLUMNS: dict[str, str] = {
     ),
     "score_error": "TEXT",
     "score_tablature_request": "TEXT",
+    "arrangement_id": "TEXT",
+    "version_label": "TEXT",
+    "version_kind": "TEXT",
 }
 
 
@@ -393,6 +396,34 @@ def init_database(database_path: Path) -> None:
                 connection.execute(
                     f"ALTER TABLE jobs ADD COLUMN {column} {definition}"
                 )
+        # Private song library: grouping metadata only. Each recording version
+        # (job) keeps its own artifacts; nothing here merges their data.
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS compositions (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                credits TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS arrangements (
+                id TEXT PRIMARY KEY,
+                composition_id TEXT NOT NULL REFERENCES compositions(id),
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS arrangements_by_composition "
+            "ON arrangements(composition_id)"
+        )
         # Musician corrections are kept apart from predictions: one versioned
         # operation log per job, replayed onto the saved score when read.
         connection.execute(
@@ -1532,6 +1563,181 @@ def _score_write_transaction(
             (job_id,),
         ).fetchone()
         yield connection, (dict(row) if row is not None else None)
+
+
+def create_composition(
+    database_path: Path,
+    *,
+    title: str,
+    credits: str | None,
+    arrangement_name: str,
+) -> tuple[str, str]:
+    """Create a song with its first arrangement; return both IDs."""
+    composition_id, arrangement_id, now = uuid4().hex, uuid4().hex, utc_now()
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "INSERT INTO compositions (id, title, credits, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (composition_id, title, credits, now, now),
+        )
+        connection.execute(
+            "INSERT INTO arrangements (id, composition_id, name, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (arrangement_id, composition_id, arrangement_name, now, now),
+        )
+    return composition_id, arrangement_id
+
+
+def update_composition(
+    database_path: Path,
+    composition_id: str,
+    *,
+    title: str,
+    credits: str | None,
+) -> bool:
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            "UPDATE compositions SET title = ?, credits = ?, updated_at = ? WHERE id = ?",
+            (title, credits, utc_now(), composition_id),
+        )
+    return cursor.rowcount == 1
+
+
+def delete_composition(database_path: Path, composition_id: str) -> str:
+    """Delete an empty song and its arrangements: ``deleted``/``missing``/``in_use``."""
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM compositions WHERE id = ?", (composition_id,)
+        ).fetchone() is None:
+            return "missing"
+        if connection.execute(
+            "SELECT 1 FROM jobs WHERE arrangement_id IN "
+            "(SELECT id FROM arrangements WHERE composition_id = ?) LIMIT 1",
+            (composition_id,),
+        ).fetchone() is not None:
+            return "in_use"
+        connection.execute("DELETE FROM arrangements WHERE composition_id = ?", (composition_id,))
+        connection.execute("DELETE FROM compositions WHERE id = ?", (composition_id,))
+    return "deleted"
+
+
+def create_arrangement(database_path: Path, composition_id: str, *, name: str) -> str | None:
+    arrangement_id, now = uuid4().hex, utc_now()
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM compositions WHERE id = ?", (composition_id,)
+        ).fetchone() is None:
+            return None
+        connection.execute(
+            "INSERT INTO arrangements (id, composition_id, name, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (arrangement_id, composition_id, name, now, now),
+        )
+        connection.execute(
+            "UPDATE compositions SET updated_at = ? WHERE id = ?", (now, composition_id)
+        )
+    return arrangement_id
+
+
+def update_arrangement(database_path: Path, arrangement_id: str, *, name: str) -> bool:
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            "UPDATE arrangements SET name = ?, updated_at = ? WHERE id = ?",
+            (name, utc_now(), arrangement_id),
+        )
+    return cursor.rowcount == 1
+
+
+def delete_arrangement(database_path: Path, arrangement_id: str) -> str:
+    """Delete an arrangement without recordings: ``deleted``/``missing``/``in_use``."""
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute(
+            "SELECT 1 FROM arrangements WHERE id = ?", (arrangement_id,)
+        ).fetchone() is None:
+            return "missing"
+        if connection.execute(
+            "SELECT 1 FROM jobs WHERE arrangement_id = ? LIMIT 1", (arrangement_id,)
+        ).fetchone() is not None:
+            return "in_use"
+        connection.execute("DELETE FROM arrangements WHERE id = ?", (arrangement_id,))
+    return "deleted"
+
+
+def set_job_version(
+    database_path: Path,
+    job_id: str,
+    *,
+    arrangement_id: str | None,
+    label: str | None,
+    kind: str | None,
+) -> str:
+    """Assign one recording version: ``saved``/``missing_job``/``missing_arrangement``."""
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone() is None:
+            return "missing_job"
+        if arrangement_id is not None and connection.execute(
+            "SELECT 1 FROM arrangements WHERE id = ?", (arrangement_id,)
+        ).fetchone() is None:
+            return "missing_arrangement"
+        connection.execute(
+            "UPDATE jobs SET arrangement_id = ?, version_label = ?, version_kind = ?, "
+            "updated_at = ? WHERE id = ?",
+            (arrangement_id, label, kind, utc_now(), job_id),
+        )
+    return "saved"
+
+
+def library_snapshot(database_path: Path) -> dict[str, list[dict[str, Any]]]:
+    """Return songs, arrangements, and the grouping fields of every recording."""
+    with connect(database_path) as connection:
+        compositions = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id, title, credits, created_at, updated_at FROM compositions "
+                "ORDER BY title COLLATE NOCASE, created_at"
+            )
+        ]
+        arrangements = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id, composition_id, name, created_at FROM arrangements "
+                "ORDER BY created_at, name COLLATE NOCASE"
+            )
+        ]
+        recordings = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id, title, original_filename, arrangement_id, version_label, "
+                "version_kind, created_at, score_status FROM jobs ORDER BY created_at"
+            )
+        ]
+    return {"compositions": compositions, "arrangements": arrangements, "recordings": recordings}
+
+
+def get_composition(database_path: Path, composition_id: str) -> dict[str, Any] | None:
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT id, title, credits FROM compositions WHERE id = ?", (composition_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_composition_jobs(database_path: Path, composition_id: str) -> list[dict[str, Any]]:
+    """Return every recording version of one song, each as its own job row."""
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT jobs.*, arrangements.name AS arrangement_name FROM jobs "
+            "JOIN arrangements ON arrangements.id = jobs.arrangement_id "
+            "WHERE arrangements.composition_id = ? "
+            "ORDER BY arrangements.created_at, jobs.created_at",
+            (composition_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def get_score_corrections(database_path: Path, job_id: str) -> str | None:
