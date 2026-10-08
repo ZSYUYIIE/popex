@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -312,7 +313,8 @@ def test_job_card_includes_score_panel_and_polls_while_building() -> None:
     styles = STYLES_CSS.read_text(encoding="utf-8")
     assert ".score-measures table" in styles and ".table-scroll" in styles
     # The scroll box must not widen the page on narrow screens.
-    assert ".table-scroll {\n  overflow-x:auto;\n  width:0;\n  min-width:100%\n}" in styles
+    rule = re.search(r"\.table-scroll\s*\{([^}]*)\}", styles).group(1).replace(" ", "")
+    assert "overflow-x:auto" in rule and "width:0" in rule and "min-width:100%" in rule
 
 
 def test_upstream_work_in_progress_outranks_saved_score_state() -> None:
@@ -428,3 +430,81 @@ console.log(JSON.stringify({{html}}));
     assert "This score is out of date." in result["html"]
     assert "built before drum notation was available" in result["html"]
     assert ">Rebuild score</button>" in result["html"]
+
+
+ROLL_DETAIL = {
+    **DETAIL,
+    "timing": {"tempoBpm": 120, "beatsPerMeasure": 4, "meterSource": "analysis"},
+    "measures": [
+        {"measureIndex": 0, "chordSymbol": "Am", "harmony": [],
+         "notes": [
+             {"id": "v", "noteName": "A4", "midiNote": 69, "quantizedBeat": 0, "quantizedDurationBeats": 1,
+              "confidence": 0.9, "sourceKind": "vocals"},
+             {"id": "b", "noteName": "A2", "midiNote": 45, "quantizedBeat": 0, "quantizedDurationBeats": 2,
+              "confidence": 0.4, "sourceKind": "bass"},
+         ],
+         "percussionHits": [
+             {"broadVoice": "low_drum", "quantizedBeat": 0, "notation": "notated"},
+             {"broadVoice": "unresolved_percussion", "quantizedBeat": 1, "notation": "notated"},
+             {"broadVoice": "mid_drum", "quantizedBeat": 2, "notation": "collapsed"},
+         ]},
+        {"measureIndex": 1, "chordSymbol": None, "harmony": [], "notes": [], "percussionHits": []},
+    ],
+}
+
+
+def test_score_panel_draws_a_piano_roll_from_saved_data() -> None:
+    result = _run_node(
+        f"""
+t.setDetail("roll", {json.dumps(ROLL_DETAIL)});
+const html=t.renderScore({{id:"roll",score:{json.dumps(SUMMARY)}}});
+console.log(JSON.stringify({{html}}));
+"""
+    )
+    html = result["html"]
+    assert '<div class="score-roll roll-frame" data-review-job="roll"' in html
+    assert 'role="region" aria-label="Piano roll, scroll sideways to see later bars" tabindex="0"' in html
+    assert 'aria-label="Piano roll of 2 bars: 2 notes (Lead vocal, Bass), 2 drum hits."' in html
+    assert 'class="roll-note vocal"' in html and 'class="roll-note bass low"' in html
+    assert '<text class="roll-chord"' in html and ">Am</text>" in html
+    assert 'class="roll-hit kick"' in html and 'class="roll-hit unresolved"' in html
+    assert html.count("class=\"roll-hit") == 2  # collapsed duplicates are not drawn twice
+    assert "<span><i class=\"vocal\" aria-hidden=\"true\"></i>Lead vocal</span>" in html
+    # The roll comes before the long text review sections.
+    assert html.index("score-roll") < html.index("score-insights")
+
+
+def test_hero_roll_uses_a_labelled_demo_until_a_real_score_has_enough_notes() -> None:
+    result = _run_node(
+        f"""
+t.setDetail("tiny", {json.dumps(ROLL_DETAIL)});
+renderHeroRoll([{{id:"tiny",title:"Tiny take"}}]);
+const demo=t.getElement("#hero-roll").innerHTML, demoCaption=t.getElement("#hero-roll-caption").textContent;
+const rich=JSON.parse(JSON.stringify({json.dumps(ROLL_DETAIL)}));
+rich.createdAt="2026-10-01T00:00:00+00:00";
+for(let i=0;i<20;i++)rich.measures[0].notes.push({{id:"n"+i,midiNote:60+(i%12),quantizedBeat:i%4,quantizedDurationBeats:.5,confidence:.9,sourceKind:"other"}});
+t.setDetail("rich", rich);
+renderHeroRoll([{{id:"rich",title:"Studio take"}}]);
+console.log(JSON.stringify({{demo,demoCaption,real:t.getElement("#hero-roll").innerHTML,
+  caption:t.getElement("#hero-roll-caption").textContent}}));
+"""
+    )
+    assert "Demo phrase" in result["demo"] and "synthetic demo phrase" in result["demoCaption"]
+    assert "Studio take" in result["real"] and 'preserveAspectRatio="xMidYMid meet"' in result["real"]
+    assert result["caption"] == "From the draft score of “Studio take”. The playhead follows its tempo."
+
+
+def test_theme_picker_and_assets_are_wired() -> None:
+    template = (ROOT / "app" / "templates" / "index.html").read_text(encoding="utf-8")
+    styles = STYLES_CSS.read_text(encoding="utf-8")
+    assert '<select id="theme-select" aria-label="Colour theme">' in template
+    assert 'localStorage.getItem("popex-theme")' in template
+    assert ':root[data-theme="light"]' in styles and "@media (prefers-color-scheme: light)" in styles
+    assert "@media (prefers-reduced-motion: reduce)" in styles
+    for font in ("Geist-Variable.woff2", "GeistMono-Variable.woff2", "BricolageGrotesque-latin.woff2"):
+        assert f"/static/fonts/{font}" in styles
+        assert (ROOT / "app" / "static" / "fonts" / font).is_file()
+    assert (ROOT / "app" / "static" / "fonts" / "LICENSE-Geist-OFL.txt").is_file()
+    assert (ROOT / "app" / "static" / "fonts" / "LICENSE-BricolageGrotesque-OFL.txt").is_file()
+    visible = template + (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "\u2014" not in visible and "\u2013" not in visible  # no em or en dashes in UI copy

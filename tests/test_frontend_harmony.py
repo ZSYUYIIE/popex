@@ -367,7 +367,7 @@ console.log(JSON.stringify({html}));
     assert "Used editable-part context" in html
     assert "C &lt;major&gt;" in html
     assert "advisory" in html.lower()
-    assert "raw 0.125–0.875 s" in html
+    assert "raw 0.125-0.875 s" in html
     assert "Beat 3" in html
     assert "<strong>C</strong>" in html
     assert "Major" in html
