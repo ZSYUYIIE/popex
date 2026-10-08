@@ -308,7 +308,7 @@ console.log(JSON.stringify({{requested,failures,loaded,afterRebuild,gone:t.hasDe
 
 def test_job_card_includes_score_panel_and_polls_while_building() -> None:
     source = APP_JS.read_text(encoding="utf-8")
-    assert "${renderHarmony(job)}${renderScore(job)}${renderFiles(files)}" in source
+    assert '["harmony",renderHarmony(job)],["score",renderScore(job)],["files",renderFiles(files)]' in source
     assert 'job.score?.status==="processing"' in source
     styles = STYLES_CSS.read_text(encoding="utf-8")
     assert ".score-measures table" in styles and ".table-scroll" in styles
@@ -501,10 +501,10 @@ def test_theme_picker_and_assets_are_wired() -> None:
     assert 'localStorage.getItem("popex-theme")' in template
     assert ':root[data-theme="light"]' in styles and "@media (prefers-color-scheme: light)" in styles
     assert "@media (prefers-reduced-motion: reduce)" in styles
-    for font in ("Geist-Variable.woff2", "GeistMono-Variable.woff2", "BricolageGrotesque-latin.woff2"):
+    for font in ("Geist-Variable.woff2", "GeistMono-Variable.woff2"):
         assert f"/static/fonts/{font}" in styles
         assert (ROOT / "app" / "static" / "fonts" / font).is_file()
     assert (ROOT / "app" / "static" / "fonts" / "LICENSE-Geist-OFL.txt").is_file()
-    assert (ROOT / "app" / "static" / "fonts" / "LICENSE-BricolageGrotesque-OFL.txt").is_file()
+    assert not list((ROOT / "app" / "static" / "fonts").glob("Bricolage*"))  # unused fonts are not shipped
     visible = template + (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
     assert "\u2014" not in visible and "\u2013" not in visible  # no em or en dashes in UI copy
