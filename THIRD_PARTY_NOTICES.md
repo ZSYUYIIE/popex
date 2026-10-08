@@ -23,6 +23,18 @@ The current dependency declarations are maintained in `pyproject.toml`.
 
 The `fastapi[standard]` extra and other packages introduce transitive dependencies. Their licenses must also be captured when producing a distributable lockfile, container, installer, or binary release.
 
+## Bundled web fonts
+
+The web interface self-hosts these fonts from `app/static/fonts/`. They are unmodified files from the listed packages and are licensed under the SIL Open Font License 1.1, not under PopEx's MIT License. The full license texts ship next to the fonts.
+
+| Font | Files | Source package and version | License | Notice file |
+| --- | --- | --- | --- | --- |
+| Geist (sans, variable) | `Geist-Variable.woff2` | npm `geist` 1.7.2 (`dist/fonts/geist-sans`); Copyright (c) 2023 Vercel, in collaboration with basement.studio | SIL OFL 1.1 | `app/static/fonts/LICENSE-Geist-OFL.txt` |
+| Geist Mono (variable) | `GeistMono-Variable.woff2` | npm `geist` 1.7.2 (`dist/fonts/geist-mono`); same copyright | SIL OFL 1.1 | `app/static/fonts/LICENSE-Geist-OFL.txt` |
+| Bricolage Grotesque (variable, latin and latin-ext subsets) | `BricolageGrotesque-latin.woff2`, `BricolageGrotesque-latin-ext.woff2` | npm `@fontsource-variable/bricolage-grotesque` 5.3.0 (`files/*-standard-normal.woff2`); Copyright 2022 The Bricolage Grotesque Project Authors | SIL OFL 1.1 | `app/static/fonts/LICENSE-BricolageGrotesque-OFL.txt` |
+
+The OFL allows bundling and redistribution with software as long as the fonts are not sold by themselves and the license accompanies them. Neither license declares a Reserved Font Name. If the fonts are modified (for example re-subset), the OFL renaming and notice rules apply.
+
 ## External runtime tools
 
 | Component | Use | Licensing note |

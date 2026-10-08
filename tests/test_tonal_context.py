@@ -232,7 +232,7 @@ console.log(JSON.stringify({{html,stale}}));
     assert "<strong>Tonal context</strong>" in html
     assert "Most likely: <strong>D Dorian</strong> <span class=\"detail-note\">(72% confidence)</span> · key signature written" in html
     assert "Other candidates: A Minor pentatonic (31%)" in html
-    assert "Bars 9–16: G Mixolydian" in html and "differs from the whole score" in html
+    assert "Bars 9-16: G Mixolydian" in html and "differs from the whole score" in html
     assert "8% of note time falls outside the suggested collection." in html
     assert "built before mode and key suggestions were available" in result["stale"]
 

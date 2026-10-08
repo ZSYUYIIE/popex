@@ -435,6 +435,7 @@ Implemented capabilities:
 - per-part MusicXML downloads for every pitched, tablature, and drum part;
 - a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
 - side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
+- a studio-style web interface: stage-dark by default with a designed light theme (System, Dark, or Light, remembered per browser), self-hosted OFL fonts (Bricolage Grotesque, Geist, Geist Mono), and a live piano roll drawn from saved score data (notes coloured by part, chord and drum lanes, bar numbers) in the hero and in every score panel, where its playhead follows the review player; motion respects reduced-motion settings;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony and scores;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;

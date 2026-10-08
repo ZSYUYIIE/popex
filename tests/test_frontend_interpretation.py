@@ -296,7 +296,7 @@ console.log(JSON.stringify({html}));
     assert "<dt>Voices</dt><dd>3</dd>" in html
     assert "<dt>Unassigned pitched</dt><dd>1</dd>" in html
     assert "Lead &lt;voice&gt;" in html
-    assert "raw 0.125–0.500 s" in html
+    assert "raw 0.125-0.500 s" in html
     assert "interpreted 0.250 s + 0.250 s" in html
     assert "C#4" in html
     assert "Unassigned" in html

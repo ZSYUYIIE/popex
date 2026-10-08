@@ -1,10 +1,26 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f4f5f7">
-  <title>PopEx — version-specific sheet music</title>
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0c0d0f">
+  <meta name="description" content="PopEx drafts sheet music, chord symbols, tabs, and drum parts from the exact recording you hear, on your own computer.">
+  <title>PopEx: sheet music from the recording you hear</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/static/fonts/BricolageGrotesque-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/static/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    (function () {
+      var root = document.documentElement;
+      root.classList.add("js");
+      try {
+        var stored = localStorage.getItem("popex-theme");
+        if (stored === "light") root.setAttribute("data-theme", "light");
+        else if (stored === "system") root.removeAttribute("data-theme");
+      } catch (error) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
 </head>
@@ -12,52 +28,90 @@
   <a class="skip-link" href="#main-content">Skip to main content</a>
   <header class="app-header" role="banner">
     <div class="header-inner">
-      <a class="brand" href="/" aria-label="PopEx home"><span class="brand-mark" aria-hidden="true">P</span><span><strong>PopEx</strong><small>Version-specific sheet music</small></span></a>
-      <span class="workspace-state"><span aria-hidden="true">●</span> Local workspace</span>
+      <a class="brand" href="/" aria-label="PopEx home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">PopEx</span>
+      </a>
+      <nav class="site-nav" aria-label="Sections">
+        <a href="#add">Add</a>
+        <a href="#recordings">Recordings</a>
+        <a href="#library-title">Library</a>
+        <a href="#how">How it works</a>
+      </nav>
+      <span class="workspace-state">Runs on this computer</span>
     </div>
   </header>
+
   <main id="main-content" class="page-shell">
-    <section class="intro" aria-labelledby="page-title">
-      <p class="eyebrow">Local, private, free</p>
-      <h1 id="page-title">Turn a specific recording into a reviewable draft score.</h1>
-      <p>Add local audio or video, or a supported video link. PopEx analyses timing and key, can separate stems, transcribes notes and drum hits, suggests chord symbols and tablature, and builds a draft score you can review against the recording, correct, and export as MusicXML or MIDI.</p>
-      <p class="scope-note">Results are AI-assisted drafts with honest warnings, not publication-ready engraving. Different recordings of the same song stay separate versions with their own scores.</p>
+    <section class="hero" aria-labelledby="page-title">
+      <div class="hero-copy">
+        <h1 id="page-title">Sheet music from the recording you <span class="hero-accent">actually</span> hear.</h1>
+        <p class="hero-sub">PopEx drafts the score, chords, tabs, and drums of that version, then you correct it by ear.</p>
+        <div class="hero-actions">
+          <a class="button-link" href="#add">Add a recording</a>
+          <a class="text-link" href="#how">How it works</a>
+        </div>
+      </div>
+      <figure class="hero-visual">
+        <div id="hero-roll" class="roll-frame hero-roll" role="group" aria-label="Piano roll preview"></div>
+        <figcaption id="hero-roll-caption" class="roll-caption">Example piano roll from a synthetic demo phrase.</figcaption>
+      </figure>
     </section>
-    <section aria-labelledby="source-title">
-      <div class="section-heading"><div><p class="section-kicker">New source</p><h2 id="source-title">Add media</h2><p>Both methods use the same preparation and analysis pipeline.</p></div></div>
+
+    <section id="add" class="add-section reveal" aria-labelledby="source-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="source-title">Add a recording</h2>
+          <p>One recording is one version. A studio cut, a live take, and a cover each get their own score.</p>
+        </div>
+      </div>
       <div class="source-grid">
-        <section class="panel" aria-labelledby="upload-title">
-          <h3 id="upload-title">Local file</h3>
+        <section class="panel upload-panel" aria-labelledby="upload-title">
+          <h3 id="upload-title">From this computer</h3>
           <form id="upload-form" aria-describedby="upload-guidance upload-message">
             <label id="drop-zone" class="drop-zone" for="media-file">
-              <span class="drop-icon" aria-hidden="true">＋</span>
+              <span class="drop-icon" aria-hidden="true"></span>
               <strong id="drop-title">Choose a file or drop it here</strong>
               <span id="selected-file" aria-live="polite">No file selected</span>
               <input id="media-file" name="file" type="file" required accept=".mp3,.wav,.flac,.m4a,.aac,.ogg,.mp4,.mov,.webm,audio/*,video/*">
             </label>
-            <p id="upload-guidance" class="hint">MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, or WebM. Maximum 500 MB.</p>
+            <p id="upload-guidance" class="hint">MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV, or WebM, up to 500 MB.</p>
             <button id="upload-button" type="submit">Upload and prepare</button>
             <p id="upload-message" class="form-message" role="status" aria-live="polite"></p>
           </form>
         </section>
-        <section class="panel" aria-labelledby="url-title">
-          <h3 id="url-title">Video link</h3>
+        <section class="panel url-panel" aria-labelledby="url-title">
+          <h3 id="url-title">From a video link</h3>
           <form id="extract-form" aria-describedby="url-guidance form-message">
             <label for="video-url">Supported video URL</label>
             <input id="video-url" name="url" type="url" required autocomplete="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=...">
-            <p id="url-guidance" class="hint">Use one public, non-live source you are authorized to process.</p>
+            <p id="url-guidance" class="hint">Use one public, non-live source you are allowed to process.</p>
             <button id="submit-button" type="submit">Prepare audio</button>
             <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
           </form>
         </section>
       </div>
     </section>
-    <aside class="panel process-panel" aria-labelledby="process-title">
-      <h2 id="process-title">Current workflow</h2>
-      <ol><li><strong>Prepare and analyse</strong><span>Keep the source, create analysis audio, estimate tempo, meter, tuning, and key.</span></li><li><strong>Transcribe</strong><span>Optionally separate stems, then detect notes, drum hits, parts, and harmony.</span></li><li><strong>Build the score</strong><span>Measures, chord symbols, drum part, and guitar or bass tablature.</span></li><li><strong>Review and correct</strong><span>Play each bar, fix mistakes, and export MusicXML or MIDI.</span></li><li><strong>Group versions</strong><span>File studio, live, and other versions under one song and compare them.</span></li></ol>
-    </aside>
-    <section class="library-section" aria-labelledby="library-title">
-      <div class="section-heading"><div><p class="section-kicker">Private library</p><h2 id="library-title">Song library</h2><p>Group recordings of the same song by arrangement and version. Each version keeps its own analysis, score, and corrections; nothing is merged.</p></div></div>
+
+    <section id="recordings" class="jobs-section" aria-labelledby="jobs-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="jobs-title" tabindex="-1">Recordings</h2>
+          <p>Progress updates on its own. Each stage keeps its results if a later one fails.</p>
+        </div>
+        <button id="refresh-button" class="secondary" type="button">Refresh</button>
+      </div>
+      <p id="jobs-message" class="form-message" role="status" aria-live="polite"></p>
+      <ol id="jobs" class="job-list" aria-busy="true"><li class="empty-state"><strong>Loading recordings…</strong></li></ol>
+    </section>
+
+    <section class="library-section reveal" aria-labelledby="library-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="library-title">Song library</h2>
+          <p>File versions of one song together and compare them. Each keeps its own analysis, score, and corrections.</p>
+        </div>
+      </div>
       <form id="song-form" class="panel song-form" aria-describedby="song-message">
         <div class="song-fields">
           <div><label for="song-title">Song title</label><input id="song-title" name="title" required maxlength="160" autocomplete="off"></div>
@@ -69,11 +123,38 @@
       </form>
       <div id="library" class="library"><p class="detail-note">Loading the song library…</p></div>
     </section>
-    <section class="jobs-section" aria-labelledby="jobs-title">
-      <div class="section-heading"><div><p class="section-kicker">Workspace</p><h2 id="jobs-title" tabindex="-1">Recent audio</h2><p>Active jobs update automatically. Backend stage, message, and progress are shown directly.</p></div><button id="refresh-button" class="secondary" type="button">Refresh</button></div>
-      <p id="jobs-message" class="form-message" role="status" aria-live="polite"></p>
-      <ol id="jobs" class="job-list" aria-busy="true"><li class="empty-state"><strong>Loading recent audio…</strong></li></ol>
+
+    <section id="how" class="how-section reveal" aria-labelledby="how-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="how-title">How it works</h2>
+          <p>Every stage runs on demand, on your machine, and keeps its own results.</p>
+        </div>
+      </div>
+      <ol class="lanes">
+        <li style="--start:1;--span:3"><span class="lane-name">Prepare</span><span class="lane-clip">Keep the source, make analysis audio, estimate tempo, meter, tuning, and key.</span></li>
+        <li style="--start:3;--span:3"><span class="lane-name">Separate</span><span class="lane-clip">Optionally split vocals, bass, drums, and accompaniment with a local model.</span></li>
+        <li style="--start:5;--span:3"><span class="lane-name">Transcribe</span><span class="lane-clip">Detect notes and drum hits, group parts, and suggest harmony.</span></li>
+        <li style="--start:7;--span:3"><span class="lane-name">Notate</span><span class="lane-clip">Bars, chord symbols, a drum part, tabs, key, and separate parts.</span></li>
+        <li style="--start:9;--span:3"><span class="lane-name">Review</span><span class="lane-clip">Play each bar, fix what you hear, undo freely, export MusicXML or MIDI.</span></li>
+        <li style="--start:11;--span:2"><span class="lane-name">Compare</span><span class="lane-clip">Group studio and live versions, then compare them side by side.</span></li>
+      </ol>
+      <p class="how-note">Results are drafts with honest warnings, not publication-ready engraving. When the audio cannot support precision, PopEx says so instead of guessing.</p>
     </section>
   </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <p>PopEx is free and open source under the MIT License. Your recordings and scores stay on this computer.</p>
+      <label class="theme-picker">Theme
+        <select id="theme-select" aria-label="Colour theme">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="system">Match system</option>
+        </select>
+      </label>
+    </div>
+  </footer>
+  <div class="grain" aria-hidden="true"></div>
 </body>
 </html>
