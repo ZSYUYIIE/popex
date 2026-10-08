@@ -33,7 +33,11 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import Settings
-from app.score_construction import PERCUSSION_NOTATION, UNRESOLVED_PERCUSSION_VOICE
+from app.score_construction import (
+    PERCUSSION_NOTATION,
+    UNRESOLVED_PERCUSSION_VOICE,
+    plan_score_parts,
+)
 from app.score_sources import (
     is_score_fingerprint,
     score_source_fingerprint,
@@ -44,8 +48,8 @@ from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_sig
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
 # schema 4 the modal tonal context; earlier documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 4
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
+SCORE_ARTIFACT_SCHEMA_VERSION = 5
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -86,6 +90,7 @@ _TOP_LEVEL_KEYS_V1 = frozenset(
 _TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
 _TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {"tablature"}
 _TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V3 | {"tonality"}
+_TOP_LEVEL_KEYS_V5 = _TOP_LEVEL_KEYS_V4 | {"scoreParts"}
 _CANDIDATE_KEYS = frozenset(
     {"tonalCenter", "rootPitchClass", "collection", "displayName", "score", "confidence"}
 )
@@ -732,9 +737,13 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         raise _fail("Unsupported score document schema version.")
     _exact_keys(
         document,
-        {1: _TOP_LEVEL_KEYS_V1, 2: _TOP_LEVEL_KEYS_V2, 3: _TOP_LEVEL_KEYS_V3, 4: _TOP_LEVEL_KEYS_V4}[
-            schema_version
-        ],
+        {
+            1: _TOP_LEVEL_KEYS_V1,
+            2: _TOP_LEVEL_KEYS_V2,
+            3: _TOP_LEVEL_KEYS_V3,
+            4: _TOP_LEVEL_KEYS_V4,
+            5: _TOP_LEVEL_KEYS_V5,
+        }[schema_version],
         "score document",
     )
     if document["artifactType"] != SCORE_ARTIFACT_TYPE:
@@ -756,9 +765,13 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     part_ids = _validate_parts(document["parts"])
     totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
     counts = _mapping(document["counts"], "counts")
-    count_keys = {1: _COUNT_KEYS_V1, 2: _COUNT_KEYS_V2, 3: _COUNT_KEYS_V3, 4: _COUNT_KEYS_V3}[
-        schema_version
-    ]
+    count_keys = {
+        1: _COUNT_KEYS_V1,
+        2: _COUNT_KEYS_V2,
+        3: _COUNT_KEYS_V3,
+        4: _COUNT_KEYS_V3,
+        5: _COUNT_KEYS_V3,
+    }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
         _integer(counts[key], f"counts.{key}", 0, 1_000_000)
@@ -784,6 +797,15 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             raise _fail("The tablature layer status does not match its notes.")
     if schema_version >= 4:
         _validate_tonality(document["tonality"], len(document["measures"]))
+    if schema_version >= 5:
+        untabbed = [
+            note
+            for measure in document["measures"]
+            for note in measure["notes"]
+            if note.get("tab") is None
+        ]
+        if document["scoreParts"] != plan_score_parts(untabbed):
+            raise _fail("scoreParts does not match the notes' source lines.")
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (

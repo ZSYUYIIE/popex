@@ -59,6 +59,7 @@ from app.score_construction import (
     ScoreConstructionError,
     build_score_document,
     percussion_hit_counts,
+    plan_score_parts,
     score_to_midi_bytes,
     score_to_musicxml_text,
 )
@@ -80,12 +81,13 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v4"
+SCORE_PIPELINE_VERSION = "score-pipeline-v5"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
     {"score-pipeline-v1", "score-pipeline-v2", "score-pipeline-v3"}
 )
+PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipeline-v4"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -132,7 +134,8 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     transcription holds percussion events. ``tablature``: a score from before
     tablature for a recording with separated stems, where the default bass
     tablature applies. ``tonal-context``: a score with notes from before the
-    modal tonal context. Such scores stay readable and downloadable.
+    modal tonal context. ``parts``: a score with notes from before instrument
+    parts by source line. Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -153,6 +156,13 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and notes > 0
     ):
         return "tonal-context"
+    if (
+        version in PRE_PARTS_PIPELINE_VERSIONS
+        and isinstance(notes, int)
+        and not isinstance(notes, bool)
+        and notes > 0
+    ):
+        return "parts"
     return None
 
 
@@ -167,6 +177,7 @@ def score_export_document(document: Mapping[str, Any]) -> dict[str, Any]:
         "measureCount": len(document["measures"]),
         "measures": document["measures"],
         "keySignature": (document.get("tonality") or {}).get("keySignature"),
+        **({"scoreParts": document["scoreParts"]} if "scoreParts" in document else {}),
     }
 
 
@@ -692,8 +703,11 @@ def construct_score(
         "tempoStable": evidence["tempoStable"],
         "meterConfidence": evidence["meterConfidence"],
     }
+    score_parts = plan_score_parts(
+        [note for measure in measures for note in measure["notes"] if note["tab"] is None]
+    )
     export_document = score_export_document(
-        {"timing": timing, "measures": measures, "tonality": tonality}
+        {"timing": timing, "measures": measures, "tonality": tonality, "scoreParts": score_parts}
     )
     try:
         score_to_midi_bytes(export_document)
@@ -779,6 +793,11 @@ def construct_score(
                 f"{item['unplayableCount']} {item['label'].lower()} note(s) could not fit "
                 "a playable chord shape and are left without a position."
             )
+    if any(item["id"] == "accompaniment" for item in score_parts):
+        warnings.append(
+            "The accompaniment reduction collects the separated accompaniment stem on a "
+            "grand staff; it is not split into specific instruments."
+        )
     if fingered_count:
         warnings.append(
             "Tablature positions are suggestions in standard tuning; held notes, "
@@ -875,6 +894,7 @@ def construct_score(
         "parts": parts,
         "percussion": percussion_summary,
         "tonality": tonality,
+        "scoreParts": score_parts,
         "tablature": {
             "version": TABLATURE_VERSION,
             "origin": tab_origin,

@@ -417,7 +417,7 @@ Implemented capabilities:
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
 - read-only, versioned pitched-note score previews built from matching completed transcription and analysis evidence;
 - stdlib-only MIDI and MusicXML exports with explicit quantization warnings, raw-event provenance, independent overlapping voices, and ties across measure boundaries;
-- persisted draft scores (`score-pipeline-v4`, document schema 4; schema-1 to schema-3 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
+- persisted draft scores (`score-pipeline-v5`, document schema 5; schema-1 to schema-4 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
 - chord symbols placed per measure only when one resolved harmonic candidate covers at least half the measure without a competing candidate, with every overlapping window (including unresolved ones) kept as review evidence;
 - editable-interpretation part labels on notes whose raw event maps to exactly one part; MIDI and MusicXML still use one combined draft part;
 - a separate drum part built from the raw percussion events on the same eighth-note grid: broad voices (low drum, mid drum, tom-like, closed/open high-frequency, cymbal-like) come from a matching editable interpretation, otherwise from the documented raw hit-kind table; unresolved hits keep their own flagged lane and are never assigned to a drum; every hit keeps its raw event ID, time, strength and confidence, and same-voice duplicates in one slot are kept as evidence but written once;
@@ -431,6 +431,8 @@ Implemented capabilities:
 - corrected and original views of the saved score and of every MIDI, MusicXML, and JSON download;
 - a modal tonal context (`modal-collections-v1`) per score: ranked candidates across Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, harmonic and melodic minor, major and minor pentatonic, and blues collections, from duration- and confidence-weighted notes, bass emphasis, and the analysis chroma; ambiguity between relative modes, local regions (possible modulation or modal mixture), and a chromaticism score; the global analysis baseline is unchanged;
 - key signatures with mode in MusicXML and MIDI only when the tonal context reaches 0.50 confidence, with flat or sharp spelling to match and accidentals only where a note differs from the key;
+- instrument parts by source line, the only reliable instrument evidence: lead vocal (vocal stem), pitched lines (full mix), an explicitly labelled accompaniment reduction on a grand staff (accompaniment stem), and a bass line in bass clef when it is not tabbed; clefs follow each part's range, tempo and chord symbols sit on the top part, and each part carries a General MIDI program for playback;
+- per-part MusicXML downloads for every pitched, tablature, and drum part;
 - a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
 - side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
@@ -579,7 +581,7 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `GET /api/jobs/{job_id}/score/download?format=midi|musicxml`
 - `POST /api/jobs/{job_id}/score/construct` with optional `?force=true`
 - `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true` and `?view=corrected|original` (default `corrected`)
-- `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json` with optional `&view=corrected|original`
+- `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json` with optional `&view=corrected|original`; MusicXML also accepts `&part=<id>` for one part (ids are listed in the saved score's `exportParts`)
 - `GET /api/jobs/{job_id}/score/corrections`
 - `POST /api/jobs/{job_id}/score/corrections` with strict JSON `{ "expectedRevision": n, "operation": {...} }` (`set_pitch`, `delete_note`, `set_tab`, `set_chord`, `set_drum_voice`, `delete_hit`)
 - `POST /api/jobs/{job_id}/score/corrections/undo`, `/redo`, and `/reset` with `{ "expectedRevision": n }`; a stale revision returns 409
@@ -736,7 +738,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Corrections cannot yet add notes or change rhythm and duration; review playback uses the browser's audio element and bar timing from the global tempo grid.
 - Score quantization uses a coarse eighth-note grid and global tempo/meter.
 - Chord symbols are review candidates placed at most one per measure; measures with competing or partial harmony show no symbol, and chord symbols are exported as MusicXML words rather than parsed harmony elements.
-- Part labels are review annotations on notes; MIDI and MusicXML still contain one combined draft part.
+- Interpretation part labels remain review annotations. MusicXML parts follow source lines (stems), not instrument recognition, so an accompaniment stem is one reduction rather than separate keyboard, guitar, or string parts; MIDI is still one combined track.
 - MIDI preserves overlapping unisons on separate melodic channels and includes meter and full-measure duration. More than 15 simultaneous copies of one pitch fail explicitly rather than truncate held notes or use the percussion channel.
 - Raw transcription is a local baseline (pYIN/onset); dense mixes remain approximate and carry warnings.
 - Interpretation drafts are conservative reductions; pitched parts, rhythm grid, and drum structure require musician review.

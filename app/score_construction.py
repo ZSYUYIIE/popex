@@ -51,13 +51,36 @@ from app.tablature import (
 )
 
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v4"
+SCORE_BUILDER_VERSION = "score-construction-v5"
 # Fixed MusicXML part identities: combined pitched part, drums, then one part
 # per fretted instrument (standard staff plus a synchronized TAB staff).
 _TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
 _TAB_PART_NAMES = {"bass": "Bass (draft, with TAB)", "guitar": "Guitar (fingering suggestion, with TAB)"}
 _TAB_CLEFS = {"bass": ("F", "4"), "guitar": ("G", "2")}
 _TAB_GM_PROGRAMS = {"bass": 34, "guitar": 26}  # MusicXML 1-based: fingered bass, steel guitar
+
+# Instrument parts come only from the source line a note was transcribed
+# from, the one reliable instrument evidence. Unknown source kinds share a
+# generic part rather than being assigned to an invented instrument.
+# part id -> (name, source kinds, GM program 1-based)
+SCORE_PARTS: dict[str, tuple[str, tuple[str, ...], int]] = {
+    "lead-vocal": ("Lead vocal (draft)", ("vocals",), 54),
+    "pitched-lines": ("Pitched lines (full mix, draft)", ("full_mix",), 1),
+    "accompaniment": ("Accompaniment reduction", ("other",), 1),
+    "bass-line": ("Bass line (draft)", ("bass",), 34),
+    "other-lines": ("Other pitched lines (draft)", (), 1),
+}
+SCORE_PART_CLEFS = frozenset({"treble", "treble-8vb", "bass", "bass-8vb", "grand"})
+_PART_FOR_SOURCE = {
+    source: part_id for part_id, (_name, sources, _program) in SCORE_PARTS.items() for source in sources
+}
+_GRAND_SPLIT = 60  # middle C: notes at or above go on the upper staff
+_CLEF_SPECS = {
+    "treble": ("G", "2", 0),
+    "treble-8vb": ("G", "2", -1),
+    "bass": ("F", "4", 0),
+    "bass-8vb": ("F", "4", -1),
+}
 
 # broad voice -> (display step, display octave, notehead, GM drum note, label)
 PERCUSSION_NOTATION: dict[str, tuple[str, int, str, int, str]] = {
@@ -789,6 +812,49 @@ def _musicxml_note(
             ET.SubElement(technical_el, "fret").text = str(technical[1])
 
 
+def _part_clef(part_id: str, pitches: Sequence[int]) -> str:
+    """Choose a clef from a part's range (documented in the cycle-13 issue)."""
+    ordered = sorted(pitches)
+    median = ordered[len(ordered) // 2]
+    lowest, highest = ordered[0], ordered[-1]
+    if part_id == "accompaniment":
+        if lowest < _GRAND_SPLIT <= highest:
+            return "grand"
+        return "treble" if median >= _GRAND_SPLIT else "bass"
+    if part_id == "bass-line":
+        return "bass-8vb" if median < 48 else "bass"
+    if part_id == "lead-vocal":
+        if median >= 60:
+            return "treble"
+        return "treble-8vb" if median >= 48 else "bass"
+    if lowest < 55 and highest > 67 and highest - lowest >= 24:
+        return "grand"
+    return "treble" if median >= _GRAND_SPLIT else "bass"
+
+
+def plan_score_parts(notes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Group untabbed notes into instrument parts by their source line."""
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for note in notes:
+        part_id = _PART_FOR_SOURCE.get(note.get("sourceKind", "unassigned"), "other-lines")
+        grouped.setdefault(part_id, []).append(note)
+    plan = []
+    for part_id, (name, _sources, _program) in SCORE_PARTS.items():
+        members = grouped.get(part_id)
+        if not members:
+            continue
+        plan.append(
+            {
+                "id": part_id,
+                "name": name,
+                "sourceKinds": sorted({note.get("sourceKind", "unassigned") for note in members}),
+                "clef": _part_clef(part_id, [note["midiNote"] for note in members]),
+                "noteCount": len(members),
+            }
+        )
+    return plan
+
+
 def _parse_note_tab(value: Any, midi_note: int) -> dict[str, Any] | None:
     """Validate one note's optional tablature suggestion."""
     if value is None:
@@ -938,6 +1004,7 @@ def _musicxml_tab_part(
     meter: int,
     budget: list[int],
     key: Mapping[str, Any] | None = None,
+    directions: tuple[Sequence[Mapping[str, Any]], float] | None = None,
 ) -> None:
     """Write one fretted instrument: standard staff 1 and TAB staff 2.
 
@@ -984,6 +1051,10 @@ def _musicxml_tab_part(
                 if _STEP_ALTER[pitch_class]:
                     ET.SubElement(tuning, "tuning-alter").text = "1"
                 ET.SubElement(tuning, "tuning-octave").text = str(open_note // 12 - 1)
+        if directions is not None:
+            _append_directions(
+                measure_el, directions[0][position], tempo=directions[1] if position == 0 else None
+            )
         lanes = [
             (voice, fragments, 1, False)
             for voice, fragments in sorted(standard.get(position, {}).items())
@@ -1024,6 +1095,7 @@ def _musicxml_percussion_part(
     *,
     meter: int,
     unresolved_present: bool,
+    directions: tuple[Sequence[Mapping[str, Any]], float] | None = None,
 ) -> None:
     """Write broad drum voices as unpitched notes on a percussion staff.
 
@@ -1049,6 +1121,10 @@ def _musicxml_percussion_part(
                 ET.SubElement(
                     ET.SubElement(direction, "direction-type"), "words"
                 ).text = "Triangle noteheads on the middle line are unresolved percussion; review them."
+        if directions is not None:
+            _append_directions(
+                measure_el, directions[0][position], tempo=directions[1] if position == 0 else None
+            )
         groups = (
             (1, "up", [hit for hit in hits if hit["broadVoice"] not in _PERCUSSION_FOOT_VOICES]),
             (2, "down", [hit for hit in hits if hit["broadVoice"] in _PERCUSSION_FOOT_VOICES]),
@@ -1093,7 +1169,100 @@ def _musicxml_percussion_part(
             _append_forward(measure_el, bar_ticks)
 
 
-def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
+def _append_directions(
+    measure_el: ET.Element,
+    measure: Mapping[str, Any],
+    *,
+    tempo: float | None,
+) -> None:
+    """Tempo (first bar only) and the chord symbol, kept as exact text."""
+    if tempo is not None:
+        direction = ET.SubElement(measure_el, "direction", placement="above")
+        direction_type = ET.SubElement(direction, "direction-type")
+        metronome = ET.SubElement(direction_type, "metronome")
+        ET.SubElement(metronome, "beat-unit").text = "quarter"
+        ET.SubElement(metronome, "per-minute").text = f"{tempo:.6g}"
+        ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
+    chord = measure.get("chordSymbol")
+    if chord is not None:
+        # Preserve exact text without fabricating a parsed root/kind claim.
+        direction = ET.SubElement(measure_el, "direction", placement="above")
+        ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = chord
+
+
+def _musicxml_pitched_score_part(part_list: ET.Element, xml_id: str, name: str, program: int | None) -> None:
+    score_part = ET.SubElement(part_list, "score-part", id=xml_id)
+    ET.SubElement(score_part, "part-name").text = name
+    if program is not None:
+        ET.SubElement(
+            ET.SubElement(score_part, "score-instrument", id=f"{xml_id}-I1"), "instrument-name"
+        ).text = name
+        ET.SubElement(
+            ET.SubElement(score_part, "midi-instrument", id=f"{xml_id}-I1"), "midi-program"
+        ).text = str(program)
+
+
+def _musicxml_pitched_part(
+    root: ET.Element,
+    xml_id: str,
+    notes: Sequence[Mapping[str, Any]],
+    measures: Sequence[Mapping[str, Any]],
+    *,
+    clef: str,
+    meter: int,
+    key: Mapping[str, Any] | None,
+    tempo: float,
+    directions: bool,
+    budget: list[int],
+) -> None:
+    """Write one pitched part on one staff, or a grand staff split at middle C."""
+    if clef == "grand":
+        upper = [note for note in notes if note["midiNote"] >= _GRAND_SPLIT]
+        lower = [note for note in notes if note["midiNote"] < _GRAND_SPLIT]
+        upper_voices, next_voice = _voice_lanes(upper, 1)
+        lower_voices, _ = _voice_lanes(lower, max(5, next_voice))
+        staves = [
+            (1, _measure_fragments(upper, upper_voices, meter=meter, budget=budget)),
+            (2, _measure_fragments(lower, lower_voices, meter=meter, budget=budget)),
+        ]
+    else:
+        voices, _ = _voice_lanes(notes, 1)
+        staves = [(1, _measure_fragments(notes, voices, meter=meter, budget=budget))]
+    bar_ticks = meter * _DIVISIONS
+    part = ET.SubElement(root, "part", id=xml_id)
+    for position, measure in enumerate(measures):
+        measure_el = ET.SubElement(part, "measure", number=str(position + 1))
+        if position == 0:
+            attrs = ET.SubElement(measure_el, "attributes")
+            ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
+            _append_key(attrs, key)
+            time_el = ET.SubElement(attrs, "time")
+            ET.SubElement(time_el, "beats").text = str(meter)
+            ET.SubElement(time_el, "beat-type").text = "4"
+            if clef == "grand":
+                ET.SubElement(attrs, "staves").text = "2"
+                for number, (sign, line) in ((1, ("G", "2")), (2, ("F", "4"))):
+                    clef_el = ET.SubElement(attrs, "clef", number=str(number))
+                    ET.SubElement(clef_el, "sign").text = sign
+                    ET.SubElement(clef_el, "line").text = line
+            else:
+                sign, line, octave = _CLEF_SPECS[clef]
+                clef_el = ET.SubElement(attrs, "clef")
+                ET.SubElement(clef_el, "sign").text = sign
+                ET.SubElement(clef_el, "line").text = line
+                if octave:
+                    ET.SubElement(clef_el, "clef-octave-change").text = str(octave)
+        if directions:
+            _append_directions(measure_el, measure, tempo=tempo if position == 0 else None)
+        lanes = [
+            (voice, fragments, staff, False)
+            for staff, by_measure in staves
+            for voice, fragments in sorted(by_measure.get(position, {}).items())
+        ]
+        _write_measure_voices(measure_el, lanes, bar_ticks, key)
+
+
+def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None = None) -> str:
     """Render standards-shaped MusicXML with measured timing and tied bars."""
     if not isinstance(document, Mapping):
         raise ScoreConstructionError("Score document must be a mapping.")
@@ -1192,84 +1361,100 @@ def score_to_musicxml_text(document: Mapping[str, Any]) -> str:
         instrument: [note for note in all_notes if note["tab"] and note["tab"]["instrument"] == instrument]
         for instrument in TAB_INSTRUMENT_ORDER
     }
-    tab_instruments = [instrument for instrument in TAB_INSTRUMENT_ORDER if tab_notes[instrument]]
     combined_notes = [note for note in all_notes if note["tab"] is None]
-    budget = [0]
-    voice_by_id, _ = _voice_lanes(combined_notes, 1)
-    fragments_by_measure = _measure_fragments(
-        combined_notes, voice_by_id, meter=meter, budget=budget
+    drum_voices = sorted(
+        {hit["broadVoice"] for hits in drum_hits_by_measure for hit in hits},
+        key=list(PERCUSSION_NOTATION).index,
     )
+    # Schema-5 documents carry ``scoreParts``: untabbed notes are split into
+    # instrument parts by source line. Earlier documents keep one part.
+    if "scoreParts" in document:
+        pitched = [
+            (item["id"], item["name"], item["clef"], SCORE_PARTS[item["id"]][2],
+             [note for note in combined_notes
+              if _PART_FOR_SOURCE.get(note["sourceKind"], "other-lines") == item["id"]])
+            for item in plan_score_parts(combined_notes)
+        ]
+    else:
+        pitched = [
+            ("combined", "Other Pitched Lines" if any(tab_notes.values()) else "Draft Pitched Events",
+             "treble", None, combined_notes)
+        ]
+    sequence: list[tuple[str, str]] = []  # (logical id, kind)
+    sequence += [(item[0], "pitched") for item in pitched]
+    sequence += [(f"{instrument}-tab", "tab") for instrument in TAB_INSTRUMENT_ORDER if tab_notes[instrument]]
+    if drum_voices:
+        sequence.append(("drums", "drums"))
+    if only_part is not None:
+        sequence = [item for item in sequence if item[0] == only_part]
+        if not sequence:
+            raise ScoreConstructionError("The requested part is not in this score.")
+    elif not any(kind == "pitched" for _id, kind in sequence) or not sequence:
+        # Tempo and chord symbols need a home even when every note is tabbed.
+        sequence.insert(0, ("combined", "pitched"))
+        pitched = [("combined", "Draft Pitched Events", "treble", None, [])]
 
+    budget = [0]
     root = ET.Element("score-partwise", version="3.1")
     encoding = ET.SubElement(ET.SubElement(root, "identification"), "encoding")
     ET.SubElement(encoding, "software").text = f"PopEx {SCORE_BUILDER_VERSION}"
     ET.SubElement(encoding, "encoding-description").text = "Draft; review required"
     part_list = ET.SubElement(root, "part-list")
-    ET.SubElement(ET.SubElement(part_list, "score-part", id="P1"), "part-name").text = (
-        "Other Pitched Lines" if tab_instruments else "Draft Pitched Events"
-    )
-    for instrument in tab_instruments:
-        _musicxml_tab_score_part(part_list, instrument)
-    drum_voices = sorted(
-        {hit["broadVoice"] for hits in drum_hits_by_measure for hit in hits},
-        key=list(PERCUSSION_NOTATION).index,
-    )
-    if drum_voices:
-        _musicxml_percussion_score_part(part_list, drum_voices)
-    part = ET.SubElement(root, "part", id="P1")
-    bar_ticks = meter * _DIVISIONS
-    for position, measure in enumerate(validated_measures):
-        measure_el = ET.SubElement(part, "measure", number=str(position + 1))
-        if position == 0:
-            attrs = ET.SubElement(measure_el, "attributes")
-            ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
-            _append_key(attrs, key)
-            time_el = ET.SubElement(attrs, "time")
-            ET.SubElement(time_el, "beats").text = str(meter)
-            ET.SubElement(time_el, "beat-type").text = "4"
-            clef = ET.SubElement(attrs, "clef")
-            ET.SubElement(clef, "sign").text = "G"
-            ET.SubElement(clef, "line").text = "2"
-            direction = ET.SubElement(measure_el, "direction", placement="above")
-            direction_type = ET.SubElement(direction, "direction-type")
-            metronome = ET.SubElement(direction_type, "metronome")
-            ET.SubElement(metronome, "beat-unit").text = "quarter"
-            ET.SubElement(metronome, "per-minute").text = f"{tempo:.6g}"
-            ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
-        chord = measure.get("chordSymbol")
-        if chord is not None:
-            # Preserve exact text without fabricating a parsed root/kind claim.
-            direction = ET.SubElement(measure_el, "direction", placement="above")
-            direction_type = ET.SubElement(direction, "direction-type")
-            ET.SubElement(direction_type, "words").text = chord
-        _write_measure_voices(
-            measure_el,
-            [
-                (voice, fragments, 1, False)
-                for voice, fragments in sorted(fragments_by_measure.get(position, {}).items())
-            ],
-            bar_ticks,
-            key,
-        )
+    pitched_by_id = {item[0]: item for item in pitched}
+    xml_ids: dict[str, str] = {}
+    extra = 5
+    for logical, kind in sequence:
+        if kind == "pitched":
+            if not xml_ids.get("_first"):
+                xml_ids["_first"] = logical
+                xml_ids[logical] = "P1"
+            else:
+                xml_ids[logical] = f"P{extra}"
+                extra += 1
+            _id, name, _clef, program, _notes = pitched_by_id[logical]
+            _musicxml_pitched_score_part(part_list, xml_ids[logical], name, program)
+        elif kind == "tab":
+            _musicxml_tab_score_part(part_list, logical[: -len("-tab")])
+        else:
+            _musicxml_percussion_score_part(part_list, drum_voices)
 
-    for instrument in tab_instruments:
-        _musicxml_tab_part(
-            root,
-            instrument,
-            tab_notes[instrument],
-            measure_count=measure_count,
-            meter=meter,
-            budget=budget,
-            key=key,
-        )
-
-    if drum_voices:
-        _musicxml_percussion_part(
-            root,
-            drum_hits_by_measure,
-            meter=meter,
-            unresolved_present=UNRESOLVED_PERCUSSION_VOICE in drum_voices,
-        )
+    directions_written = False
+    for logical, kind in sequence:
+        if kind == "pitched":
+            _id, _name, clef, _program, notes = pitched_by_id[logical]
+            _musicxml_pitched_part(
+                root,
+                xml_ids[logical],
+                notes,
+                validated_measures,
+                clef=clef,
+                meter=meter,
+                key=key,
+                tempo=tempo,
+                directions=not directions_written,
+                budget=budget,
+            )
+            directions_written = True
+        elif kind == "tab":
+            _musicxml_tab_part(
+                root,
+                logical[: -len("-tab")],
+                tab_notes[logical[: -len("-tab")]],
+                measure_count=measure_count,
+                meter=meter,
+                budget=budget,
+                key=key,
+                directions=None if directions_written else (validated_measures, tempo),
+            )
+            directions_written = True
+        else:
+            _musicxml_percussion_part(
+                root,
+                drum_hits_by_measure,
+                meter=meter,
+                unresolved_present=UNRESOLVED_PERCUSSION_VOICE in drum_voices,
+                directions=None if directions_written else (validated_measures, tempo),
+            )
 
     text = ET.tostring(root, encoding="unicode")
     if len(text) > 2_000_000:
@@ -1284,8 +1469,11 @@ __all__ = [
     "SCORE_SCHEMA_VERSION",
     "ScoreConstructionError",
     "UNRESOLVED_PERCUSSION_VOICE",
+    "SCORE_PARTS",
+    "SCORE_PART_CLEFS",
     "build_score_document",
     "percussion_hit_counts",
+    "plan_score_parts",
     "percussion_warnings",
     "score_to_midi_bytes",
     "score_to_musicxml_text",

@@ -164,6 +164,10 @@ def run(data_dir: Path) -> dict:
             if response.status_code != 200:
                 raise SystemExit(f"Correction was rejected: {response.status_code} {response.text}")
         corrected_details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+        part_downloads = {
+            part["id"]: client.get(part["downloadUrl"]).status_code
+            for part in corrected_details["exportParts"]
+        }
         original_xml = client.get(
             f"/api/jobs/{job_id}/score/saved/download?format=musicxml&view=original"
         )
@@ -200,6 +204,7 @@ def run(data_dir: Path) -> dict:
                 "localRegions": len(details["tonality"]["localRegions"]),
             },
             "musicxmlGuitarTabNotes": len(tab_notes),
+            "partDownloads": part_downloads,
             "corrections": {
                 "active": corrected_details["corrections"]["activeCount"],
                 "originalPercussionHits": original_details["counts"]["percussionHits"],
@@ -226,6 +231,8 @@ def run(data_dir: Path) -> dict:
         problems.append("corrections were not applied separately from the prediction")
     if summary["midiChannel10NoteOns"] != summary["counts"]["notatedPercussionHits"]:
         problems.append("MIDI channel-10 hits do not match notated hits")
+    if not summary["partDownloads"] or any(code != 200 for code in summary["partDownloads"].values()):
+        problems.append("a part download failed")
     if summary["layers"].get("tablature") != "included":
         problems.append("tablature layer is not included")
     if summary["musicxmlGuitarTabNotes"] != summary["counts"]["fingeredTabNotes"]:
