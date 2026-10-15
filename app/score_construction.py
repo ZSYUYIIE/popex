@@ -51,7 +51,7 @@ from app.tablature import (
 )
 
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v5"
+SCORE_BUILDER_VERSION = "score-construction-v6"
 # Fixed MusicXML part identities: combined pitched part, drums, then one part
 # per fretted instrument (standard staff plus a synchronized TAB staff).
 _TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
@@ -373,13 +373,17 @@ def build_score_document(
             raise ScoreConstructionError("Too many chord symbols.")
 
     sorted_notes = sorted(notes, key=lambda item: (item["startSeconds"], item["endSeconds"], item["id"]))
+    rhythm_grids = choose_rhythm_grids(sorted_notes, seconds_per_beat=seconds_per_beat)
+    unit_for_kind = {grid["sourceKind"]: grid["unitBeats"] for grid in rhythm_grids}
     for note in sorted_notes:
+        unit = unit_for_kind[note.get("sourceKind", "unassigned")]
+        steps = 1.0 / unit
         note["rawStartBeat"] = note["startSeconds"] / seconds_per_beat
         note["rawEndBeat"] = note["endSeconds"] / seconds_per_beat
-        note["quantizedStartBeat"] = round(note["rawStartBeat"] * 2.0) / 2.0
-        note["quantizedEndBeat"] = round(note["rawEndBeat"] * 2.0) / 2.0
+        note["quantizedStartBeat"] = round(note["rawStartBeat"] * steps) / steps
+        note["quantizedEndBeat"] = round(note["rawEndBeat"] * steps) / steps
         if note["quantizedEndBeat"] <= note["quantizedStartBeat"]:
-            note["quantizedEndBeat"] = note["quantizedStartBeat"] + 0.5
+            note["quantizedEndBeat"] = note["quantizedStartBeat"] + unit
         note["startShiftSeconds"] = abs(
             note["quantizedStartBeat"] - note["rawStartBeat"]
         ) * seconds_per_beat
@@ -457,7 +461,8 @@ def build_score_document(
         )
     if large_shift:
         warnings.append(
-            f"{large_shift} note(s) start or end shifted by more than 50ms during 8th-note quantization."
+            f"{large_shift} note(s) start or end shifted by more than 50ms during quantization to "
+            f"{_grid_phrase(rhythm_grids)}."
         )
     if fractional_pitch:
         warnings.append(
@@ -485,12 +490,83 @@ def build_score_document(
         "divisions": _DIVISIONS,
         "measureCount": measure_count,
         "noteCount": len(sorted_notes),
+        "rhythmGrids": rhythm_grids,
         "measures": measures,
         "warnings": warnings,
     }
     if placed_hits is not None:
         document["percussionHitCount"] = len(placed_hits)
     return copy.deepcopy(document)
+
+
+# A line earns a sixteenth grid only from clear onset evidence; eighths stay the default.
+RHYTHM_GRID_UNITS = {"eighth": 0.5, "sixteenth": 0.25}
+_GRID_MIN_CONFIDENCE = 0.50
+_GRID_ONSET_TOLERANCE_SECONDS = 0.030
+_GRID_MIN_SUPPORTING_ONSETS = 3
+_GRID_MIN_SUPPORTING_SHARE = 0.15
+_GRID_MIN_SIXTEENTH_SECONDS = 0.090
+
+
+def choose_rhythm_grids(
+    notes: Sequence[Mapping[str, Any]], *, seconds_per_beat: float
+) -> list[dict[str, Any]]:
+    """Choose an eighth or sixteenth grid per source line from onset evidence.
+
+    An onset supports sixteenths when it sits within 30 ms of an off-eighth
+    sixteenth position (the "e" or "a" of the beat). A line switches to
+    sixteenths only with at least three such confident onsets making up at
+    least 15% of its confident onsets, and only when a sixteenth lasts at
+    least 90 ms at this tempo. The evidence counts are returned for review.
+    """
+    sixteenth_seconds = seconds_per_beat / 4.0
+    tempo_allows = sixteenth_seconds >= _GRID_MIN_SIXTEENTH_SECONDS
+    by_kind: dict[str, list[Mapping[str, Any]]] = {}
+    for note in notes:
+        by_kind.setdefault(note.get("sourceKind", "unassigned"), []).append(note)
+    grids: list[dict[str, Any]] = []
+    for source_kind in sorted(by_kind):
+        confident = [
+            note for note in by_kind[source_kind] if note["confidence"] >= _GRID_MIN_CONFIDENCE
+        ]
+        supporting = 0
+        for note in confident:
+            position = note["startSeconds"] / sixteenth_seconds
+            slot = round(position)
+            if slot % 2 == 1 and abs(position - slot) * sixteenth_seconds <= _GRID_ONSET_TOLERANCE_SECONDS:
+                supporting += 1
+        sixteenth = (
+            tempo_allows
+            and supporting >= _GRID_MIN_SUPPORTING_ONSETS
+            and supporting >= _GRID_MIN_SUPPORTING_SHARE * len(confident)
+        )
+        if sixteenth:
+            reason = "off-eighth-onsets"
+        elif not tempo_allows and supporting:
+            reason = "tempo-too-fast"
+        else:
+            reason = "insufficient-evidence"
+        unit = "sixteenth" if sixteenth else "eighth"
+        grids.append(
+            {
+                "sourceKind": source_kind,
+                "unit": unit,
+                "unitBeats": RHYTHM_GRID_UNITS[unit],
+                "confidentOnsets": len(confident),
+                "offEighthOnsets": supporting,
+                "reason": reason,
+            }
+        )
+    return grids
+
+
+def _grid_phrase(grids: Sequence[Mapping[str, Any]]) -> str:
+    units = {grid["unit"] for grid in grids}
+    if units == {"sixteenth"}:
+        return "the 16th-note grid"
+    if units == {"eighth"} or not units:
+        return "the 8th-note grid"
+    return "each line's 8th- or 16th-note grid"
 
 
 def percussion_hit_counts(hits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1184,10 +1260,109 @@ def _append_directions(
         ET.SubElement(metronome, "per-minute").text = f"{tempo:.6g}"
         ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
     chord = measure.get("chordSymbol")
+    # A whole-bar symbol (possibly a musician's correction) wins over half-bar changes.
     if chord is not None:
-        # Preserve exact text without fabricating a parsed root/kind claim.
-        direction = ET.SubElement(measure_el, "direction", placement="above")
-        ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = chord
+        changes = [{"beat": 0.0, "symbol": chord}]
+    else:
+        changes = measure.get("chordChanges") or []
+    for change in changes:
+        offset = int(round(change["beat"] * _DIVISIONS))
+        parsed = parse_chord_symbol(change["symbol"])
+        if parsed is None:
+            # Text the parser does not fully understand is kept exactly, never guessed.
+            direction = ET.SubElement(measure_el, "direction", placement="above")
+            ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = change["symbol"]
+            if offset:
+                ET.SubElement(direction, "offset").text = str(offset)
+        else:
+            _append_harmony(measure_el, parsed, offset=offset)
+
+
+# Chord-symbol suffix -> MusicXML <kind> value. Covers the harmony stage's vocabulary
+# plus common spellings musicians type as corrections. Anything else stays <words>.
+_HARMONY_KINDS: dict[str, str] = {
+    "": "major", "maj": "major", "M": "major",
+    "m": "minor", "min": "minor", "-": "minor",
+    "dim": "diminished", "o": "diminished", "°": "diminished",
+    "aug": "augmented", "+": "augmented",
+    "sus2": "suspended-second", "sus4": "suspended-fourth", "sus": "suspended-fourth",
+    "5": "power",
+    "6": "major-sixth", "m6": "minor-sixth",
+    "7": "dominant",
+    "maj7": "major-seventh", "M7": "major-seventh", "Δ7": "major-seventh", "Δ": "major-seventh",
+    "m7": "minor-seventh", "min7": "minor-seventh", "-7": "minor-seventh",
+    "dim7": "diminished-seventh", "o7": "diminished-seventh", "°7": "diminished-seventh",
+    "m7b5": "half-diminished", "ø": "half-diminished", "ø7": "half-diminished",
+    "aug7": "augmented-seventh", "+7": "augmented-seventh",
+    "mMaj7": "major-minor", "mmaj7": "major-minor", "m(maj7)": "major-minor",
+    "9": "dominant-ninth", "maj9": "major-ninth", "m9": "minor-ninth",
+    "11": "dominant-11th", "13": "dominant-13th",
+}
+_CHORD_SYMBOL_RE = re.compile(r"([A-G])([#b♯♭]?)(.*?)(?:/([A-G])([#b♯♭]?))?")
+_ALTER = {"": 0, "#": 1, "♯": 1, "b": -1, "♭": -1}
+
+
+def _validate_chord_changes(value: Any, meter: int) -> None:
+    """Half-bar chord changes: at most two, strictly increasing beats inside the bar."""
+    if value is None:
+        return
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) > 2:
+        raise ScoreConstructionError("chordChanges must be a short sequence.")
+    previous = -1.0
+    for change in value:
+        if not isinstance(change, Mapping) or set(change) != {"beat", "symbol"}:
+            raise ScoreConstructionError("chordChanges entries are malformed.")
+        beat = _number(change["beat"], "chordChanges.beat", minimum=0.0, maximum=meter - 0.5)
+        if beat <= previous:
+            raise ScoreConstructionError("chordChanges beats must increase.")
+        previous = beat
+        _text(change["symbol"], "chordChanges.symbol")
+
+
+def parse_chord_symbol(symbol: str) -> dict[str, Any] | None:
+    """Parse a chord symbol into root, MusicXML kind, and optional bass, or None.
+
+    The parse is strict: the whole text must match a known root, suffix, and
+    optional slash bass. The original suffix is returned so exports print the
+    symbol exactly as written.
+    """
+    if not isinstance(symbol, str):
+        return None
+    match = _CHORD_SYMBOL_RE.fullmatch(symbol.strip())
+    if match is None:
+        return None
+    root_step, root_accidental, suffix, bass_step, bass_accidental = match.groups()
+    kind = _HARMONY_KINDS.get(suffix)
+    if kind is None:
+        return None
+    parsed: dict[str, Any] = {
+        "rootStep": root_step,
+        "rootAlter": _ALTER[root_accidental],
+        "kind": kind,
+        "kindText": suffix,
+        "bassStep": None,
+        "bassAlter": 0,
+    }
+    if bass_step is not None:
+        parsed["bassStep"] = bass_step
+        parsed["bassAlter"] = _ALTER[bass_accidental or ""]
+    return parsed
+
+
+def _append_harmony(measure_el: ET.Element, parsed: Mapping[str, Any], *, offset: int = 0) -> None:
+    harmony = ET.SubElement(measure_el, "harmony", {"print-frame": "no"})
+    root = ET.SubElement(harmony, "root")
+    ET.SubElement(root, "root-step").text = parsed["rootStep"]
+    if parsed["rootAlter"]:
+        ET.SubElement(root, "root-alter").text = str(parsed["rootAlter"])
+    ET.SubElement(harmony, "kind", text=parsed["kindText"]).text = parsed["kind"]
+    if parsed["bassStep"] is not None:
+        bass = ET.SubElement(harmony, "bass")
+        ET.SubElement(bass, "bass-step").text = parsed["bassStep"]
+        if parsed["bassAlter"]:
+            ET.SubElement(bass, "bass-alter").text = str(parsed["bassAlter"])
+    if offset:
+        ET.SubElement(harmony, "offset").text = str(offset)
 
 
 def _musicxml_pitched_score_part(part_list: ET.Element, xml_id: str, name: str, program: int | None) -> None:
@@ -1317,6 +1492,7 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
         chord = measure.get("chordSymbol")
         if chord is not None:
             _text(chord, "chordSymbol")
+        _validate_chord_changes(measure.get("chordChanges"), meter)
         for note in notes:
             if not isinstance(note, Mapping):
                 raise ScoreConstructionError("Score note must be a mapping.")
@@ -1465,6 +1641,7 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
 __all__ = [
     "PERCUSSION_MIDI_CHANNEL",
     "PERCUSSION_NOTATION",
+    "RHYTHM_GRID_UNITS",
     "SCORE_BUILDER_VERSION",
     "SCORE_SCHEMA_VERSION",
     "ScoreConstructionError",
@@ -1472,6 +1649,7 @@ __all__ = [
     "SCORE_PARTS",
     "SCORE_PART_CLEFS",
     "build_score_document",
+    "choose_rhythm_grids",
     "percussion_hit_counts",
     "plan_score_parts",
     "percussion_warnings",
