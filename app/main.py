@@ -3687,6 +3687,7 @@ def _corrections_state(
             "notes": report["notes"],
             "chords": report["chords"],
             "hits": report["hits"],
+            "hitTiming": report["hitTiming"],
             "deletedNotes": report["deletedNotes"],
             "deletedHits": report["deletedHits"],
         },
