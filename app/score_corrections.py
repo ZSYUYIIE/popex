@@ -13,6 +13,8 @@ Operations (schema 1):
 - ``set_pitch``: ``{noteId}`` → ``midiNote`` (12–127). A tabbed note is
   re-fingered at the playable position closest to its previous fret;
 - ``delete_note``: ``{noteId}``;
+- ``set_note_timing``: ``{noteId}`` → ``measureIndex``, zero-based local
+  ``beat``, and ``durationBeats`` (quarter-note beats, quarter-beat steps);
 - ``set_tab``: ``{noteId}`` → ``string`` and ``fret`` that must sound the
   note's current pitch on its tablature instrument;
 - ``set_chord``: ``{measureIndex}`` → ``symbol`` (text) or ``None``;
@@ -24,6 +26,7 @@ Operations (schema 1):
 from __future__ import annotations
 
 import copy
+import math
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -46,7 +49,7 @@ _EVENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _CHORD_TEXT = re.compile(r"[A-Za-z0-9#♯♭b/+()°ø△ ,.-]{1,32}")
 _STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 OPERATION_KINDS = frozenset(
-    {"set_pitch", "delete_note", "set_tab", "set_chord", "set_drum_voice", "delete_hit", "reset_all"}
+    {"set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "delete_hit", "reset_all"}
 )
 
 
@@ -70,6 +73,14 @@ def _event_id(value: Any, label: str) -> str:
     return value
 
 
+def _beat(value: Any, label: str, minimum: float, maximum: float) -> float:
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not minimum <= value <= maximum or not math.isfinite(value)
+            or value * 4 != round(value * 4)):
+        raise CorrectionError(f"{label} must use quarter-beat steps within the supported range.")
+    return float(value)
+
+
 def _target(value: Any, keys: frozenset[str]) -> Mapping[str, Any]:
     if not isinstance(value, Mapping) or set(value) != set(keys):
         raise CorrectionError("The correction target is invalid.")
@@ -86,6 +97,7 @@ def validate_operation(value: Any) -> dict[str, Any]:
     allowed = {
         "set_pitch": {"op", "target", "midiNote"},
         "delete_note": {"op", "target"},
+        "set_note_timing": {"op", "target", "measureIndex", "beat", "durationBeats"},
         "set_tab": {"op", "target", "string", "fret"},
         "set_chord": {"op", "target", "symbol"},
         "set_drum_voice": {"op", "target", "broadVoice"},
@@ -95,7 +107,7 @@ def validate_operation(value: Any) -> dict[str, Any]:
     if set(value) != allowed:
         raise CorrectionError("The correction has missing or unsupported fields.")
     operation: dict[str, Any] = {"op": kind}
-    if kind in {"set_pitch", "delete_note", "set_tab"}:
+    if kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
         target = _target(value["target"], frozenset({"noteId"}))
         operation["target"] = {"noteId": _event_id(target["noteId"], "noteId")}
     elif kind in {"set_drum_voice", "delete_hit"}:
@@ -109,6 +121,10 @@ def validate_operation(value: Any) -> dict[str, Any]:
         operation["target"] = {"measureIndex": _int(target["measureIndex"], "measureIndex", 0, 2047)}
     if kind == "set_pitch":
         operation["midiNote"] = _int(value["midiNote"], "midiNote", 12, 127)
+    elif kind == "set_note_timing":
+        operation["measureIndex"] = _int(value["measureIndex"], "measureIndex", 0, 2047)
+        operation["beat"] = _beat(value["beat"], "beat", 0, 11.75)
+        operation["durationBeats"] = _beat(value["durationBeats"], "durationBeats", 0.25, 4096)
     elif kind == "set_tab":
         operation["string"] = _int(value["string"], "string", 1, 6)
         operation["fret"] = _int(value["fret"], "fret", 0, 24)
@@ -243,13 +259,15 @@ def apply_corrections(
     def remember_note(note: Mapping[str, Any]) -> None:
         report["notes"].setdefault(
             note["id"],
-            {"midiNote": note["midiNote"], "noteName": note["noteName"], "tab": copy.deepcopy(note.get("tab"))},
+            {"midiNote": note["midiNote"], "noteName": note["noteName"], "tab": copy.deepcopy(note.get("tab")),
+             "quantizedBeat": note["quantizedBeat"],
+             "quantizedDurationBeats": note["quantizedDurationBeats"]},
         )
 
     for operation in active_operations(operations):
         kind = operation["op"]
         target = operation.get("target", {})
-        if kind in {"set_pitch", "delete_note", "set_tab"}:
+        if kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
             located = notes.get(target["noteId"])
             if located is None:
                 skip(operation, "The note is not in this score.")
@@ -272,6 +290,35 @@ def apply_corrections(
                 note["midiNote"] = operation["midiNote"]
                 note["noteName"] = note_name(operation["midiNote"])
                 _refinger(note, measure["notes"])
+            elif kind == "set_note_timing":
+                meter = corrected["timing"]["beatsPerMeasure"]
+                index = operation["measureIndex"]
+                start = index * meter + operation["beat"]
+                end = start + operation["durationBeats"]
+                if index >= len(measures) or operation["beat"] >= meter or end > len(measures) * meter:
+                    skip(operation, "The timing is outside the saved score's bars.")
+                    continue
+                # Never turn a correction into an impossible same-string hold.
+                # Do not silently re-finger other musician choices to fit it.
+                tab = note.get("tab")
+                if tab and tab["status"] == "assigned" and any(
+                    other is not note and other.get("tab")
+                    and other["tab"]["status"] == "assigned"
+                    and (other["tab"]["instrument"], other["tab"]["string"]) == (tab["instrument"], tab["string"])
+                    and start < other["quantizedEndBeat"] and end > other["quantizedBeat"]
+                    for _other_measure, other in notes.values()
+                ):
+                    skip(operation, "That timing overlaps another note on the same tablature string.")
+                    continue
+                remember_note(note)
+                measure["notes"].remove(note)
+                destination = measures[index]
+                destination["notes"].append(note)
+                notes[note["id"]] = (destination, note)
+                note.update(quantizedBeat=start, quantizedEndBeat=end,
+                            quantizedDurationBeats=operation["durationBeats"])
+                # Raw seconds/beats and original quantization evidence stay
+                # unchanged; the operation and report explain the new placement.
             else:
                 tab = note.get("tab")
                 if not tab:
@@ -329,7 +376,9 @@ def apply_corrections(
         if note_id in notes:
             _measure, note = notes[note_id]
             original = report["notes"][note_id]
-            if original["midiNote"] == note["midiNote"] and original["tab"] == note.get("tab"):
+            if (original["midiNote"] == note["midiNote"] and original["tab"] == note.get("tab")
+                    and original["quantizedBeat"] == note["quantizedBeat"]
+                    and original["quantizedDurationBeats"] == note["quantizedDurationBeats"]):
                 del report["notes"][note_id]  # edited back to the prediction
     for index, original in list(report["chords"].items()):
         if measures[int(index)]["chordSymbol"] == original:
@@ -344,6 +393,8 @@ def apply_corrections(
 
 def _recompute(document: dict[str, Any], edited_hits: set[tuple[str, int]], schema: int, changed: bool) -> None:
     measures = document["measures"]
+    for measure in measures:
+        measure["notes"].sort(key=lambda note: (note["quantizedBeat"], note["quantizedEndBeat"], note["id"]))
     counts = document["counts"]
     all_notes = [note for measure in measures for note in measure["notes"]]
     counts["notes"] = len(all_notes)
