@@ -32,6 +32,7 @@
   --surface-3: #e2e6dd;
   --line: rgba(18, 22, 18, .08);
   --line-strong: rgba(18, 22, 18, .17);
+  --field-border: rgba(18, 22, 18, .5);
   --text: #121412;
   --muted: #5b6159;
   --faint: #6c7269;
@@ -76,9 +77,10 @@
   --surface-3: #2a312c;
   --line: rgba(232, 240, 230, .08);
   --line-strong: rgba(232, 240, 230, .17);
+  --field-border: rgba(232, 240, 230, .42);
   --text: #eef1ec;
   --muted: #a2a9a0;
-  --faint: #737a71;
+  --faint: #858c83;
   --ink: #eef1ec;
   --ink-hover: #ffffff;
   --ink-text: #121412;
@@ -114,9 +116,10 @@
     --surface-3: #2a312c;
     --line: rgba(232, 240, 230, .08);
     --line-strong: rgba(232, 240, 230, .17);
+  --field-border: rgba(232, 240, 230, .42);
     --text: #eef1ec;
     --muted: #a2a9a0;
-    --faint: #737a71;
+    --faint: #858c83;
     --ink: #eef1ec;
     --ink-hover: #ffffff;
     --ink-text: #121412;
@@ -882,7 +885,8 @@ label {
 input[type=url], input[type=text], input:not([type]), select, .song-fields input, .arrangement-add input, .version-fields input, .chord-edit input {
   width: 100%; min-height: 48px; padding: .6rem 1rem;
   background: var(--surface); color: var(--text);
-  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  /* Field edges need 3:1 against the sheet (WCAG 1.4.11). */
+  border: 1px solid var(--field-border); border-radius: var(--r-md);
   transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
 }
 input::placeholder {
