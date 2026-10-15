@@ -156,12 +156,17 @@ def run(data_dir: Path) -> dict:
         # musician would; the original prediction must stay downloadable.
         first_note = next(note for measure in details["measures"] for note in measure["notes"])
         first_hit = next(hit for measure in details["measures"] for hit in measure["percussionHits"])
+        timing_hit = next(hit for measure in details["measures"] for hit in measure["percussionHits"]
+                          if (hit["eventId"], hit["hitIndex"]) != (first_hit["eventId"], first_hit["hitIndex"]))
+        drum_beat = 0.5 if timing_hit["quantizedBeat"] == 0 else 0
         corrections = [
             {"op": "set_pitch", "target": {"noteId": first_note["id"]},
              "midiNote": min(127, first_note["midiNote"] + 1)},
             {"op": "delete_hit", "target": {"eventId": first_hit["eventId"], "hitIndex": first_hit["hitIndex"]}},
             {"op": "set_note_timing", "target": {"noteId": first_note["id"]},
              "measureIndex": 0, "beat": 0.25, "durationBeats": 0.5},
+            {"op": "set_hit_timing", "target": {"eventId": timing_hit["eventId"], "hitIndex": timing_hit["hitIndex"]},
+             "measureIndex": 0, "beat": drum_beat},
         ]
         for revision, operation in enumerate(corrections):
             response = client.post(
@@ -177,6 +182,11 @@ def run(data_dir: Path) -> dict:
                            and edited_note["quantizedDurationBeats"] == 0.5
                            and edited_note["startSeconds"] == first_note["startSeconds"]
                            and edited_note["endSeconds"] == first_note["endSeconds"])
+        edited_hit = next(hit for measure in corrected_details["measures"] for hit in measure["percussionHits"]
+                          if (hit["eventId"], hit["hitIndex"]) == (timing_hit["eventId"], timing_hit["hitIndex"]))
+        drum_timing_separate = (edited_hit["quantizedBeat"] == drum_beat
+                                and edited_hit["rawTimeSeconds"] == timing_hit["rawTimeSeconds"]
+                                and edited_hit["rawBeat"] == timing_hit["rawBeat"])
         predictions_unchanged = all(hashlib.sha256(path.read_bytes()).hexdigest() == digest
                                     for path, digest in evidence_hashes.items())
         part_downloads = {
@@ -227,6 +237,7 @@ def run(data_dir: Path) -> dict:
                 "originalMusicxmlDiffers": original_xml.status_code == 200
                 and original_xml.content != musicxml.content,
                 "timingSeparate": timing_separate,
+                "drumTimingSeparate": drum_timing_separate,
                 "predictionHashesUnchanged": predictions_unchanged,
             },
             "midiChannel10NoteOns": _channel_ten_note_ons(midi.content),
@@ -241,10 +252,11 @@ def run(data_dir: Path) -> dict:
         problems.append("MusicXML has no percussion part")
     corrections = summary["corrections"]
     if (
-        corrections["active"] != 3
+        corrections["active"] != 4
         or corrections["correctedPercussionHits"] != corrections["originalPercussionHits"] - 1
         or not corrections["originalMusicxmlDiffers"]
         or not corrections["timingSeparate"]
+        or not corrections["drumTimingSeparate"]
         or not corrections["predictionHashesUnchanged"]
     ):
         problems.append("corrections were not applied separately from the prediction")

@@ -19,6 +19,8 @@ Operations (schema 1):
   note's current pitch on its tablature instrument;
 - ``set_chord``: ``{measureIndex}`` → ``symbol`` (text) or ``None``;
 - ``set_drum_voice``: ``{eventId, hitIndex}`` → ``broadVoice``;
+- ``set_hit_timing``: ``{eventId, hitIndex}`` → ``measureIndex`` and
+  zero-based local ``beat`` (quarter-note beats, half-beat steps);
 - ``delete_hit``: ``{eventId, hitIndex}``;
 - ``reset_all``: ignore every earlier operation (itself undoable).
 """
@@ -49,7 +51,7 @@ _EVENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _CHORD_TEXT = re.compile(r"[A-Za-z0-9#♯♭b/+()°ø△ ,.-]{1,32}")
 _STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 OPERATION_KINDS = frozenset(
-    {"set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "delete_hit", "reset_all"}
+    {"set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "set_hit_timing", "delete_hit", "reset_all"}
 )
 
 
@@ -101,6 +103,7 @@ def validate_operation(value: Any) -> dict[str, Any]:
         "set_tab": {"op", "target", "string", "fret"},
         "set_chord": {"op", "target", "symbol"},
         "set_drum_voice": {"op", "target", "broadVoice"},
+        "set_hit_timing": {"op", "target", "measureIndex", "beat"},
         "delete_hit": {"op", "target"},
         "reset_all": {"op"},
     }[kind]
@@ -110,7 +113,7 @@ def validate_operation(value: Any) -> dict[str, Any]:
     if kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
         target = _target(value["target"], frozenset({"noteId"}))
         operation["target"] = {"noteId": _event_id(target["noteId"], "noteId")}
-    elif kind in {"set_drum_voice", "delete_hit"}:
+    elif kind in {"set_drum_voice", "delete_hit", "set_hit_timing"}:
         target = _target(value["target"], frozenset({"eventId", "hitIndex"}))
         operation["target"] = {
             "eventId": _event_id(target["eventId"], "eventId"),
@@ -125,6 +128,12 @@ def validate_operation(value: Any) -> dict[str, Any]:
         operation["measureIndex"] = _int(value["measureIndex"], "measureIndex", 0, 2047)
         operation["beat"] = _beat(value["beat"], "beat", 0, 11.75)
         operation["durationBeats"] = _beat(value["durationBeats"], "durationBeats", 0.25, 4096)
+    elif kind == "set_hit_timing":
+        operation["measureIndex"] = _int(value["measureIndex"], "measureIndex", 0, 2047)
+        beat = _beat(value["beat"], "beat", 0, 11.5)
+        if beat * 2 != round(beat * 2):
+            raise CorrectionError("Drum timing must use half-beat steps.")
+        operation["beat"] = beat
     elif kind == "set_tab":
         operation["string"] = _int(value["string"], "string", 1, 6)
         operation["fret"] = _int(value["fret"], "fret", 0, 24)
@@ -248,6 +257,7 @@ def apply_corrections(
         "notes": {},
         "chords": {},
         "hits": {},
+        "hitTiming": {},
         "deletedNotes": [],
         "deletedHits": [],
     }
@@ -344,7 +354,7 @@ def apply_corrections(
             measure = measures[index]
             report["chords"].setdefault(str(index), measure["chordSymbol"])
             measure["chordSymbol"] = operation["symbol"]
-        elif kind in {"set_drum_voice", "delete_hit"}:
+        elif kind in {"set_drum_voice", "delete_hit", "set_hit_timing"}:
             key = (target["eventId"], target["hitIndex"])
             located = hits.get(key)
             if located is None:
@@ -352,8 +362,21 @@ def apply_corrections(
                 continue
             measure, hit = located
             report_key = f"{key[0]}#{key[1]}"
-            report["hits"].setdefault(report_key, hit["broadVoice"])
-            if kind == "delete_hit":
+            if kind == "set_hit_timing":
+                index = operation["measureIndex"]
+                meter = corrected["timing"]["beatsPerMeasure"]
+                if index >= len(measures) or operation["beat"] >= meter:
+                    skip(operation, "The timing is outside the saved score's bars.")
+                    continue
+                report["hitTiming"].setdefault(report_key, hit["quantizedBeat"])
+                measure["percussionHits"].remove(hit)
+                destination = measures[index]
+                destination["percussionHits"].append(hit)
+                hits[key] = (destination, hit)
+                hit["quantizedBeat"] = index * meter + operation["beat"]
+                # Raw placement and original quantization warnings stay intact.
+            elif kind == "delete_hit":
+                report["hits"].setdefault(report_key, hit["broadVoice"])
                 measure["percussionHits"].remove(hit)
                 del hits[key]
                 report["deletedHits"].append(
@@ -366,11 +389,21 @@ def apply_corrections(
                     }
                 )
             else:
+                report["hits"].setdefault(report_key, hit["broadVoice"])
                 hit["broadVoice"] = operation["broadVoice"]
                 hit["resolved"] = operation["broadVoice"] != UNRESOLVED_PERCUSSION_VOICE
                 edited_hits.add(key)
         report["applied"].append(operation["id"])
 
+    for key, original in list(report["hitTiming"].items()):
+        event_id, hit_index = key.rsplit("#", 1)
+        identity = (event_id, int(hit_index))
+        located = hits.get(identity)
+        if located is not None:
+            if located[1]["quantizedBeat"] == original:
+                del report["hitTiming"][key]  # edited back, including slot priority
+            else:
+                edited_hits.add(identity)
     _recompute(corrected, edited_hits, schema, bool(report["applied"]))
     for note_id in list(report["notes"]):
         if note_id in notes:
@@ -413,6 +446,9 @@ def _recompute(document: dict[str, Any], edited_hits: set[tuple[str, int]], sche
         }
 
     if schema >= 2:
+        for measure in measures:
+            measure["percussionHits"].sort(key=lambda hit: (
+                hit["quantizedBeat"], hit["rawTimeSeconds"], hit["eventId"], hit["hitIndex"]))
         hits = [hit for measure in measures for hit in measure["percussionHits"]]
         slots: dict[tuple[str, float], list[dict[str, Any]]] = {}
         for hit in hits:
