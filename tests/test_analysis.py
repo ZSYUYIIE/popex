@@ -95,9 +95,11 @@ def test_click_track_tempo_and_beats_are_persisted(tmp_path: Path):
         "analyzing_audio",
         "detecting_beats",
         "estimating_key",
+        "finding_sections",
         "saving_analysis",
     ]
 
+    assert set(result.payload["structure"]) == {"method", "sections", "note"}
     saved = json.loads(
         (
             config.exports_dir

@@ -40,7 +40,7 @@ class Settings:
     ffmpeg_binary: str = "ffmpeg"
     ffprobe_binary: str = "ffprobe"
     audio_analysis_enabled: bool = False
-    audio_analysis_version: str = "baseline-librosa-v1"
+    audio_analysis_version: str = "baseline-librosa-v2"
     audio_analysis_timeout_seconds: int = 300
     audio_silence_rms_threshold: float = 0.0001
     stem_separation_enabled: bool = False
@@ -109,9 +109,9 @@ class Settings:
             or "ffprobe",
             audio_analysis_enabled=_boolean("AUDIO_ANALYSIS_ENABLED", True),
             audio_analysis_version=os.getenv(
-                "AUDIO_ANALYSIS_VERSION", "baseline-librosa-v1"
+                "AUDIO_ANALYSIS_VERSION", "baseline-librosa-v2"
             ).strip()
-            or "baseline-librosa-v1",
+            or "baseline-librosa-v2",
             audio_analysis_timeout_seconds=_positive_int(
                 "AUDIO_ANALYSIS_TIMEOUT_SECONDS", 300
             ),

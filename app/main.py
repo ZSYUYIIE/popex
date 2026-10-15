@@ -202,6 +202,7 @@ ANALYSIS_STAGES = {
     "analyzing_audio",
     "detecting_beats",
     "estimating_key",
+    "finding_sections",
     "saving_analysis",
 }
 PREPARATION_PROGRESS_LIMIT = 64.0

@@ -411,6 +411,7 @@ Implemented capabilities:
 - explicit first-use consent before any model preparation or download;
 - revision- and SHA-256-backed schema-3 stem manifests;
 - safe stem details, preview, and download endpoints;
+- song sections in the audio analysis (`novelty-chroma-mfcc-v1`, analysis `baseline-librosa-v2`): section changes come from a novelty curve over one-second chroma and timbre blocks, at least 8 s apart and snapped to a nearby beat, and sections that sound alike share a letter (A, B, ...). The letters are not verse or chorus names, and recordings under 30 s or without clear changes say so. The analysis fold shows them as one proportional strip;
 - local baseline raw transcription (`baseline-pyin-onset-v1`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment;
 - editable interpretation drafts (`editable-interpretation-v1`, schema 1) with source-aware pitched parts/phrases, conservative rhythm grid, and broad drum structure;
 - evidence-aware harmonic context (`pitch-class-window-v1`, schema 1) with conservative chord candidates, unresolved accounting, and per-event warning preservation;
@@ -435,7 +436,7 @@ Implemented capabilities:
 - per-part MusicXML downloads for every pitched, tablature, and drum part;
 - a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
 - side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
-- a studio-style web interface: stage-dark by default with a designed light theme (System, Dark, or Light, remembered per browser), self-hosted OFL fonts (Bricolage Grotesque, Geist, Geist Mono), and a live piano roll drawn from saved score data (notes coloured by part, chord and drum lanes, bar numbers) in the hero and in every score panel, where its playhead follows the review player; motion respects reduced-motion settings;
+- a calm studio interface: a light sheet on a sage canvas by default, with a designed dark theme (Light, Dark, or Match system, remembered per browser), self-hosted OFL fonts (Geist, Geist Mono), hairline folds instead of boxes (each recording shows a one-line summary and opens only the stage that needs attention), and a live piano roll drawn from saved score data (notes coloured by part, chord and drum lanes, bar numbers) in the hero, with floating tempo and key facts and arrows to step through your recordings, and in every score panel, where its playhead follows the review player; motion respects reduced-motion settings;
 - a keyboard-accessible draft-score panel with progress, layer-by-layer honesty notes, warnings, a measure-by-measure review table, and MIDI/MusicXML/JSON downloads;
 - retry and restart recovery that preserve completed source, analysis, stems, transcription, interpretation, and previously published harmony and scores;
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
@@ -679,7 +680,7 @@ Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, a
 | `POPEX_FFMPEG_BINARY` | `ffmpeg` | FFmpeg executable or explicit path |
 | `POPEX_FFPROBE_BINARY` | `ffprobe` | ffprobe executable or explicit path |
 | `AUDIO_ANALYSIS_ENABLED` | `true` | Analyze newly normalized media |
-| `AUDIO_ANALYSIS_VERSION` | `baseline-librosa-v1` | Reproducibility and cache key |
+| `AUDIO_ANALYSIS_VERSION` | `baseline-librosa-v2` | Reproducibility and cache key |
 | `AUDIO_ANALYSIS_TIMEOUT_SECONDS` | `300` | Analysis timeout guard |
 | `AUDIO_SILENCE_RMS_THRESHOLD` | `0.0001` | Effective-silence threshold |
 | `STEM_SEPARATION_ENABLED` | `false` | Expose and run the optional local separation workflow |
