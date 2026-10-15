@@ -81,7 +81,7 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v7"
+SCORE_PIPELINE_VERSION = "score-pipeline-v8"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
@@ -90,6 +90,7 @@ PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
 PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipeline-v4"}
 PRE_RHYTHM_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline-v5"}
 PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS = PRE_RHYTHM_GRID_PIPELINE_VERSIONS | {"score-pipeline-v6"}
+PRE_DOWNBEAT_GRID_PIPELINE_VERSIONS = PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS | {"score-pipeline-v7"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -163,8 +164,9 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     modal tonal context. ``parts``: a score with notes from before instrument
     parts by source line. ``rhythm-grid``: a score with notes from before
     evidence-gated sixteenth-note grids. ``half-bar-chords``: a score of a
-    recording with completed harmony from before half-bar chord changes. Such
-    scores stay readable and downloadable.
+    recording with completed harmony from before half-bar chord changes.
+    ``downbeat-grid``: a score with notes from before bar lines followed the
+    detected downbeats. Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -201,6 +203,13 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         return "rhythm-grid"
     if version in PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS and record.get("harmony_status") == "completed":
         return "half-bar-chords"
+    if (
+        version in PRE_DOWNBEAT_GRID_PIPELINE_VERSIONS
+        and isinstance(notes, int)
+        and not isinstance(notes, bool)
+        and notes > 0
+    ):
+        return "downbeat-grid"
     return None
 
 
@@ -666,6 +675,7 @@ def construct_score(
             tempo_bpm=evidence["tempoBpm"],
             beats_per_measure=evidence["beatsPerMeasure"],
             percussion_hits=percussion_inputs,
+            lead_in_seconds=evidence["gridOrigin"]["leadInSeconds"],
         )
     except ScoreConstructionError as exc:
         raise ScorePipelineError(
@@ -780,6 +790,9 @@ def construct_score(
         "tempoConfidence": evidence["tempoConfidence"],
         "tempoStable": evidence["tempoStable"],
         "meterConfidence": evidence["meterConfidence"],
+        "leadInSeconds": built["leadInSeconds"],
+        "gridOrigin": evidence["gridOrigin"]["source"],
+        "gridConcentration": evidence["gridOrigin"]["concentration"],
     }
     score_parts = plan_score_parts(
         [note for measure in measures for note in measure["notes"] if note["tab"] is None]

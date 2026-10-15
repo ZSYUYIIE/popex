@@ -51,7 +51,7 @@ from app.tablature import (
 )
 
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v6"
+SCORE_BUILDER_VERSION = "score-construction-v7"
 # Fixed MusicXML part identities: combined pitched part, drums, then one part
 # per fretted instrument (standard staff plus a synchronized TAB staff).
 _TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
@@ -267,6 +267,7 @@ def _place_percussion_hits(
     percussion_hits: Sequence[Mapping[str, Any]],
     *,
     seconds_per_beat: float,
+    lead_in_seconds: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Quantize hits to the eighth grid and collapse same-voice duplicates.
 
@@ -286,7 +287,7 @@ def _place_percussion_hits(
         raise ScoreConstructionError("Duplicate percussion hit identity.")
     placed: list[dict[str, Any]] = []
     for hit in hits:
-        raw_beat = hit["timeSeconds"] / seconds_per_beat
+        raw_beat = (hit["timeSeconds"] + lead_in_seconds) / seconds_per_beat
         quantized = round(raw_beat * 2.0) / 2.0
         placed.append(
             {
@@ -340,8 +341,14 @@ def build_score_document(
     beats_per_measure: int = 4,
     chord_symbols: Sequence[str] | None = None,
     percussion_hits: Sequence[Mapping[str, Any]] | None = None,
+    lead_in_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Build a versioned draft score document with explicit quantization.
+
+    ``lead_in_seconds`` shifts the bar grid so the recording starts that far
+    into bar 1 (see ``estimate_grid_lead_in``); bar 1 then begins before 0 s
+    and a pickup falls at the end of an otherwise empty first bar. Raw event
+    times are never changed.
 
     When ``percussion_hits`` is supplied, every measure gains a separate
     ``percussionHits`` list on the same eighth-note grid; pitched notes and
@@ -349,6 +356,9 @@ def build_score_document(
     """
     tempo = _number(tempo_bpm, "tempoBpm", minimum=20.0, maximum=300.0)
     meter = _integer(beats_per_measure, "beatsPerMeasure", minimum=1, maximum=12)
+    lead_in = _number(lead_in_seconds, "leadInSeconds", minimum=0.0, maximum=meter * 60.0 / tempo)
+    if lead_in >= meter * 60.0 / tempo:
+        raise ScoreConstructionError("leadInSeconds must be shorter than one bar.")
     if not isinstance(pitched_events, Sequence) or isinstance(pitched_events, (str, bytes)):
         raise ScoreConstructionError("pitchedNoteEvents must be a sequence.")
     if len(pitched_events) > _MAX_NOTES:
@@ -373,13 +383,15 @@ def build_score_document(
             raise ScoreConstructionError("Too many chord symbols.")
 
     sorted_notes = sorted(notes, key=lambda item: (item["startSeconds"], item["endSeconds"], item["id"]))
-    rhythm_grids = choose_rhythm_grids(sorted_notes, seconds_per_beat=seconds_per_beat)
+    rhythm_grids = choose_rhythm_grids(
+        sorted_notes, seconds_per_beat=seconds_per_beat, lead_in_seconds=lead_in
+    )
     unit_for_kind = {grid["sourceKind"]: grid["unitBeats"] for grid in rhythm_grids}
     for note in sorted_notes:
         unit = unit_for_kind[note.get("sourceKind", "unassigned")]
         steps = 1.0 / unit
-        note["rawStartBeat"] = note["startSeconds"] / seconds_per_beat
-        note["rawEndBeat"] = note["endSeconds"] / seconds_per_beat
+        note["rawStartBeat"] = (note["startSeconds"] + lead_in) / seconds_per_beat
+        note["rawEndBeat"] = (note["endSeconds"] + lead_in) / seconds_per_beat
         note["quantizedStartBeat"] = round(note["rawStartBeat"] * steps) / steps
         note["quantizedEndBeat"] = round(note["rawEndBeat"] * steps) / steps
         if note["quantizedEndBeat"] <= note["quantizedStartBeat"]:
@@ -394,7 +406,9 @@ def build_score_document(
     placed_hits = (
         None
         if percussion_hits is None
-        else _place_percussion_hits(percussion_hits, seconds_per_beat=seconds_per_beat)
+        else _place_percussion_hits(
+            percussion_hits, seconds_per_beat=seconds_per_beat, lead_in_seconds=lead_in
+        )
     )
     latest_end_beat = max(
         (note["quantizedEndBeat"] for note in sorted_notes), default=0.0
@@ -409,8 +423,8 @@ def build_score_document(
         )
     measure_count = required_measure_count
     measures: list[dict[str, Any]] = [
-        {"measureIndex": index, "startSeconds": index * seconds_per_measure,
-         "endSeconds": (index + 1) * seconds_per_measure, "notes": [], "chordSymbol": None}
+        {"measureIndex": index, "startSeconds": index * seconds_per_measure - lead_in,
+         "endSeconds": (index + 1) * seconds_per_measure - lead_in, "notes": [], "chordSymbol": None}
         for index in range(measure_count)
     ]
     if symbols:
@@ -490,6 +504,7 @@ def build_score_document(
         "divisions": _DIVISIONS,
         "measureCount": measure_count,
         "noteCount": len(sorted_notes),
+        "leadInSeconds": lead_in,
         "rhythmGrids": rhythm_grids,
         "measures": measures,
         "warnings": warnings,
@@ -497,6 +512,62 @@ def build_score_document(
     if placed_hits is not None:
         document["percussionHitCount"] = len(placed_hits)
     return copy.deepcopy(document)
+
+
+# The bar grid follows the detected downbeats (or beats) only when their phase is
+# consistent across the recording; otherwise bars start at 0 s as before.
+_GRID_MIN_CONCENTRATION = 0.8
+_GRID_MIN_DOWNBEATS = 4
+_GRID_MIN_BEATS = 8
+_GRID_SNAP_SECONDS = 0.010
+
+
+def _phase(times: Sequence[float], period: float) -> tuple[float, float]:
+    """Circular mean phase of ``times`` within ``period`` and its concentration (0-1)."""
+    angles = [2.0 * math.pi * (time % period) / period for time in times]
+    x = sum(math.cos(angle) for angle in angles) / len(angles)
+    y = sum(math.sin(angle) for angle in angles) / len(angles)
+    phase = (math.atan2(y, x) % (2.0 * math.pi)) / (2.0 * math.pi) * period
+    return phase, math.hypot(x, y)
+
+
+def estimate_grid_lead_in(
+    beats_seconds: Sequence[float],
+    downbeats_seconds: Sequence[float],
+    *,
+    tempo_bpm: float,
+    beats_per_measure: int,
+    meter_from_analysis: bool,
+) -> dict[str, Any]:
+    """Return how far into bar 1 the recording starts, with its evidence.
+
+    Downbeats from the analysis (only when it also supplied the meter) set the
+    bar phase; otherwise detected beats set the beat phase, and the bar starts
+    on the first beat. Phases must agree across the recording (concentration
+    at least 0.8), which also catches tempo drift; otherwise the grid stays at
+    0 s with source ``none``.
+    """
+    seconds_per_beat = 60.0 / tempo_bpm
+    bar = seconds_per_beat * beats_per_measure
+    downbeats = [float(t) for t in downbeats_seconds if isinstance(t, (int, float)) and math.isfinite(t) and t >= 0]
+    beats = [float(t) for t in beats_seconds if isinstance(t, (int, float)) and math.isfinite(t) and t >= 0]
+    source, period, concentration, phase = "none", bar, None, 0.0
+    if meter_from_analysis and len(downbeats) >= _GRID_MIN_DOWNBEATS:
+        phase, concentration = _phase(downbeats, bar)
+        if concentration >= _GRID_MIN_CONCENTRATION:
+            source = "downbeats"
+    if source == "none" and len(beats) >= _GRID_MIN_BEATS:
+        beat_phase, beat_concentration = _phase(beats, seconds_per_beat)
+        if beat_concentration >= _GRID_MIN_CONCENTRATION:
+            source, period, phase, concentration = "beats", seconds_per_beat, beat_phase, beat_concentration
+    lead_in = (period - phase) % period if source != "none" else 0.0
+    if lead_in < _GRID_SNAP_SECONDS or period - lead_in < _GRID_SNAP_SECONDS:
+        lead_in = 0.0
+    return {
+        "leadInSeconds": round(lead_in, 4),
+        "source": source,
+        "concentration": None if concentration is None else round(concentration, 3),
+    }
 
 
 # A line earns a sixteenth grid only from clear onset evidence; eighths stay the default.
@@ -509,7 +580,7 @@ _GRID_MIN_SIXTEENTH_SECONDS = 0.090
 
 
 def choose_rhythm_grids(
-    notes: Sequence[Mapping[str, Any]], *, seconds_per_beat: float
+    notes: Sequence[Mapping[str, Any]], *, seconds_per_beat: float, lead_in_seconds: float = 0.0
 ) -> list[dict[str, Any]]:
     """Choose an eighth or sixteenth grid per source line from onset evidence.
 
@@ -531,7 +602,7 @@ def choose_rhythm_grids(
         ]
         supporting = 0
         for note in confident:
-            position = note["startSeconds"] / sixteenth_seconds
+            position = (note["startSeconds"] + lead_in_seconds) / sixteenth_seconds
             slot = round(position)
             if slot % 2 == 1 and abs(position - slot) * sixteenth_seconds <= _GRID_ONSET_TOLERANCE_SECONDS:
                 supporting += 1
@@ -1650,6 +1721,7 @@ __all__ = [
     "SCORE_PART_CLEFS",
     "build_score_document",
     "choose_rhythm_grids",
+    "estimate_grid_lead_in",
     "percussion_hit_counts",
     "plan_score_parts",
     "percussion_warnings",

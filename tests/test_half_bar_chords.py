@@ -164,8 +164,9 @@ def test_half_bar_changes_validate_against_musicxml_schema() -> None:
 def test_older_scores_with_harmony_are_out_of_date() -> None:
     record = {"score_version": "score-pipeline-v6", "score_note_count": 4, "harmony_status": "completed"}
     assert score_outdated_reason(record) == "half-bar-chords"
-    assert score_outdated_reason({**record, "harmony_status": "not_started"}) is None
-    assert score_outdated_reason({**record, "score_version": "score-pipeline-v7"}) is None
+    # Without harmony the half-bar reason does not apply; the later downbeat-grid reason does.
+    assert score_outdated_reason({**record, "harmony_status": "not_started"}) == "downbeat-grid"
+    assert score_outdated_reason({**record, "score_version": "score-pipeline-v8"}) is None
 
 
 def test_review_table_and_roll_show_both_chords() -> None:
