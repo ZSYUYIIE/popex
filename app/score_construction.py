@@ -1260,14 +1260,22 @@ def _append_directions(
         ET.SubElement(metronome, "per-minute").text = f"{tempo:.6g}"
         ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
     chord = measure.get("chordSymbol")
+    # A whole-bar symbol (possibly a musician's correction) wins over half-bar changes.
     if chord is not None:
-        parsed = parse_chord_symbol(chord)
+        changes = [{"beat": 0.0, "symbol": chord}]
+    else:
+        changes = measure.get("chordChanges") or []
+    for change in changes:
+        offset = int(round(change["beat"] * _DIVISIONS))
+        parsed = parse_chord_symbol(change["symbol"])
         if parsed is None:
             # Text the parser does not fully understand is kept exactly, never guessed.
             direction = ET.SubElement(measure_el, "direction", placement="above")
-            ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = chord
+            ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = change["symbol"]
+            if offset:
+                ET.SubElement(direction, "offset").text = str(offset)
         else:
-            _append_harmony(measure_el, parsed)
+            _append_harmony(measure_el, parsed, offset=offset)
 
 
 # Chord-symbol suffix -> MusicXML <kind> value. Covers the harmony stage's vocabulary
@@ -1292,6 +1300,23 @@ _HARMONY_KINDS: dict[str, str] = {
 }
 _CHORD_SYMBOL_RE = re.compile(r"([A-G])([#b♯♭]?)(.*?)(?:/([A-G])([#b♯♭]?))?")
 _ALTER = {"": 0, "#": 1, "♯": 1, "b": -1, "♭": -1}
+
+
+def _validate_chord_changes(value: Any, meter: int) -> None:
+    """Half-bar chord changes: at most two, strictly increasing beats inside the bar."""
+    if value is None:
+        return
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) > 2:
+        raise ScoreConstructionError("chordChanges must be a short sequence.")
+    previous = -1.0
+    for change in value:
+        if not isinstance(change, Mapping) or set(change) != {"beat", "symbol"}:
+            raise ScoreConstructionError("chordChanges entries are malformed.")
+        beat = _number(change["beat"], "chordChanges.beat", minimum=0.0, maximum=meter - 0.5)
+        if beat <= previous:
+            raise ScoreConstructionError("chordChanges beats must increase.")
+        previous = beat
+        _text(change["symbol"], "chordChanges.symbol")
 
 
 def parse_chord_symbol(symbol: str) -> dict[str, Any] | None:
@@ -1324,7 +1349,7 @@ def parse_chord_symbol(symbol: str) -> dict[str, Any] | None:
     return parsed
 
 
-def _append_harmony(measure_el: ET.Element, parsed: Mapping[str, Any]) -> None:
+def _append_harmony(measure_el: ET.Element, parsed: Mapping[str, Any], *, offset: int = 0) -> None:
     harmony = ET.SubElement(measure_el, "harmony", {"print-frame": "no"})
     root = ET.SubElement(harmony, "root")
     ET.SubElement(root, "root-step").text = parsed["rootStep"]
@@ -1336,6 +1361,8 @@ def _append_harmony(measure_el: ET.Element, parsed: Mapping[str, Any]) -> None:
         ET.SubElement(bass, "bass-step").text = parsed["bassStep"]
         if parsed["bassAlter"]:
             ET.SubElement(bass, "bass-alter").text = str(parsed["bassAlter"])
+    if offset:
+        ET.SubElement(harmony, "offset").text = str(offset)
 
 
 def _musicxml_pitched_score_part(part_list: ET.Element, xml_id: str, name: str, program: int | None) -> None:
@@ -1465,6 +1492,7 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
         chord = measure.get("chordSymbol")
         if chord is not None:
             _text(chord, "chordSymbol")
+        _validate_chord_changes(measure.get("chordChanges"), meter)
         for note in notes:
             if not isinstance(note, Mapping):
                 raise ScoreConstructionError("Score note must be a mapping.")

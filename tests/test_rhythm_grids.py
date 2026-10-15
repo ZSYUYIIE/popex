@@ -124,7 +124,7 @@ def test_saved_scores_record_and_enforce_rhythm_grids(tmp_path) -> None:
         assert client.post(f"/api/jobs/{job_id}/score/construct").status_code == 202
     record = db.get_job(settings.database_path, job_id)
     document = load_score_artifact(job_id, settings, artifact_file_name=record["score_artifact_file_name"])
-    assert document["schemaVersion"] == 6
+    assert document["schemaVersion"] == 7
     kinds = {note["sourceKind"] for measure in document["measures"] for note in measure["notes"]}
     assert [item["sourceKind"] for item in document["rhythmGrids"]] == sorted(kinds)
     assert document["layers"]["pitchedNotes"]["note"].startswith("Quantized from raw pitched events")

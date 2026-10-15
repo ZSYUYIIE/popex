@@ -193,7 +193,7 @@ def test_successful_construction_persists_reviewable_document(tmp_path: Path) ->
         "warnings": len(details["warnings"]),
     }
 
-    assert details["version"] == "score-pipeline-v6"
+    assert details["version"] == "score-pipeline-v7"
     assert details["builderVersion"] == "score-construction-v6"
     assert details["sources"]["transcription"] == {
         "version": "raw-transcription-v1",
@@ -643,6 +643,7 @@ def test_chord_symbol_needs_a_dominant_uncontested_candidate() -> None:
         "ambiguous": 1,
         "beyond": 1,
         "truncated": 0,
+        "split": 0,
     }
 
 
