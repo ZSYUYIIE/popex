@@ -176,7 +176,7 @@ t.renderScore({json.dumps(EDIT_JOB)});
 const toggle={{dataset:{{action:"score-edit-toggle",jobId:"edit"}}}};
 await t.getListener("#jobs","click")({{target:{{closest:()=>toggle}}}});
 const html=t.renderScore({json.dumps(EDIT_JOB)});
-const key="timing--edit--b1";
+const key=html.match(/data-action="correction-timing"[^>]*data-input-key="([^"]+)"/)[1];
 for(const [field,value] of [["bar","1"],["beat","1.25"],["duration","1.5"]])
   t.getElement(`[data-timing-input="${{key}}-${{field}}"]`).value=value;
 const requested=[];
@@ -188,9 +188,25 @@ console.log(JSON.stringify({{html,requested}}));
     assert 'aria-label="Bar for B1"' in result["html"]
     assert 'aria-label="Beat for B1"' in result["html"]
     assert 'aria-label="Duration in beats for B1"' in result["html"]
-    assert 'class="note-timing" data-open-key="timing--edit--b1"' in result["html"]
+    assert 'class="note-timing" data-open-key="timing-' in result["html"]
     assert json.loads(result["requested"][0]["body"]) == {
         "expectedRevision": 3, "operation": timing_operation("b1")}
+
+
+def test_timing_form_keys_never_alias_distinct_event_ids():
+    detail = copy.deepcopy(EDIT_DETAIL)
+    note = detail["measures"][0]["notes"][0]
+    detail["measures"][0]["notes"] = [dict(note, id=value) for value in ("a:b", "a-b", "a.b")]
+    result = _run_node(f'''
+t.setDetail("edit", {json.dumps(detail)});
+t.renderScore({json.dumps(EDIT_JOB)});
+const toggle={{dataset:{{action:"score-edit-toggle",jobId:"edit"}}}};
+await t.getListener("#jobs","click")({{target:{{closest:()=>toggle}}}});
+const html=t.renderScore({json.dumps(EDIT_JOB)});
+const keys=[...html.matchAll(/data-action="correction-timing"[^>]*data-input-key="([^"]+)"/g)].map(match=>match[1]);
+console.log(JSON.stringify({{keys}}));
+''')
+    assert len(result["keys"]) == len(set(result["keys"])) == 3
 
 
 def midi_events(data):

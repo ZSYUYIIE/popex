@@ -135,7 +135,9 @@ function noteEditControls(note,ctx){const midi=Number.isInteger(note.midiNote)?n
 function noteTimingControls(note,ctx){
   const start=Number(note.quantizedBeat),duration=Number(note.quantizedDurationBeats),meter=ctx.meter;
   if(!Number.isFinite(start)||!Number.isFinite(duration)||!Number.isInteger(meter)||meter<1)return "";
-  const key=focusKey("timing",ctx.jobId,note.id),name=midiName(note.midiNote),bars=scoreCache.get(ctx.jobId)?.measures?.length||1;
+  // Preserve distinct stable IDs such as a:b and a-b; lossy DOM slugs could
+  // otherwise read another note's input values when a timing edit is saved.
+  const token=value=>Array.from(String(value),c=>c.codePointAt(0).toString(16)).join("_"),key=`timing-${token(ctx.jobId)}--${token(note.id)}`,name=midiName(note.midiNote),bars=scoreCache.get(ctx.jobId)?.measures?.length||1;
   const input=(field,label,value,min,max,step)=>`<label>${label}<input type="number" min="${min}" max="${max}" step="${step}" value="${value}" required aria-label="${escapeHtml(`${label} for ${name}`)}" data-timing-input="${key}-${field}" data-focus-key="${key}-${field}"></label>`;
   return `<details class="note-timing" data-open-key="${key}"><summary>Timing for ${escapeHtml(name)}</summary><span class="score-edit-controls">${input("bar","Bar",Math.floor(start/meter)+1,1,bars,1)}${input("beat","Beat",start%meter+1,1,meter+0.75,0.25)}${input("duration","Duration in beats",duration,0.25,4096,0.25)}<button type="button" class="mini" data-action="correction-timing" data-job-id="${escapeHtml(ctx.jobId)}" data-note-id="${escapeHtml(note.id)}" data-input-key="${key}" data-focus-key="${key}-save" aria-label="Save timing for ${escapeHtml(name)}">Save timing</button></span><small>Quarter-note beats, in quarter-beat steps. The original timing is kept. Changes must fit the saved bars.</small></details>`;
 }
