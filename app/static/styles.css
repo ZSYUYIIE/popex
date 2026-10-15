@@ -1269,6 +1269,56 @@ progress::-moz-progress-bar {
   max-width: 70ch;
 }
 
+/* Song sections: one strip, proportional to time; alike sections share a tint. */
+.song-sections {
+  margin-top: 1.25rem;
+}
+.song-sections-title {
+  margin: 0 0 .5rem;
+  font-weight: 600;
+}
+.section-strip {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 3px;
+  min-width: 0;
+}
+.section-strip li {
+  flex-basis: 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: .55rem .45rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--section-tint, var(--surface-3)) 55%, var(--surface));
+  display: grid;
+  gap: .05rem;
+}
+.section-strip li:first-child {
+  border-radius: 14px 10px 10px 14px;
+}
+.section-strip li:last-child {
+  border-radius: 10px 14px 14px 10px;
+}
+.section-label {
+  font-weight: 700;
+  letter-spacing: -.02em;
+}
+.section-time {
+  font-size: .75rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+.section-a { --section-tint: var(--sage); }
+.section-b { --section-tint: var(--part-lines); }
+.section-c { --section-tint: var(--part-vocal); }
+.section-d { --section-tint: #9cc3d8; }
+.section-e { --section-tint: #c4b5e0; }
+
 /* Facts read as typography, not tiles. */
 .status-grid, .analysis-summary, .separation-summary {
   display: flex;
@@ -1842,8 +1892,15 @@ body.has-review-player {
     justify-self: start;
     margin-top: 1rem;
   }
+  .header-inner {
+    gap: 1rem;
+  }
   .workspace-state {
+    min-width: 0;
     font-size: .8rem;
+    white-space: normal;
+    text-align: right;
+    line-height: 1.25;
   }
   .job-head {
     grid-template-columns: minmax(0, 1fr);

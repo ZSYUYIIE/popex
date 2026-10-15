@@ -136,6 +136,14 @@ def analyze_audio(
     if tonality["symbol"] is None:
         warnings.append("A reliable global tonal center could not be estimated.")
 
+    stage_callback(
+        "finding_sections",
+        "Finding where the song's sections change.",
+        90,
+    )
+    structure = _analyze_structure(mono, sample_rate, timing["beatsSeconds"], duration_seconds)
+    _check_timeout(started, settings)
+
     created_at = datetime.now(timezone.utc).isoformat()
     payload: dict[str, Any] = {
         "schemaVersion": 1,
@@ -158,6 +166,7 @@ def analyze_audio(
         },
         "timing": timing,
         "tonality": tonality,
+        "structure": structure,
         "warnings": warnings,
     }
     _validate_json_numbers(payload)
@@ -336,6 +345,119 @@ def _analyze_timing(mono: np.ndarray, sample_rate: int) -> dict[str, Any]:
         "meter": meter,
         "meterConfidence": meter_confidence,
     }
+
+
+STRUCTURE_METHOD = "novelty-chroma-mfcc-v1"
+_SECTION_MIN_RECORDING_SECONDS = 30.0
+_SECTION_MIN_SECONDS = 8
+_SECTION_KERNEL_BLOCKS = 8
+_SECTION_SAME_LABEL_SIMILARITY = 0.92
+_SECTION_BEAT_SNAP_SECONDS = 1.0
+_SECTION_MAX = 24
+
+
+def _analyze_structure(
+    mono: np.ndarray,
+    sample_rate: int,
+    beats_seconds: list[float],
+    duration: float,
+) -> dict[str, Any]:
+    """Find where sections change and which sections sound alike.
+
+    One-second blocks of chroma (harmony) and MFCC (timbre) form a
+    self-similarity matrix; a checkerboard-kernel novelty curve marks section
+    changes at least 8 s apart, snapped to the nearest detected beat. Sections
+    whose mean features are nearly identical share a letter (A, B, ...). The
+    letters say "these sound alike", not "this is the chorus".
+    """
+    result: dict[str, Any] = {"method": STRUCTURE_METHOD, "sections": [], "note": None}
+    if duration < _SECTION_MIN_RECORDING_SECONDS:
+        result["note"] = "The recording is too short to find sections."
+        return result
+    hop = 4096
+    chroma = librosa.feature.chroma_stft(y=mono, sr=sample_rate, hop_length=hop)
+    mfcc = librosa.feature.mfcc(y=mono, sr=sample_rate, hop_length=hop, n_mfcc=13)[1:]
+    frames = min(chroma.shape[1], mfcc.shape[1])
+    per_block = max(1, int(round(sample_rate / hop)))
+    blocks = frames // per_block
+    if blocks < 2 * _SECTION_KERNEL_BLOCKS:
+        result["note"] = "The recording is too short to find sections."
+        return result
+    mfcc = (mfcc - mfcc.mean(axis=1, keepdims=True)) / (mfcc.std(axis=1, keepdims=True) + 1e-9)
+    features = np.vstack([chroma[:, :frames], 0.5 * mfcc[:, :frames]])
+    features = features[:, : blocks * per_block].reshape(features.shape[0], blocks, per_block).mean(axis=2)
+    norms = np.linalg.norm(features, axis=0, keepdims=True) + 1e-9
+    unit = features / norms
+    similarity = unit.T @ unit
+    half = _SECTION_KERNEL_BLOCKS // 2
+    sign = np.ones((2 * half, 2 * half))
+    sign[:half, half:] = -1
+    sign[half:, :half] = -1
+    novelty = np.zeros(blocks)
+    for centre in range(half, blocks - half):
+        window = similarity[centre - half : centre + half, centre - half : centre + half]
+        novelty[centre] = float(np.sum(window * sign))
+    novelty = np.maximum(novelty, 0.0)
+    peak = float(novelty.max())
+    if peak <= 0:
+        result["note"] = "No clear section changes were found."
+        return result
+    novelty /= peak
+    threshold = float(novelty.mean() + 0.5 * novelty.std())
+    boundaries: list[int] = []
+    for index in np.argsort(novelty)[::-1]:
+        index = int(index)
+        if novelty[index] < threshold or len(boundaries) >= _SECTION_MAX - 1:
+            break
+        if index < _SECTION_MIN_SECONDS or blocks - index < _SECTION_MIN_SECONDS:
+            continue
+        if all(abs(index - other) >= _SECTION_MIN_SECONDS for other in boundaries):
+            boundaries.append(index)
+    if not boundaries:
+        result["note"] = "No clear section changes were found."
+        return result
+    boundaries.sort()
+    block_seconds = per_block * hop / sample_rate
+    beats = np.asarray([b for b in beats_seconds if isinstance(b, (int, float))], dtype=np.float64)
+    edges = [0.0]
+    strengths: list[float | None] = [None]
+    for index in boundaries:
+        time_value = index * block_seconds
+        if beats.size:
+            nearest = float(beats[np.argmin(np.abs(beats - time_value))])
+            if abs(nearest - time_value) <= _SECTION_BEAT_SNAP_SECONDS:
+                time_value = nearest
+        if time_value - edges[-1] >= _SECTION_MIN_SECONDS / 2:
+            edges.append(time_value)
+            strengths.append(round(float(novelty[index]), 3))
+    edges.append(duration)
+    means = []
+    for start, end in zip(edges[:-1], edges[1:]):
+        first = int(start / block_seconds)
+        last = max(first + 1, int(end / block_seconds))
+        vector = features[:, first:last].mean(axis=1)
+        means.append(vector / (np.linalg.norm(vector) + 1e-9))
+    labels: list[str] = []
+    for position, vector in enumerate(means):
+        best_label, best_similarity = None, -1.0
+        for earlier in range(position):
+            value = float(vector @ means[earlier])
+            if value > best_similarity:
+                best_label, best_similarity = labels[earlier], value
+        if best_label is not None and best_similarity >= _SECTION_SAME_LABEL_SIMILARITY:
+            labels.append(best_label)
+        else:
+            labels.append(chr(ord("A") + min(len(set(labels)), 25)))
+    result["sections"] = [
+        {
+            "startSeconds": round(start, 3),
+            "endSeconds": round(end, 3),
+            "label": label,
+            "boundaryStrength": strength,
+        }
+        for start, end, label, strength in zip(edges[:-1], edges[1:], labels, strengths)
+    ]
+    return result
 
 
 def _estimate_meter(

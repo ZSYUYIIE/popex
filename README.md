@@ -411,6 +411,7 @@ Implemented capabilities:
 - explicit first-use consent before any model preparation or download;
 - revision- and SHA-256-backed schema-3 stem manifests;
 - safe stem details, preview, and download endpoints;
+- song sections in the audio analysis (`novelty-chroma-mfcc-v1`, analysis `baseline-librosa-v2`): section changes come from a novelty curve over one-second chroma and timbre blocks, at least 8 s apart and snapped to a nearby beat, and sections that sound alike share a letter (A, B, ...). The letters are not verse or chorus names, and recordings under 30 s or without clear changes say so. The analysis fold shows them as one proportional strip;
 - local baseline raw transcription (`baseline-pyin-onset-v1`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment;
 - editable interpretation drafts (`editable-interpretation-v1`, schema 1) with source-aware pitched parts/phrases, conservative rhythm grid, and broad drum structure;
 - evidence-aware harmonic context (`pitch-class-window-v1`, schema 1) with conservative chord candidates, unresolved accounting, and per-event warning preservation;
@@ -679,7 +680,7 @@ Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, a
 | `POPEX_FFMPEG_BINARY` | `ffmpeg` | FFmpeg executable or explicit path |
 | `POPEX_FFPROBE_BINARY` | `ffprobe` | ffprobe executable or explicit path |
 | `AUDIO_ANALYSIS_ENABLED` | `true` | Analyze newly normalized media |
-| `AUDIO_ANALYSIS_VERSION` | `baseline-librosa-v1` | Reproducibility and cache key |
+| `AUDIO_ANALYSIS_VERSION` | `baseline-librosa-v2` | Reproducibility and cache key |
 | `AUDIO_ANALYSIS_TIMEOUT_SECONDS` | `300` | Analysis timeout guard |
 | `AUDIO_SILENCE_RMS_THRESHOLD` | `0.0001` | Effective-silence threshold |
 | `STEM_SEPARATION_ENABLED` | `false` | Expose and run the optional local separation workflow |
