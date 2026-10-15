@@ -34,7 +34,7 @@
   --line-strong: rgba(18, 22, 18, .17);
   --text: #121412;
   --muted: #5b6159;
-  --faint: #868c84;
+  --faint: #6c7269;
   --ink: #121412;
   --ink-hover: #2b302b;
   --ink-text: #ffffff;
@@ -904,7 +904,7 @@ select {
 }
 
 /* Buttons: ink pills. Quiet buttons are outlined; nothing glows. */
-button, .button-link, .analysis-actions a, .separation-actions a, .artifacts a, .stems a {
+button, .button-link, .analysis-actions a, .separation-actions a, .score-exports a, .artifacts a, .stems a {
   display: inline-flex; justify-content: center; align-items: center; gap: .45rem;
   min-height: 46px; padding: .6rem 1.4rem; border-radius: 999px;
   border: 1px solid transparent; background: var(--ink); color: var(--ink-text);
@@ -931,11 +931,17 @@ button:disabled {
   cursor: not-allowed;
   transform: none;
 }
-.secondary, .analysis-actions a, .separation-actions a, .artifacts a, .stems a {
+.secondary, .analysis-actions a, .separation-actions a, .score-exports a, .artifacts a, .stems a {
   background: transparent; color: var(--text); border-color: var(--line-strong);
 }
-.secondary:hover, .analysis-actions a:hover, .separation-actions a:hover, .artifacts a:hover, .stems a:hover {
+.secondary:hover, .analysis-actions a:hover, .separation-actions a:hover, .score-exports a:hover, .artifacts a:hover, .stems a:hover {
   background: var(--surface-2); border-color: var(--text);
+}
+.score-exports a.primary {
+  background: var(--ink); color: var(--ink-text); border-color: var(--ink);
+}
+.score-exports a.primary:hover {
+  background: var(--ink-hover);
 }
 button.mini, select.mini {
   min-height: 32px;
@@ -978,19 +984,22 @@ button.mini.danger:hover {
   font-weight: 700;
   letter-spacing: -.035em;
 }
-.drop-zone input {
-  width: auto;
-  max-width: 100%;
-  margin-top: .5rem;
-  color: var(--muted);
-  font-size: .88rem;
+/* The whole zone is the label for the file input, so the native control is
+   hidden visually but stays focusable; focus shows on the zone itself. */
+.drop-zone {
+  position: relative;
 }
-.drop-zone input::file-selector-button {
-  margin-right: .75rem; padding: .5rem 1.1rem; border-radius: 999px; cursor: pointer;
-  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); font: inherit; font-weight: 600;
-  transition: border-color .2s var(--ease);
+.drop-zone input[type=file] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  bottom: 1rem;
+  left: 50%;
+  opacity: 0;
 }
-.drop-zone input::file-selector-button:hover {
+.drop-zone:focus-within {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
   border-color: var(--text);
 }
 .drop-icon {
@@ -1108,9 +1117,7 @@ button.mini.danger:hover {
   font-size: .86rem;
 }
 .job-meta li + li::before {
-  content: "·";
-  margin: 0 .55rem;
-  color: var(--faint);
+  content: ", ";
 }
 .status, .analysis-status, .separation-status, .source-badge {
   display: inline-flex; gap: .45rem; align-items: center; padding: .35rem .85rem; border-radius: 999px;
@@ -1351,6 +1358,47 @@ progress::-moz-progress-bar {
   min-width: 0;
 }
 
+/* The score fold leads with music: roll, then exports, then one quiet line of facts. */
+.score-exports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .6rem;
+  margin-top: 1.1rem;
+}
+.score-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem 1.5rem;
+  margin: 1.1rem 0 0;
+  font-size: .88rem;
+  color: var(--muted);
+}
+.score-facts > div {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .35rem;
+}
+.score-facts dt {
+  font-size: inherit;
+}
+.score-facts dd {
+  font-size: inherit;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--text);
+}
+.review-notes {
+  margin-top: 1.25rem;
+}
+.review-notes ul {
+  margin: .6rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: .92rem;
+}
+.review-notes li + li {
+  margin-top: .3rem;
+}
 .score-more {
   margin-top: 1.5rem;
   border-block: 1px solid var(--line);
@@ -1844,6 +1892,7 @@ body.has-review-player {
   .button-link,
   .analysis-actions a,
   .separation-actions a,
+  .score-exports a,
   .artifacts a,
   .stems a,
   .status,
