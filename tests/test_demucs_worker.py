@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib, json, os, sys, types
 from pathlib import Path
 import pytest
+from conftest import SYMLINK_SKIP_REASON, symlinks_available
 ROOT=Path(__file__).resolve().parents[1]; WR=ROOT/'runtimes'/'demucs_worker'; sys.path.insert(0,str(WR/'src'))
 from popex_demucs_worker import cli,commands,constants,model_artifacts,paths,probes,separation_command
 LOCK={'demucs':'4.1.0','torch':'test-torch','huggingface_hub':'test-hub','safetensors':'test-safe','PyYAML':'test-yaml'}; PROFILE='test-linux-cpu-v1'; OPT={'demucs','demucs.api','demucs.apply','demucs.hf','torch','safetensors','huggingface_hub','yaml'}
@@ -124,7 +125,7 @@ def test_prepare_failures(capsys,monkeypatch,tmp_path,model,kind,exitcode,err):
 def test_verify_offline_local_only_no_http(capsys,monkeypatch,tmp_path,model):
  calls=[];ready(monkeypatch,tmp_path,model[0],calls);calls.clear();hub(monkeypatch,downloader(model[0],calls));code,e,_=run(capsys,'--protocol-version','1','verify-model','--cache-root',str(tmp_path));assert code==0 and e['result']['offlineReady'];assert os.environ['HF_HUB_OFFLINE']=='1';assert len(calls)==2 and all(x['local_files_only'] is True and x['token'] is False for x in calls)
 
-def test_manifest_schema_containment_and_symlink_rejection(capsys,tmp_path,model):
+def test_manifest_schema_containment_and_symlink_rejection(capsys,tmp_path,model,require_symlinks):
  p=manifest(tmp_path,model[0]);outside=tmp_path.parent/'outside.bin';outside.write_bytes(model[0]);link=tmp_path/'hub'/'escape';link.symlink_to(outside);p['cacheAssets']['checkpoint']=link.relative_to(tmp_path).as_posix();(tmp_path/'readiness'/'htdemucs-bf35a81b-v1.json').write_text(json.dumps(p))
  code,e,_=run(capsys,'--protocol-version','1','model-probe','--cache-root',str(tmp_path));assert(code,e['error']['code'])==(21,'MODEL_ASSET_INVALID');outside.unlink()
 
@@ -171,7 +172,7 @@ def test_bundled_unprovisioned_lock_fails_closed(capsys,monkeypatch):
  for n in OPT:monkeypatch.delitem(sys.modules,n,raising=False)
  code,e,_=run(capsys,'--protocol-version','1','runtime-probe');assert(code,e['error']['code'])==(10,'RUNTIME_PROFILE_UNPROVISIONED');assert not OPT&sys.modules.keys()
 
-def test_readiness_parent_symlink_escape_rejected(capsys,tmp_path):
+def test_readiness_parent_symlink_escape_rejected(capsys,tmp_path,require_symlinks):
  outside=tmp_path.parent/(tmp_path.name+'-readiness');outside.mkdir();(outside/'htdemucs-bf35a81b-v1.json').write_text('{}');(tmp_path/'readiness').symlink_to(outside,target_is_directory=True)
  code,e,_=run(capsys,'--protocol-version','1','model-probe','--cache-root',str(tmp_path));assert(code,e['error']['code'])==(21,'READINESS_MANIFEST_INVALID')
  for p in outside.iterdir():p.unlink()
@@ -181,7 +182,7 @@ def test_allow_nan_false_fallback(capsys,monkeypatch):
  monkeypatch.setattr(cli,'runtime_probe',lambda:{'bad':float('nan')});code,e,o=run(capsys,'--protocol-version','1','runtime-probe');assert(code,e['error']['code'])==(50,'INTERNAL_ERROR');assert o.out.count('\n')==1
 
 
-def test_readiness_parent_swap_after_temporary_write_is_contained(monkeypatch,tmp_path,model):
+def test_readiness_parent_swap_after_temporary_write_is_contained(monkeypatch,tmp_path,model,require_symlinks):
  yamlmod(monkeypatch);hub(monkeypatch,downloader(model[0],[]));outside=tmp_path.parent/(tmp_path.name+'-outside');outside.mkdir()
  real_replace=paths._replace_child;swapped={'done':False}
  def swap(parent,source,destination,directory_fd):
@@ -199,6 +200,7 @@ def test_readiness_parent_swap_after_temporary_write_is_contained(monkeypatch,tm
 
 @pytest.mark.parametrize('kind',['symlink','directory'])
 def test_preexisting_unsafe_readiness_target_is_never_overwritten(monkeypatch,tmp_path,model,kind):
+ if kind=='symlink' and not symlinks_available():pytest.skip(SYMLINK_SKIP_REASON)
  parent=tmp_path/'readiness';parent.mkdir();target=parent/Path(constants.READINESS_RELATIVE_PATH).name;outside=tmp_path/'outside-readiness.json';outside.write_bytes(b'outside')
  if kind=='symlink':target.symlink_to(outside)
  else:target.mkdir()
