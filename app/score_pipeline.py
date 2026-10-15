@@ -25,7 +25,7 @@ dry-run before publication so a saved score is always downloadable.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -81,13 +81,14 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v5"
+SCORE_PIPELINE_VERSION = "score-pipeline-v6"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
     {"score-pipeline-v1", "score-pipeline-v2", "score-pipeline-v3"}
 )
 PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipeline-v4"}
+PRE_RHYTHM_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline-v5"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -127,6 +128,26 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def rhythm_grid_note(grids: Sequence[Mapping[str, Any]]) -> str:
+    """Describe each line's quantization grid in musician-facing words."""
+    if not grids:
+        return "Quantized from raw pitched events; no notes were available."
+    sixteenth = [
+        _SOURCE_LABELS.get(grid["sourceKind"], "unlabelled line")
+        for grid in grids
+        if grid["unit"] == "sixteenth"
+    ]
+    if not sixteenth:
+        return "Quantized from raw pitched events to an eighth-note grid."
+    if len(sixteenth) == len(grids):
+        return "Quantized from raw pitched events to a sixteenth-note grid, which the onsets support."
+    return (
+        "Quantized from raw pitched events to a sixteenth-note grid for the "
+        + ", ".join(sorted(sixteenth))
+        + ", where onsets support it, and an eighth-note grid elsewhere."
+    )
+
+
 def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     """Return why a saved score predates a layer this recording would get.
 
@@ -135,7 +156,8 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     tablature for a recording with separated stems, where the default bass
     tablature applies. ``tonal-context``: a score with notes from before the
     modal tonal context. ``parts``: a score with notes from before instrument
-    parts by source line. Such scores stay readable and downloadable.
+    parts by source line. ``rhythm-grid``: a score with notes from before
+    evidence-gated sixteenth-note grids. Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -163,6 +185,13 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and notes > 0
     ):
         return "parts"
+    if (
+        version in PRE_RHYTHM_GRID_PIPELINE_VERSIONS
+        and isinstance(notes, int)
+        and not isinstance(notes, bool)
+        and notes > 0
+    ):
+        return "rhythm-grid"
     return None
 
 
@@ -871,7 +900,7 @@ def construct_score(
         "layers": {
             "pitchedNotes": {
                 "status": "included",
-                "note": "Quantized from raw pitched events to an eighth-note grid.",
+                "note": rhythm_grid_note(built["rhythmGrids"]),
             },
             "chordSymbols": {
                 "status": "included" if segments is not None else "omitted",
@@ -895,6 +924,7 @@ def construct_score(
         "percussion": percussion_summary,
         "tonality": tonality,
         "scoreParts": score_parts,
+        "rhythmGrids": built["rhythmGrids"],
         "tablature": {
             "version": TABLATURE_VERSION,
             "origin": tab_origin,

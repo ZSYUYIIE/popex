@@ -483,7 +483,7 @@ def test_score_without_interpretation_maps_raw_hit_kinds(tmp_path: Path) -> None
     job_id = create_drum_job(settings)
     job, details = build_and_load(settings, job_id)
 
-    assert details["version"] == "score-pipeline-v5"
+    assert details["version"] == "score-pipeline-v6"
     assert details["layers"]["percussion"]["status"] == "included"
     assert "raw hit-kind table" in details["layers"]["percussion"]["note"]
     assert details["percussion"]["voiceSource"] == "raw-hit-kinds"
@@ -608,6 +608,7 @@ def _downgrade_to_schema_one(document: dict) -> dict:
     del legacy["tablature"]
     del legacy["tonality"]
     del legacy["scoreParts"]
+    del legacy["rhythmGrids"]
     del legacy["counts"]["tabNotes"]
     del legacy["counts"]["fingeredTabNotes"]
     for key in (
@@ -692,7 +693,7 @@ def test_schema_one_score_without_percussion_events_is_not_stale(tmp_path: Path)
         lambda doc: doc["measures"][0]["percussionHits"].append(
             copy.deepcopy(doc["measures"][0]["percussionHits"][0])
         ),
-        lambda doc: doc.update(schemaVersion=6),
+        lambda doc: doc.update(schemaVersion=7),
     ],
 )
 def test_tampered_percussion_documents_are_rejected(tmp_path: Path, mutate) -> None:
