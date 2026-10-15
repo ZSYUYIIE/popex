@@ -176,7 +176,7 @@ t.renderScore({json.dumps(EDIT_JOB)});
 const toggle={{dataset:{{action:"score-edit-toggle",jobId:"edit"}}}};
 await t.getListener("#jobs","click")({{target:{{closest:()=>toggle}}}});
 const html=t.renderScore({json.dumps(EDIT_JOB)});
-const key="timing-edit-b1";
+const key="timing--edit--b1";
 for(const [field,value] of [["bar","1"],["beat","1.25"],["duration","1.5"]])
   t.getElement(`[data-timing-input="${{key}}-${{field}}"]`).value=value;
 const requested=[];
@@ -188,6 +188,7 @@ console.log(JSON.stringify({{html,requested}}));
     assert 'aria-label="Bar for B1"' in result["html"]
     assert 'aria-label="Beat for B1"' in result["html"]
     assert 'aria-label="Duration in beats for B1"' in result["html"]
+    assert 'class="note-timing" data-open-key="timing--edit--b1"' in result["html"]
     assert json.loads(result["requested"][0]["body"]) == {
         "expectedRevision": 3, "operation": timing_operation("b1")}
 
