@@ -33,6 +33,7 @@ from app.score_construction import (
     SCORE_SCHEMA_VERSION,
     ScoreConstructionError,
     build_score_document,
+    estimate_grid_lead_in,
     score_to_midi_bytes,
     score_to_musicxml_text,
 )
@@ -269,6 +270,13 @@ def collect_score_evidence(
         "meterConfidence": _optional_confidence(timing.get("meterConfidence")),
         "tempoStable": tempo_stable if isinstance(tempo_stable, bool) else None,
         "percussionEventCount": len(raw_transcription.get("percussionEvents", ())),
+        "gridOrigin": estimate_grid_lead_in(
+            timing.get("beatsSeconds") if isinstance(timing.get("beatsSeconds"), list) else [],
+            timing.get("downbeatsSeconds") if isinstance(timing.get("downbeatsSeconds"), list) else [],
+            tempo_bpm=min(300.0, max(20.0, float(tempo))),
+            beats_per_measure=beats_per_measure,
+            meter_from_analysis=meter_source == "analysis",
+        ),
     }
 
 
@@ -316,6 +324,22 @@ def score_evidence_warnings(
             "Meter evidence is unavailable or weak; measures use an explicit "
             "4/4 draft grid and require musician review."
         )
+    origin = evidence.get("gridOrigin") or {"source": "none", "leadInSeconds": 0.0}
+    if origin["source"] == "downbeats" and origin["leadInSeconds"] > 0:
+        warnings.append(
+            f"Bar lines follow the detected downbeats: the recording starts "
+            f"{origin['leadInSeconds']:.2f} s into bar 1, so any pickup sits at the end of bar 1."
+        )
+    elif origin["source"] == "beats" and origin["leadInSeconds"] > 0:
+        warnings.append(
+            "Beats follow the detected beat positions, but downbeats were not clear enough "
+            "to place bar lines; check where bar 1 should start."
+        )
+    elif origin["source"] == "none":
+        warnings.append(
+            "Beat and downbeat positions were not consistent enough to align the bar grid; "
+            "bars start at the beginning of the recording."
+        )
     return warnings
 
 
@@ -335,6 +359,7 @@ def build_score_preview(
             evidence["pitchedInputs"],
             tempo_bpm=evidence["tempoBpm"],
             beats_per_measure=evidence["beatsPerMeasure"],
+            lead_in_seconds=evidence["gridOrigin"]["leadInSeconds"],
         )
     except ScoreConstructionError as exc:
         raise ScorePreviewError(

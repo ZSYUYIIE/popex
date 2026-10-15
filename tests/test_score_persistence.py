@@ -193,8 +193,8 @@ def test_successful_construction_persists_reviewable_document(tmp_path: Path) ->
         "warnings": len(details["warnings"]),
     }
 
-    assert details["version"] == "score-pipeline-v5"
-    assert details["builderVersion"] == "score-construction-v5"
+    assert details["version"] == "score-pipeline-v8"
+    assert details["builderVersion"] == "score-construction-v7"
     assert details["sources"]["transcription"] == {
         "version": "raw-transcription-v1",
         "createdAt": RAW_CREATED_AT,
@@ -243,8 +243,8 @@ def test_harmony_becomes_measure_chord_symbols_with_evidence(tmp_path: Path) -> 
         for entry in first["harmony"]
     )
     assert details["counts"]["chordSymbols"] >= 1
-    words = [element.text for element in ET.fromstring(musicxml.content).iter("words")]
-    assert "C" in words
+    harmonies = list(ET.fromstring(musicxml.content).iter("harmony"))
+    assert ("C", "major") in [(h.findtext("root/root-step"), h.findtext("kind")) for h in harmonies]
 
 
 def test_interpretation_parts_label_notes_without_changing_exports(tmp_path: Path) -> None:
@@ -643,6 +643,7 @@ def test_chord_symbol_needs_a_dominant_uncontested_candidate() -> None:
         "ambiguous": 1,
         "beyond": 1,
         "truncated": 0,
+        "split": 0,
     }
 
 

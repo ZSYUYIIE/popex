@@ -35,6 +35,7 @@ from uuid import uuid4
 from app.config import Settings
 from app.score_construction import (
     PERCUSSION_NOTATION,
+    RHYTHM_GRID_UNITS,
     UNRESOLVED_PERCUSSION_VOICE,
     plan_score_parts,
 )
@@ -47,9 +48,10 @@ from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consist
 from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
-# schema 4 the modal tonal context; earlier documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 5
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
+# schema 4 the modal tonal context, schema 5 instrument parts, and schema 6
+# per-line rhythm grids; earlier documents remain readable.
+SCORE_ARTIFACT_SCHEMA_VERSION = 8
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -91,6 +93,11 @@ _TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
 _TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {"tablature"}
 _TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V3 | {"tonality"}
 _TOP_LEVEL_KEYS_V5 = _TOP_LEVEL_KEYS_V4 | {"scoreParts"}
+_TOP_LEVEL_KEYS_V6 = _TOP_LEVEL_KEYS_V5 | {"rhythmGrids"}
+_RHYTHM_GRID_KEYS = frozenset(
+    {"sourceKind", "unit", "unitBeats", "confidentOnsets", "offEighthOnsets", "reason"}
+)
+_RHYTHM_GRID_REASONS = frozenset({"off-eighth-onsets", "insufficient-evidence", "tempo-too-fast"})
 _CANDIDATE_KEYS = frozenset(
     {"tonalCenter", "rootPitchClass", "collection", "displayName", "score", "confidence"}
 )
@@ -149,6 +156,7 @@ _MEASURE_KEYS_V1 = frozenset(
     {"measureIndex", "startSeconds", "endSeconds", "notes", "chordSymbol", "harmony"}
 )
 _MEASURE_KEYS_V2 = _MEASURE_KEYS_V1 | {"percussionHits"}
+_MEASURE_KEYS_V7 = _MEASURE_KEYS_V2 | {"chordChanges"}
 _HIT_KEYS = frozenset(
     {
         "eventId",
@@ -302,23 +310,24 @@ def _validate_layers(value: Any, schema_version: int) -> dict[str, str]:
     return statuses
 
 
-def _validate_timing(value: Any) -> tuple[float, int]:
+_TIMING_KEYS_V1 = frozenset(
+    {
+        "tempoBpm",
+        "beatsPerMeasure",
+        "divisions",
+        "meterSource",
+        "tempoConfidence",
+        "tempoStable",
+        "meterConfidence",
+    }
+)
+_TIMING_KEYS_V8 = _TIMING_KEYS_V1 | {"leadInSeconds", "gridOrigin", "gridConcentration"}
+
+
+def _validate_timing(value: Any, schema_version: int = 1) -> tuple[float, int, float]:
+    """Return tempo, meter, and the bar-grid lead-in (0 before schema 8)."""
     timing = _mapping(value, "timing")
-    _exact_keys(
-        timing,
-        frozenset(
-            {
-                "tempoBpm",
-                "beatsPerMeasure",
-                "divisions",
-                "meterSource",
-                "tempoConfidence",
-                "tempoStable",
-                "meterConfidence",
-            }
-        ),
-        "timing",
-    )
+    _exact_keys(timing, _TIMING_KEYS_V8 if schema_version >= 8 else _TIMING_KEYS_V1, "timing")
     tempo = _number(timing["tempoBpm"], "timing.tempoBpm", 20.0, 300.0)
     meter = _integer(timing["beatsPerMeasure"], "timing.beatsPerMeasure", 1, 12)
     _integer(timing["divisions"], "timing.divisions", 1, 9600)
@@ -328,7 +337,20 @@ def _validate_timing(value: Any) -> tuple[float, int]:
     _optional_number(timing["meterConfidence"], "timing.meterConfidence", 0.0, 1.0)
     if timing["tempoStable"] is not None and type(timing["tempoStable"]) is not bool:
         raise _fail("timing.tempoStable is invalid.")
-    return tempo, meter
+    lead_in = 0.0
+    if schema_version >= 8:
+        bar = meter * 60.0 / tempo
+        lead_in = _number(timing["leadInSeconds"], "timing.leadInSeconds", 0.0, bar)
+        if lead_in >= bar:
+            raise _fail("timing.leadInSeconds must be shorter than one bar.")
+        if timing["gridOrigin"] not in {"downbeats", "beats", "none"}:
+            raise _fail("timing.gridOrigin is invalid.")
+        if (timing["gridOrigin"] == "none") != (timing["gridConcentration"] is None) or (
+            timing["gridOrigin"] == "none" and lead_in
+        ):
+            raise _fail("timing.gridOrigin does not match its evidence.")
+        _optional_number(timing["gridConcentration"], "timing.gridConcentration", 0.0, 1.0)
+    return tempo, meter, lead_in
 
 
 def _validate_parts(value: Any) -> set[str]:
@@ -581,6 +603,7 @@ def _validate_measures(
     part_ids: set[str],
     meter: int,
     schema_version: int,
+    lead_in: float = 0.0,
 ) -> dict[str, Any]:
     measures = _sequence(value, "measures", _MAX_MEASURES)
     if not measures:
@@ -604,12 +627,16 @@ def _validate_measures(
         measure = _mapping(raw, label)
         _exact_keys(
             measure,
-            _MEASURE_KEYS_V2 if schema_version >= 2 else _MEASURE_KEYS_V1,
+            _MEASURE_KEYS_V7 if schema_version >= 7 else _MEASURE_KEYS_V2 if schema_version >= 2 else _MEASURE_KEYS_V1,
             label,
         )
         if _integer(measure["measureIndex"], f"{label}.measureIndex") != position:
             raise _fail(f"{label}.measureIndex is inconsistent.")
-        start = _number(measure["startSeconds"], f"{label}.startSeconds", 0.0, 1e6)
+        # With a lead-in, bar 1 starts that far before the recording does.
+        earliest = -lead_in if position == 0 else 0.0
+        start = _number(measure["startSeconds"], f"{label}.startSeconds", earliest - 1e-6, 1e6)
+        if position == 0 and abs(start + lead_in) > 1e-6:
+            raise _fail("measures[0].startSeconds does not match timing.leadInSeconds.")
         end = _number(measure["endSeconds"], f"{label}.endSeconds", 0.0, 1e6)
         if end <= start:
             raise _fail(f"{label} has an invalid time range.")
@@ -641,6 +668,8 @@ def _validate_measures(
                 _text(entry["symbol"], f"{entry_label}.symbol", 64)
                 _number(entry["confidence"], f"{entry_label}.confidence", 0.0, 1.0)
         totals["harmonyEntries"] += len(harmony)
+        if schema_version >= 7:
+            _validate_chord_changes(measure, harmony, meter, label)
         notes = _sequence(measure["notes"], f"{label}.notes", _MAX_NOTES)
         for index, raw_note in enumerate(notes):
             note_label = f"{label}.notes[{index}]"
@@ -726,6 +755,72 @@ def _validate_percussion_summary(value: Any, by_voice: Mapping[str, int]) -> Non
         raise _fail("percussion.voices does not match the measures.")
 
 
+def _validate_chord_changes(
+    measure: Mapping[str, Any], harmony: Sequence[Mapping[str, Any]], meter: int, label: str
+) -> None:
+    """Half-bar changes: none, or two different chords at the bar's start and middle.
+
+    Each symbol must come from a resolved harmonic window that overlaps its half,
+    so a saved change can always be traced back to its evidence.
+    """
+    changes = _sequence(measure["chordChanges"], f"{label}.chordChanges", 2)
+    if not changes:
+        return
+    if len(changes) != 2 or meter % 2:
+        raise _fail(f"{label}.chordChanges must split an even bar in two.")
+    halves = ((0.0, meter / 2), (meter / 2, float(meter)))
+    symbols = []
+    for (start, end), raw in zip(halves, changes):
+        change = _mapping(raw, f"{label}.chordChanges")
+        _exact_keys(change, frozenset({"beat", "symbol"}), f"{label}.chordChanges")
+        if change["beat"] != start:
+            raise _fail(f"{label}.chordChanges must start at the bar and its middle.")
+        symbol = _text(change["symbol"], f"{label}.chordChanges.symbol", 64)
+        if not any(
+            entry["symbol"] == symbol and entry["startBeat"] < end and entry["endBeat"] > start
+            for entry in harmony
+        ):
+            raise _fail(f"{label}.chordChanges names a chord without harmonic evidence.")
+        symbols.append(symbol)
+    if symbols[0] == symbols[1]:
+        raise _fail(f"{label}.chordChanges must name two different chords.")
+
+
+def _validate_rhythm_grids(value: Any, measures: Sequence[Mapping[str, Any]]) -> None:
+    """Each source line has one grid, and every note of that line sits on it."""
+    grids = _sequence(value, "rhythmGrids", 64)
+    units: dict[str, float] = {}
+    for index, item in enumerate(grids):
+        label = f"rhythmGrids[{index}]"
+        grid = _mapping(item, label)
+        _exact_keys(grid, _RHYTHM_GRID_KEYS, label)
+        kind = grid["sourceKind"]
+        if not isinstance(kind, str) or not _TOKEN.fullmatch(kind) or kind in units:
+            raise _fail(f"{label}.sourceKind is invalid.")
+        if grid["unit"] not in RHYTHM_GRID_UNITS or grid["unitBeats"] != RHYTHM_GRID_UNITS[grid["unit"]]:
+            raise _fail(f"{label}.unit is invalid.")
+        if grid["reason"] not in _RHYTHM_GRID_REASONS or (
+            (grid["unit"] == "sixteenth") != (grid["reason"] == "off-eighth-onsets")
+        ):
+            raise _fail(f"{label}.reason is invalid.")
+        confident = _integer(grid["confidentOnsets"], f"{label}.confidentOnsets", 0, 1_000_000)
+        supporting = _integer(grid["offEighthOnsets"], f"{label}.offEighthOnsets", 0, 1_000_000)
+        if supporting > confident:
+            raise _fail(f"{label}.offEighthOnsets exceeds confidentOnsets.")
+        units[kind] = grid["unitBeats"]
+    if [item["sourceKind"] for item in grids] != sorted(units):
+        raise _fail("rhythmGrids must be sorted by sourceKind.")
+    for measure in measures:
+        for note in measure["notes"]:
+            unit = units.get(note["sourceKind"])
+            if unit is None:
+                raise _fail("A note's source line has no rhythm grid.")
+            for key in ("quantizedBeat", "quantizedEndBeat"):
+                steps = note[key] / unit
+                if abs(steps - round(steps)) > 1e-9:
+                    raise _fail(f"A note's {key} is off its line's rhythm grid.")
+
+
 def validate_score_artifact(payload: Any) -> dict[str, Any]:
     """Validate one persisted score document and return a detached copy."""
     document = _mapping(payload, "score document")
@@ -743,6 +838,9 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             3: _TOP_LEVEL_KEYS_V3,
             4: _TOP_LEVEL_KEYS_V4,
             5: _TOP_LEVEL_KEYS_V5,
+            6: _TOP_LEVEL_KEYS_V6,
+            7: _TOP_LEVEL_KEYS_V6,
+            8: _TOP_LEVEL_KEYS_V6,
         }[schema_version],
         "score document",
     )
@@ -761,9 +859,9 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     if score_source_fingerprint(document["sources"]) != fingerprint:
         raise _fail("sourceFingerprint does not match the recorded sources.")
     layers = _validate_layers(document["layers"], schema_version)
-    _tempo, meter = _validate_timing(document["timing"])
+    _tempo, meter, lead_in = _validate_timing(document["timing"], schema_version)
     part_ids = _validate_parts(document["parts"])
-    totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
+    totals = _validate_measures(document["measures"], part_ids, meter, schema_version, lead_in)
     counts = _mapping(document["counts"], "counts")
     count_keys = {
         1: _COUNT_KEYS_V1,
@@ -771,6 +869,9 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         3: _COUNT_KEYS_V3,
         4: _COUNT_KEYS_V3,
         5: _COUNT_KEYS_V3,
+        6: _COUNT_KEYS_V3,
+        7: _COUNT_KEYS_V3,
+        8: _COUNT_KEYS_V3,
     }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
@@ -806,6 +907,8 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         ]
         if document["scoreParts"] != plan_score_parts(untabbed):
             raise _fail("scoreParts does not match the notes' source lines.")
+    if schema_version >= 6:
+        _validate_rhythm_grids(document["rhythmGrids"], document["measures"])
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (
