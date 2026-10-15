@@ -122,7 +122,7 @@ def test_score_exports_one_part_per_source_line(tmp_path: Path) -> None:
     finally:
         client.__exit__(None, None, None)
 
-    assert details["version"] == "score-pipeline-v5"
+    assert details["version"] == "score-pipeline-v6"
     assert [item["id"] for item in details["scoreParts"]] == ["lead-vocal", "pitched-lines", "accompaniment"]
     assert {part["id"] for part in details["exportParts"]} == {
         "lead-vocal", "pitched-lines", "accompaniment", "bass-tab", "drums"
@@ -195,7 +195,8 @@ def test_scores_from_before_parts_are_out_of_date(tmp_path: Path) -> None:
         db.update_job(settings.database_path, job_id, score_version="score-pipeline-v4")
         summary = next(item for item in client.get("/api/jobs").json() if item["id"] == job_id)["score"]
     assert summary["stale"] is True and summary["staleReason"] == "parts"
-    assert score_outdated_reason({"score_version": "score-pipeline-v5", "score_note_count": 3}) is None
+    assert score_outdated_reason({"score_version": "score-pipeline-v5", "score_note_count": 3}) == "rhythm-grid"
+    assert score_outdated_reason({"score_version": "score-pipeline-v6", "score_note_count": 3}) is None
 
 
 def test_parts_list_renders_with_downloads() -> None:

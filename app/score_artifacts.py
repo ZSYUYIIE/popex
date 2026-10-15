@@ -35,6 +35,7 @@ from uuid import uuid4
 from app.config import Settings
 from app.score_construction import (
     PERCUSSION_NOTATION,
+    RHYTHM_GRID_UNITS,
     UNRESOLVED_PERCUSSION_VOICE,
     plan_score_parts,
 )
@@ -47,9 +48,10 @@ from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consist
 from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
-# schema 4 the modal tonal context; earlier documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 5
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
+# schema 4 the modal tonal context, schema 5 instrument parts, and schema 6
+# per-line rhythm grids; earlier documents remain readable.
+SCORE_ARTIFACT_SCHEMA_VERSION = 6
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -91,6 +93,11 @@ _TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
 _TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {"tablature"}
 _TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V3 | {"tonality"}
 _TOP_LEVEL_KEYS_V5 = _TOP_LEVEL_KEYS_V4 | {"scoreParts"}
+_TOP_LEVEL_KEYS_V6 = _TOP_LEVEL_KEYS_V5 | {"rhythmGrids"}
+_RHYTHM_GRID_KEYS = frozenset(
+    {"sourceKind", "unit", "unitBeats", "confidentOnsets", "offEighthOnsets", "reason"}
+)
+_RHYTHM_GRID_REASONS = frozenset({"off-eighth-onsets", "insufficient-evidence", "tempo-too-fast"})
 _CANDIDATE_KEYS = frozenset(
     {"tonalCenter", "rootPitchClass", "collection", "displayName", "score", "confidence"}
 )
@@ -726,6 +733,41 @@ def _validate_percussion_summary(value: Any, by_voice: Mapping[str, int]) -> Non
         raise _fail("percussion.voices does not match the measures.")
 
 
+def _validate_rhythm_grids(value: Any, measures: Sequence[Mapping[str, Any]]) -> None:
+    """Each source line has one grid, and every note of that line sits on it."""
+    grids = _sequence(value, "rhythmGrids", 64)
+    units: dict[str, float] = {}
+    for index, item in enumerate(grids):
+        label = f"rhythmGrids[{index}]"
+        grid = _mapping(item, label)
+        _exact_keys(grid, _RHYTHM_GRID_KEYS, label)
+        kind = grid["sourceKind"]
+        if not isinstance(kind, str) or not _TOKEN.fullmatch(kind) or kind in units:
+            raise _fail(f"{label}.sourceKind is invalid.")
+        if grid["unit"] not in RHYTHM_GRID_UNITS or grid["unitBeats"] != RHYTHM_GRID_UNITS[grid["unit"]]:
+            raise _fail(f"{label}.unit is invalid.")
+        if grid["reason"] not in _RHYTHM_GRID_REASONS or (
+            (grid["unit"] == "sixteenth") != (grid["reason"] == "off-eighth-onsets")
+        ):
+            raise _fail(f"{label}.reason is invalid.")
+        confident = _integer(grid["confidentOnsets"], f"{label}.confidentOnsets", 0, 1_000_000)
+        supporting = _integer(grid["offEighthOnsets"], f"{label}.offEighthOnsets", 0, 1_000_000)
+        if supporting > confident:
+            raise _fail(f"{label}.offEighthOnsets exceeds confidentOnsets.")
+        units[kind] = grid["unitBeats"]
+    if [item["sourceKind"] for item in grids] != sorted(units):
+        raise _fail("rhythmGrids must be sorted by sourceKind.")
+    for measure in measures:
+        for note in measure["notes"]:
+            unit = units.get(note["sourceKind"])
+            if unit is None:
+                raise _fail("A note's source line has no rhythm grid.")
+            for key in ("quantizedBeat", "quantizedEndBeat"):
+                steps = note[key] / unit
+                if abs(steps - round(steps)) > 1e-9:
+                    raise _fail(f"A note's {key} is off its line's rhythm grid.")
+
+
 def validate_score_artifact(payload: Any) -> dict[str, Any]:
     """Validate one persisted score document and return a detached copy."""
     document = _mapping(payload, "score document")
@@ -743,6 +785,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             3: _TOP_LEVEL_KEYS_V3,
             4: _TOP_LEVEL_KEYS_V4,
             5: _TOP_LEVEL_KEYS_V5,
+            6: _TOP_LEVEL_KEYS_V6,
         }[schema_version],
         "score document",
     )
@@ -771,6 +814,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         3: _COUNT_KEYS_V3,
         4: _COUNT_KEYS_V3,
         5: _COUNT_KEYS_V3,
+        6: _COUNT_KEYS_V3,
     }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
@@ -806,6 +850,8 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         ]
         if document["scoreParts"] != plan_score_parts(untabbed):
             raise _fail("scoreParts does not match the notes' source lines.")
+    if schema_version >= 6:
+        _validate_rhythm_grids(document["rhythmGrids"], document["measures"])
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (
