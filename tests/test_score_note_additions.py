@@ -360,3 +360,21 @@ def test_total_note_limit_still_applies_to_authorized_manual_projection(predicti
     changed, report = apply_corrections(base, [new_operation(addition())])
     with pytest.raises(ScoreArtifactError):
         validate_score_artifact(changed, manual_note_ids=frozenset(report["addedNotes"]))
+
+
+def test_add_note_unlocks_before_restoring_focus_and_blocks_duplicate_pending_clicks():
+    detail = copy.deepcopy(EDIT_DETAIL)
+    detail["noteEntryParts"] = [{"id": "musician-notes", "name": "Musician-entered notes"}]
+    result = _run_node(f'''
+t.setDetail("edit",{json.dumps(detail)});
+await t.getListener("#jobs","click")({{target:{{closest:()=>({{dataset:{{action:"score-edit-toggle",jobId:"edit"}}}})}}}});
+const html=t.renderScore({json.dumps(EDIT_JOB)}),key=html.match(/data-action="correction-add-note"[^>]*data-input-key="([^"]+)"/)[1];
+for(const [field,value] of [["part","musician-notes"],["pitch","4"],["octave","4"],["bar","1"],["beat","1.25"],["duration","1.5"]])t.getElement(`[data-note-entry-input="${{key}}-${{field}}"]`).value=value;
+const current=t.getElement(`[data-focus-key="${{key}}-save"]`);current.disabled=true;current.focus=function(){{if(!this.disabled)this.focused=true;}};
+let release,posts=0;const gate=new Promise(resolve=>release=resolve);
+t.setFetch(async(url,options={{}})=>{{if(options.method==="POST"){{posts++;await gate;}}return {{ok:true,status:200,json:async()=>({json.dumps(detail)})}};}});
+const button={{dataset:{{action:"correction-add-note",jobId:"edit",inputKey:key}}}},click=()=>t.getListener("#jobs","click")({{target:{{closest:()=>button}}}});
+const first=click();await click();release();await first;
+console.log(JSON.stringify({{posts,disabled:current.disabled,focused:current.focused,busy:current.attributes["aria-busy"]}}));
+''')
+    assert result == {"posts": 1, "disabled": False, "focused": True, "busy": "false"}
