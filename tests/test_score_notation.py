@@ -101,10 +101,12 @@ def notation_node(body):
 const fs=require("fs");
 const nodes=new Map();
 class Element {
-  constructor(tag="div"){this.tag=tag;this.value="";this.children=[];this.options=[];this.dataset={};this.listeners={};this.textContent="";this.disabled=false;this.hidden=false;this.className="";}
+  constructor(tag="div"){this.tag=tag;this.value="";this.children=[];this.options=[];this.dataset={};this.listeners={};this.textContent="";this.disabled=false;this.hidden=false;this.className="";this.isConnected=true;this.focused=false;}
   addEventListener(kind,handler){this.listeners[kind]=handler;}
   setAttribute(name,value){this[name]=value;}
   reportValidity(){return true;}
+  contains(item){return (this.elements||[]).includes(item);}
+  focus(){global.document.activeElement=this;this.focused=true;}
   replaceChildren(...items){for(const old of this.children)old.parent=null;this.children=[];this.options=[];for(const item of items)this.append(item);}
   append(item){item.parent=this;this.children.push(item);if(this.tag==="select")this.options.push(item);}
   add(item){this.append(item);}
@@ -177,3 +179,12 @@ console.log(JSON.stringify({refused}));
 
 def test_local_notation_script_syntax():
     subprocess.run(["node", "--check", str(ROOT / "app/static/score-notation.js")], check=True, capture_output=True)
+
+
+def test_notation_render_restores_keyboard_focus_after_busy_state():
+    result = notation_node('''
+document.activeElement=t.element("notation-render");
+await t.render({preventDefault(){}});
+console.log(JSON.stringify({focused:t.element("notation-render").focused,disabled:t.element("notation-render").disabled}));
+''')
+    assert result == {"focused": True, "disabled": False}

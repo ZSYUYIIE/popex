@@ -6,17 +6,29 @@
   const from = $("notation-from"), through = $("notation-through"), zoom = $("notation-zoom");
   const renderButton = $("notation-render"), retry = $("notation-retry"), paper = $("notation-paper");
   const match = /^\/jobs\/([a-f0-9]{32})\/notation$/.exec(location.pathname);
-  let details = null, busy = false, initialized = false;
+  let details = null, busy = false, initialized = false, restoreFocus = null;
   const text = (value, fallback = "") => typeof value === "string" ? value.slice(0, 400) : fallback;
   function status(message, error = false) {
     $("notation-status").textContent = message;
     $("notation-status").dataset.error = String(error);
   }
   function lock(value) {
+    if (value) {
+      const active = document.activeElement;
+      restoreFocus = active && (form.contains(active) || active === retry) ? active : null;
+    }
     busy = value;
     for (const control of form.elements) control.disabled = value;
     retry.disabled = value;
     form.setAttribute("aria-busy", String(value));
+    if (!value) {
+      renderButton.disabled = !details;
+      if (restoreFocus?.isConnected) {
+        const target = restoreFocus.disabled ? retry : restoreFocus;
+        target.focus({preventScroll: true});
+      }
+      restoreFocus = null;
+    }
   }
   function endpoint(kind, selectedView = view.value, selectedPart = part.value) {
     const base = `/api/jobs/${match[1]}/score/saved`;
