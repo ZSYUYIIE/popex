@@ -1,0 +1,2 @@
+# Preserve the audited third-party browser asset byte-for-byte on all hosts.
+app/static/vendor/osmd-2.2.1/opensheetmusicdisplay.min.js -text

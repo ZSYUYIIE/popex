@@ -457,6 +457,10 @@ def create_app(
         return _serialize_job(record, app_settings, separation_service)
 
     index_html = _fingerprinted_index_html()
+    notation_html = (BASE_DIR / "templates" / "score-notation.html").read_text(encoding="utf-8")
+    for notation_asset in ("score-notation.css", "score-notation.js"):
+        notation_digest = hashlib.sha256((BASE_DIR / "static" / notation_asset).read_bytes()).hexdigest()[:12]
+        notation_html = notation_html.replace(f"/static/{notation_asset}\"", f"/static/{notation_asset}?v={notation_digest}\"")
 
     @app.get("/", include_in_schema=False)
     def index() -> Response:
@@ -479,6 +483,21 @@ def create_app(
             "status": "ok" if all(dependencies.values()) else "degraded",
             "dependencies": dependencies,
         }
+
+    @app.get("/jobs/{job_id}/notation", include_in_schema=False)
+    def score_notation_page(job_id: str) -> Response:
+        if re.fullmatch(r"[a-f0-9]{32}", job_id) is None or db.get_job(app_settings.database_path, job_id) is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return Response(content=notation_html, media_type="text/html; charset=utf-8", headers={
+            "Cache-Control": "no-store",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": (
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+                "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            ),
+        })
 
     @app.post("/api/jobs", status_code=status.HTTP_202_ACCEPTED)
     def submit_url_job(
@@ -1716,7 +1735,13 @@ def create_app(
         return Response(
             content=content,
             media_type=media_type,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+                "X-PopEx-Score-Created-At": document["createdAt"],
+                "X-PopEx-Correction-Revision": str(_corrections["revision"]),
+                "X-PopEx-Score-View": view_value,
+            },
         )
 
     @app.get("/api/jobs/{job_id}/stems")
