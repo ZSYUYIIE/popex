@@ -7,6 +7,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/score-notation.css">
   <script src="/static/vendor/osmd-2.2.1/opensheetmusicdisplay.min.js" defer></script>
+  <script src="/static/score-notation-audio.js" defer></script>
   <script src="/static/score-notation.js" defer></script>
 </head>
 <body>
@@ -29,6 +30,23 @@
     <p>Render up to 128 bars at a time. Change the range to read later bars; downloads always contain the complete score or part.</p>
     <p id="notation-status" role="status" aria-live="polite">Loading saved-score information…</p>
     <p id="notation-rendered"></p>
+    <section class="notation-review" aria-labelledby="notation-review-title">
+      <h2 id="notation-review-title">Listen against the recording</h2>
+      <p>Bar timing is the draft’s estimate, not verified alignment. Playback uses this recording, not synthesized notes. Changing notation controls does not change the displayed score until Render.</p>
+      <audio id="notation-audio" controls preload="none" aria-label="Recording for the displayed notation" hidden></audio>
+      <fieldset id="notation-audio-controls" disabled>
+        <legend>Review the displayed bars</legend>
+        <div class="notation-audio-actions">
+          <button id="notation-play-range" type="button">Play shown bars</button>
+          <label>Start at bar<select id="notation-audio-bar" aria-label="Bar to play"></select></label>
+          <button id="notation-play-bar" type="button">Play selected bar</button>
+          <button id="notation-audio-stop" type="button">Stop</button>
+          <label class="notation-repeat"><input id="notation-audio-repeat" type="checkbox">Repeat shown bars</label>
+        </div>
+      </fieldset>
+      <p id="notation-audio-status" role="status" aria-live="polite">Render notation to enable recording review.</p>
+      <p id="notation-audio-position" role="timer" aria-live="off">No displayed bar selected.</p>
+    </section>
     <nav aria-label="Score downloads"><a id="notation-musicxml" hidden download>Download MusicXML</a><a id="notation-midi" hidden download>Download full MIDI</a><button id="notation-retry" type="button">Reload score information</button></nav>
     <details id="notation-warnings"><summary>Transcription warnings</summary><ul id="notation-warning-list"></ul></details>
     <p>The visual score is not a screen-reader transcription. The <a href="/#recordings">structured bar-by-bar review</a> keeps notes, drum hits, uncertainty and editing controls accessible. Rendering failure never removes your saved score or corrections.</p>

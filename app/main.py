@@ -458,7 +458,7 @@ def create_app(
 
     index_html = _fingerprinted_index_html()
     notation_html = (BASE_DIR / "templates" / "score-notation.html").read_text(encoding="utf-8")
-    for notation_asset in ("score-notation.css", "score-notation.js"):
+    for notation_asset in ("score-notation.css", "score-notation-audio.js", "score-notation.js"):
         notation_digest = hashlib.sha256((BASE_DIR / "static" / notation_asset).read_bytes()).hexdigest()[:12]
         notation_html = notation_html.replace(f"/static/{notation_asset}\"", f"/static/{notation_asset}?v={notation_digest}\"")
 
@@ -1661,11 +1661,17 @@ def create_app(
     def get_saved_score(
         job_id: str,
         include_measures: str | None = Query(None, alias="includeMeasures"),
+        include_measure_timing: str | None = Query(None, alias="includeMeasureTiming"),
         view: str | None = Query(None),
     ) -> dict:
         include_measures_value = _strict_query_bool(
             include_measures,
             field="includeMeasures",
+            default=False,
+        )
+        include_measure_timing_value = _strict_query_bool(
+            include_measure_timing,
+            field="includeMeasureTiming",
             default=False,
         )
         view_value = _score_view(view)
@@ -1682,6 +1688,11 @@ def create_app(
         )
         payload["view"] = view_value
         payload["corrections"] = corrections
+        if include_measure_timing_value:
+            payload["measureTiming"] = [
+                {key: measure[key] for key in ("measureIndex", "startSeconds", "endSeconds")}
+                for measure in shown["measures"]
+            ]
         return payload
 
     @app.get("/api/jobs/{job_id}/score/saved/download")

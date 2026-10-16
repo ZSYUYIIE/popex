@@ -433,7 +433,7 @@ Implemented capabilities:
 - key signatures with mode in MusicXML and MIDI only when the tonal context reaches 0.50 confidence, with flat or sharp spelling to match and accidentals only where a note differs from the key;
 - instrument parts by source line, the only reliable instrument evidence: lead vocal (vocal stem), pitched lines (full mix), an explicitly labelled accompaniment reduction on a grand staff (accompaniment stem), and a bass line in bass clef when it is not tabbed; clefs follow each part's range, tempo and chord symbols sit on the top part, and each part carries a General MIDI program for playback;
 - per-part MusicXML downloads for every pitched, tablature, and drum part;
-- locally rendered standard, drum and tablature notation from the existing saved MusicXML, with full-score/individual-part and corrected/original choices, explicit bar ranges and retry; [renderer workflow, limits and license audit](docs/local-score-notation.md);
+- locally rendered standard, drum and tablature notation from the existing saved MusicXML, with full-score/individual-part and corrected/original choices, explicit bar ranges and retry; native recording playback beside the displayed score, bar/range seeking and repeat with an estimated current-bar cue; [renderer workflow, limits and license audit](docs/local-score-notation.md);
 - a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
 - side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
 - a studio-style web interface: stage-dark by default with a designed light theme (System, Dark, or Light, remembered per browser), self-hosted OFL fonts (Bricolage Grotesque, Geist, Geist Mono), and a live piano roll drawn from saved score data (notes coloured by part, chord and drum lanes, bar numbers) in the hero and in every score panel, where its playhead follows the review player; motion respects reduced-motion settings;
@@ -582,7 +582,7 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `GET /api/jobs/{job_id}/score` with optional `?includeMeasures=true`
 - `GET /api/jobs/{job_id}/score/download?format=midi|musicxml`
 - `POST /api/jobs/{job_id}/score/construct` with optional `?force=true`
-- `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true` and `?view=corrected|original` (default `corrected`)
+- `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true`, `?includeMeasureTiming=true` (compact saved bar index/start/end only), and `?view=corrected|original` (default `corrected`)
 - `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json` with optional `&view=corrected|original`; MusicXML also accepts `&part=<id>` for one part (ids are listed in the saved score's `exportParts`)
 - `GET /jobs/{job_id}/notation` opens the local notation page; saved-export identity headers identify the actual score creation time, correction revision and view so concurrent changes cannot mislabel a render
 - `GET /api/jobs/{job_id}/score/corrections`
@@ -735,6 +735,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 ## Known limitations
 
 - No dedicated PDF export or publication-quality engraving. The local notation view renders 1–128 selected bars at a time (up to 8 MiB MusicXML / 20,000 notes); complete MusicXML and per-part downloads remain available for larger scores. The SVG visual is not a replacement for the accessible structured review.
+- Notation recording review follows saved draft bar times, not verified audio alignment. It plays the normalized full recording, not synthesized notes or separate stems; stopping at a bar boundary is browser-timer approximate, not sample-accurate. Render again after editing to update the displayed score and its playback range.
 - Tablature uses standard tuning only and suggests one position per note; held notes do not block strings for later notes, and capo, alternate tunings, and techniques (bends, slides, hammer-ons) are not modelled. Guitar parts are never detected automatically.
 - Drum notation uses broad voices on an eighth-note grid. It does not claim specific kit pieces, sticking, ghost notes, accents, flams, or 16th-note detail; off-grid hits are counted and warned about. Auxiliary percussion detection is limited to what the raw baseline labels.
 - Only the latest successful score is kept; corrections are re-applied to rebuilt scores by stable IDs. Raw predictions, interpretation drafts, and saved score files are never modified by score construction or corrections.
