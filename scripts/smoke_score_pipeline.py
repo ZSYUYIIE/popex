@@ -167,6 +167,8 @@ def run(data_dir: Path) -> dict:
              "measureIndex": 0, "beat": 0.25, "durationBeats": 0.5},
             {"op": "set_hit_timing", "target": {"eventId": timing_hit["eventId"], "hitIndex": timing_hit["hitIndex"]},
              "measureIndex": 0, "beat": drum_beat},
+            {"op": "add_note", "target": {"partId": "musician-notes"},
+             "measureIndex": 0, "beat": 1.25, "durationBeats": 1, "midiNote": 67},
         ]
         for revision, operation in enumerate(corrections):
             response = client.post(
@@ -187,6 +189,13 @@ def run(data_dir: Path) -> dict:
         drum_timing_separate = (edited_hit["quantizedBeat"] == drum_beat
                                 and edited_hit["rawTimeSeconds"] == timing_hit["rawTimeSeconds"]
                                 and edited_hit["rawBeat"] == timing_hit["rawBeat"])
+        musician_notes = [note for measure in corrected_details["measures"]
+                          for note in measure["notes"] if note.get("origin") == "musician"]
+        manual_separate = (len(musician_notes) == 1
+                           and musician_notes[0]["id"].startswith("user:")
+                           and musician_notes[0]["midiNote"] == 67
+                           and all(musician_notes[0][key] is None for key in
+                                   ("confidence", "startSeconds", "endSeconds", "rawMidiPitch")))
         predictions_unchanged = all(hashlib.sha256(path.read_bytes()).hexdigest() == digest
                                     for path, digest in evidence_hashes.items())
         part_downloads = {
@@ -238,6 +247,7 @@ def run(data_dir: Path) -> dict:
                 and original_xml.content != musicxml.content,
                 "timingSeparate": timing_separate,
                 "drumTimingSeparate": drum_timing_separate,
+                "manualNoteSeparate": manual_separate,
                 "predictionHashesUnchanged": predictions_unchanged,
             },
             "midiChannel10NoteOns": _channel_ten_note_ons(midi.content),
@@ -252,11 +262,12 @@ def run(data_dir: Path) -> dict:
         problems.append("MusicXML has no percussion part")
     corrections = summary["corrections"]
     if (
-        corrections["active"] != 4
+        corrections["active"] != 5
         or corrections["correctedPercussionHits"] != corrections["originalPercussionHits"] - 1
         or not corrections["originalMusicxmlDiffers"]
         or not corrections["timingSeparate"]
         or not corrections["drumTimingSeparate"]
+        or not corrections["manualNoteSeparate"]
         or not corrections["predictionHashesUnchanged"]
     ):
         problems.append("corrections were not applied separately from the prediction")
