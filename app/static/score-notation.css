@@ -21,7 +21,16 @@ button:disabled { cursor: wait; opacity: .65; }
 #notation-paper { position: relative; min-height: 4rem; min-width: 720px; padding: 1rem; background: white; color: black; }
 .notation-stage { position: absolute; visibility: hidden; top: 0; left: 0; width: 100%; }
 .notation-canvas { width: 100%; }
+.notation-review { margin-block: 1.5rem; }
+.notation-review h2 { font-size: 1.25rem; }
+.notation-review audio { display: block; width: min(100%, 40rem); margin-block: 1rem; }
+.notation-review audio[hidden] { display: none; }
+.notation-review fieldset { min-width: 0; margin: 0; padding: 1rem; border: 1px solid #87968d; }
+.notation-audio-actions { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; }
+.notation-repeat { flex-direction: row; align-items: center; align-self: center; }
+.notation-repeat input { min-height: 1.5rem; width: 1.5rem; }
+#notation-audio-position { font-weight: 650; border-left: .25rem solid currentColor; padding-left: .75rem; }
 #notation-paper svg { display: block; }
 footer { padding-block: 1.5rem; border-top: 1px solid #87968d; font-size: .9rem; }
 @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } #notation-scroll { forced-color-adjust: none; background: white; color: black; } input, select, button { border-color: ButtonText; } }
-@media print { form, nav, .skip, footer, #notation-retry { display: none; } body { padding: 0; } #notation-scroll { overflow: visible; border: 0; } }
+@media print { form, nav, .skip, footer, #notation-retry, .notation-review { display: none; } body { padding: 0; } #notation-scroll { overflow: visible; border: 0; } }

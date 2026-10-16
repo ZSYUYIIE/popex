@@ -95,7 +95,7 @@ console.log(JSON.stringify({{ready,waiting}}));
     assert "Open notation" not in result["waiting"]
 
 
-def notation_node(body):
+def notation_node(body, audio_setup=""):
     """Unit-test the view controller, not a substitute for real OSMD browser QA."""
     script = r'''
 const fs=require("fs");
@@ -131,11 +131,12 @@ global.fetch=async url=>{
 };
 global.DOMParser=class {parseFromString(){return {documentElement:{localName:"score-partwise"},querySelector:()=>null,querySelectorAll:()=>[]};}};
 global.opensheetmusicdisplay={OpenSheetMusicDisplay:class{constructor(stage,options){this.stage=stage;this.options=options;rendererCalls++;}async load(){}render(){if(failRender)throw new Error("simulated renderer failure");this.stage.append(new Element("svg"));}}};
+__AUDIO_SETUP__
 const file=__FILE__;
 let source=fs.readFileSync(file,"utf8").replace("if (match) reload();","globalThis.t={reload,render,boundedXml,endpoint,element}; if (match) reload();");
 eval(source);
 (async()=>{for(let i=0;i<8;i++)await new Promise(resolve=>setImmediate(resolve)); __BODY__})().catch(error=>{console.error(error);process.exit(1);});
-'''.replace("__FILE__", json.dumps(str(ROOT / "app/static/score-notation.js"))).replace("__BODY__", body)
+'''.replace("__FILE__", json.dumps(str(ROOT / "app/static/score-notation.js"))).replace("__BODY__", body).replace("__AUDIO_SETUP__", audio_setup)
     result = subprocess.run(["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
     return json.loads(result.stdout)
 

@@ -6,7 +6,8 @@
   const from = $("notation-from"), through = $("notation-through"), zoom = $("notation-zoom");
   const renderButton = $("notation-render"), retry = $("notation-retry"), paper = $("notation-paper");
   const match = /^\/jobs\/([a-f0-9]{32})\/notation$/.exec(location.pathname);
-  let details = null, busy = false, initialized = false, restoreFocus = null;
+  let details = null, recording = null, busy = false, initialized = false, restoreFocus = null;
+  const audioReview = globalThis.PopexNotationAudio ? new globalThis.PopexNotationAudio.Review() : null;
   const text = (value, fallback = "") => typeof value === "string" ? value.slice(0, 400) : fallback;
   function status(message, error = false) {
     $("notation-status").textContent = message;
@@ -33,7 +34,7 @@
   function endpoint(kind, selectedView = view.value, selectedPart = part.value) {
     const base = `/api/jobs/${match[1]}/score/saved`;
     const query = new URLSearchParams({view: selectedView === "original" ? "original" : "corrected"});
-    if (kind === "details") query.set("includeMeasures", "false");
+    if (kind === "details") { query.set("includeMeasures", "false"); query.set("includeMeasureTiming", "true"); }
     else {
       query.set("format", kind);
       if (kind === "musicxml" && selectedPart) query.set("part", selectedPart);
@@ -78,6 +79,7 @@
     ]);
     if (!saved || saved.available !== true || !Number.isInteger(saved.counts?.measures) || saved.counts.measures < 1) throw new Error("Build a saved draft score from recordings before opening notation.");
     details = saved;
+    recording = job;
     $("recording-title").textContent = text(job.title, "Recording") + " · draft notation";
     const version = [text(job.version?.label), text(job.version?.kind)].filter(Boolean).join(" · ");
     $("recording-identity").textContent = `Recording ${match[1]}${version ? " · " + version : ""} · saved ${text(saved.createdAt, "at an unknown time")} · ${saved.counts.measures} bars`;
@@ -131,13 +133,25 @@
       if (document.querySelectorAll("note").length > 20000) throw new Error("This score has too many notes for the browser view. Select an individual part or use the complete download.");
       const Renderer = globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay;
       if (typeof Renderer !== "function") throw new Error("The local notation renderer is unavailable. Reload this page or use the MusicXML download.");
-      const renderer = new Renderer(stage, {backend: "svg", autoResize: false, drawTitle: false, disableCursor: true, drawFromMeasureNumber: start, drawUpToMeasureNumber: end});
+      const renderer = new Renderer(stage, {backend: "svg", autoResize: false, drawTitle: false, disableCursor: false, followCursor: false,
+        cursorsOptions: [{type: 3, color: "#205f47", alpha: 0.18, follow: false}], drawFromMeasureNumber: start, drawUpToMeasureNumber: end});
       renderer.Zoom = Number(zoom.value);
       await renderer.load(document);
       renderer.render();
       if (!stage.querySelector("svg")) throw new Error("No notation was rendered. Try another part or download the MusicXML.");
       stage.className = "notation-canvas";
       paper.replaceChildren(stage);
+      if (audioReview) {
+        const source = Array.isArray(recording?.files) ? recording.files.find(file => file?.kind === "analysis") : null;
+        try {
+          audioReview.setScore({jobId: match[1], sourceUrl: source?.preview_url, start, end, measures: details.measureTiming}, globalThis.PopexNotationAudio.measureCue(renderer));
+        } catch (_) {
+          $("notation-audio-controls").disabled = true;
+          $("notation-audio").hidden = true;
+          try { audioReview.stop(false); $("notation-audio").pause(); $("notation-audio").removeAttribute("src"); } catch (_) {}
+          $("notation-audio-status").textContent = "Recording review is unavailable. The notation and downloads remain usable.";
+        }
+      }
       const label = part.options[part.selectedIndex]?.textContent || "Full score";
       $("notation-rendered").textContent = `${label} · ${view.value === "original" ? "original prediction" : "with corrections"} · bars ${start}–${end} of ${details.counts.measures} · correction revision ${details.corrections?.revision ?? 0}`;
       status("Notation rendered locally. Review the transcription warnings and check it by ear.");

@@ -95,3 +95,35 @@ and all original saved files/corrections. Reload then Render to see new edits.
 The notation view must show honest warnings, preserve original artifacts and
 offer retry on rendering failure. The SVG is a visual aid, not a replacement for
 the structured accessible review or a publication-quality engraving guarantee.
+
+## Recording review beside notation
+
+After a successful Render, the native audio player uses only that recording's
+existing normalized WAV preview. Loading, rendering, changing selectors and
+refreshing information never start playback. Play shown bars seeks to the first
+displayed bar and stops at the end of the last. Choose a bar and Play selected
+bar to hear it alone; Repeat shown bars repeats only a range started by Play
+shown bars. Stop pauses. Native controls can seek elsewhere in the recording;
+the position cue reports when it is outside the displayed bars or in a gap.
+
+The strict optional `includeMeasureTiming=true` saved-score query returns only
+measure index/start/end from the same saved corrected/original document. It does
+not add notes to the default payload or estimate a new uniform timing grid.
+Negative pickup starts are clamped to zero for playback. Timing is copied and
+bound to the successful rendered snapshot, not mutable controls or a later
+metadata refresh. A new successful render pauses/rebinds playback; a failed
+render retains the previous visual and its timing. No source or correction is
+written. Missing audio never prevents notation or downloads.
+
+The current bar is shown as text; the already-bundled renderer's public cursor
+API also shades that bar when available. Cursor iteration is bounded and does
+not automatically scroll or animate the page. Cursor failure is cosmetic and
+cannot stop the recording. Audio failures and rejected Play requests are
+retryable, and Stop/new render supersede pending playback requests.
+
+This is estimated draft synchronization, not verified alignment or sample-accurate
+stopping. Browser media events/timers and background-tab throttling can affect
+boundary precision. The view plays the normalized full recording, not generated
+MIDI or a selected part's stem. Existing structured review still offers stem
+selection and corrections. No new dependency, vendor file, font or license was
+added for this playback layer.
