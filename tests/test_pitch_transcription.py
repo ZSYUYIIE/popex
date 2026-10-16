@@ -64,7 +64,7 @@ def test_sustained_a4_produces_one_raw_event_and_frame_evidence(
         "warnings",
         "diagnostics",
     ]
-    assert result["algorithmVersion"] == "baseline-pyin-v1"
+    assert result["algorithmVersion"] == "stem-profile-pyin-v2"
     assert result["sourceKind"] == "vocals"
     assert len(result["events"]) == 1
     event = result["events"][0]
@@ -245,8 +245,43 @@ def test_bass_source_range_detects_e2(tmp_path: Path) -> None:
     assert result["events"][0]["midiNote"] == 40
     assert result["events"][0]["noteName"] == "E2"
     range_info = result["diagnostics"]["range"]
-    assert range_info["fminHz"] == pytest.approx(41.203, rel=0.01)
-    assert range_info["fmaxHz"] == pytest.approx(523.251, rel=0.01)
+    assert range_info["fminHz"] == pytest.approx(30.868, rel=0.01)  # B0, five-string low B
+    assert range_info["fmaxHz"] == pytest.approx(391.995, rel=0.01)  # G4, 24th fret on the G string
+    assert result["diagnostics"]["profile"] == {"name": "bass-guitar", "lowNote": "B0", "highNote": "G4"}
+    assert result["diagnostics"]["eventing"]["minimumEventSeconds"] == 0.060
+    assert result["diagnostics"]["pyin"]["maxTransitionRateOctavesPerSecond"] == 8.0
+
+
+def test_profiles_match_each_stem() -> None:
+    assert pitch.pitch_profile("vocals")["name"] == pitch.pitch_profile("vocal")["name"] == "voice"
+    voice = pitch.pitch_profile("vocals")
+    assert (voice["low"], voice["high"], voice["minEventSeconds"]) == ("E2", "C6", 0.080)
+    general = pitch.pitch_profile("full_mix")
+    assert (general["name"], general["low"], general["high"], general["minEventSeconds"]) == (
+        "general-line", "C2", "C6", 0.045,
+    )
+    # Profiles are copies: callers cannot change the shared table.
+    voice["low"] = "C0"
+    assert pitch.pitch_profile("vocals")["low"] == "E2"
+
+
+def test_bass_profile_never_reports_notes_above_the_instrument(tmp_path: Path) -> None:
+    # A5 (880 Hz) is far above any bass guitar. The voice profile reports it; the
+    # bass profile can only report pitches inside B0-G4, so it never claims A5.
+    high = write_wav(tmp_path / "high.wav", tone(880.0, 1.2))
+    assert [event["midiNote"] for event in pitch.transcribe_pitched_audio(high, source_kind="vocals")["events"]] == [81]
+    bass = pitch.transcribe_pitched_audio(high, source_kind="bass")["events"]
+    assert all(event["midiNote"] <= 67 for event in bass)
+
+
+def test_vocal_profile_drops_blips_shorter_than_a_sung_note(tmp_path: Path) -> None:
+    # A 30 ms tone at the very start forms a ~75 ms event: long enough for the
+    # general 45 ms floor, too short for the voice profile's 80 ms one.
+    blips = np.concatenate([np.concatenate([tone(440.0, 0.03), np.zeros(int(0.2 * SAMPLE_RATE), dtype=np.float32)]) for _ in range(4)])
+    path = write_wav(tmp_path / "blips.wav", blips)
+    general = pitch.transcribe_pitched_audio(path, source_kind="full_mix")["events"]
+    voice = pitch.transcribe_pitched_audio(path, source_kind="vocals")["events"]
+    assert len(voice) < len(general)
 
 
 def test_stereo_input_is_deterministic_and_input_is_unchanged(

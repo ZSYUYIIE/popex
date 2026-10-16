@@ -41,8 +41,8 @@ from app.transcription_events import (
 )
 
 
-TRANSCRIPTION_VERSION = "baseline-pyin-onset-v1"
-DEFAULT_PITCH_VERSION = "baseline-pyin-v1"
+TRANSCRIPTION_VERSION = "stem-profile-pyin-onset-v2"
+DEFAULT_PITCH_VERSION = "stem-profile-pyin-v2"
 
 _PITCHED_STEM_KINDS = ("vocals", "bass", "other")
 _STEM_SOURCE_ORDER = {"vocals": 0, "bass": 1, "other": 2, "drums": 3, "full_mix": 4}
