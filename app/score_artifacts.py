@@ -44,6 +44,7 @@ from app.score_sources import (
     validate_tablature_request,
 )
 from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consistent
+from app.score_note_entry import validate_manual_note
 from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
@@ -581,6 +582,7 @@ def _validate_measures(
     part_ids: set[str],
     meter: int,
     schema_version: int,
+    manual_note_ids: frozenset[str],
 ) -> dict[str, Any]:
     measures = _sequence(value, "measures", _MAX_MEASURES)
     if not measures:
@@ -598,6 +600,7 @@ def _validate_measures(
         "tabNotes": 0,
         "fingeredTabNotes": 0,
         "tabByInstrument": {},
+        "manualNoteIds": set(),
     }
     for position, raw in enumerate(measures):
         label = f"measures[{position}]"
@@ -650,7 +653,16 @@ def _validate_measures(
                 raise _fail("measures contain a duplicate note ID.")
             note_ids.add(note_id)
             _integer(note.get("midiNote"), f"{note_label}.midiNote", 0, 127)
-            _number(note.get("confidence"), f"{note_label}.confidence", 0.0, 1.0)
+            if "origin" in note:
+                if note.get("origin") != "musician" or note_id not in manual_note_ids:
+                    raise _fail("Musician notes are allowed only in an explicitly authorized correction projection.")
+                try:
+                    validate_manual_note(note, schema=schema_version)
+                except ValueError as exc:
+                    raise _fail(str(exc)) from None
+                totals["manualNoteIds"].add(note_id)
+            else:
+                _number(note.get("confidence"), f"{note_label}.confidence", 0.0, 1.0)
             if "partId" not in note:
                 raise _fail(f"{note_label}.partId is required.")
             if schema_version >= 3:
@@ -726,8 +738,17 @@ def _validate_percussion_summary(value: Any, by_voice: Mapping[str, int]) -> Non
         raise _fail("percussion.voices does not match the measures.")
 
 
-def validate_score_artifact(payload: Any) -> dict[str, Any]:
-    """Validate one persisted score document and return a detached copy."""
+def validate_score_artifact(payload: Any, *, manual_note_ids: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Validate a prediction, or an explicitly authorized transient projection.
+
+    File readers/writers never authorize manual IDs. Corrected-view callers must
+    supply the exact active IDs produced by correction replay, not infer them
+    from untrusted artifact contents.
+    """
+    if (not isinstance(manual_note_ids, frozenset)
+            or any(not isinstance(item, str) or re.fullmatch(r"user:[a-f0-9]{32}", item) is None
+                   for item in manual_note_ids)):
+        raise _fail("The correction projection identities are invalid.")
     document = _mapping(payload, "score document")
     schema_version = document.get("schemaVersion")
     if (
@@ -763,7 +784,9 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     layers = _validate_layers(document["layers"], schema_version)
     _tempo, meter = _validate_timing(document["timing"])
     part_ids = _validate_parts(document["parts"])
-    totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
+    totals = _validate_measures(document["measures"], part_ids, meter, schema_version, manual_note_ids)
+    if totals["manualNoteIds"] != manual_note_ids:
+        raise _fail("The correction projection identities do not match its notes.")
     counts = _mapping(document["counts"], "counts")
     count_keys = {
         1: _COUNT_KEYS_V1,

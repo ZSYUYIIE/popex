@@ -1165,6 +1165,12 @@ progress::-moz-progress-bar {
   gap: .5rem;
   margin-top: .6rem;
 }
+
+.note-entry { margin-block: 1rem; }
+.note-entry fieldset { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; min-width: 0; margin: .75rem 0; padding: 0; border: 0; }
+.note-entry label { display: flex; flex-direction: column; gap: .25rem; max-width: 100%; min-width: 0; }
+.note-entry input { width: 8rem; max-width: 100%; }
+.note-entry select { max-width: 100%; }
 .review-controls {
   display: flex;
   flex-wrap: wrap;

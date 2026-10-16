@@ -13,6 +13,8 @@ Operations (schema 1):
 - ``set_pitch``: ``{noteId}`` → ``midiNote`` (12–127). A tabbed note is
   re-fingered at the playable position closest to its previous fret;
 - ``delete_note``: ``{noteId}``;
+- ``add_note``: ``{partId}`` → bar, beat, duration and pitch; its server-generated
+  operation ID identifies a musician note, not a raw prediction;
 - ``set_note_timing``: ``{noteId}`` → ``measureIndex``, zero-based local
   ``beat``, and ``durationBeats`` (quarter-note beats, quarter-beat steps);
 - ``set_tab``: ``{noteId}`` → ``string`` and ``fret`` that must sound the
@@ -42,6 +44,7 @@ from app.score_construction import (
     plan_score_parts,
 )
 from app.tablature import TAB_INSTRUMENTS, positions_for, tab_position_is_consistent
+from app.score_note_entry import NOTE_ENTRY_PART_IDS, make_manual_note, note_entry_parts
 
 CORRECTIONS_SCHEMA_VERSION = 1
 MAX_OPERATIONS = 2000
@@ -51,7 +54,7 @@ _EVENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _CHORD_TEXT = re.compile(r"[A-Za-z0-9#♯♭b/+()°ø△ ,.-]{1,32}")
 _STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 OPERATION_KINDS = frozenset(
-    {"set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "set_hit_timing", "delete_hit", "reset_all"}
+    {"add_note", "set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "set_hit_timing", "delete_hit", "reset_all"}
 )
 
 
@@ -94,9 +97,10 @@ def validate_operation(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise CorrectionError("A correction must be an object.")
     kind = value.get("op")
-    if kind not in OPERATION_KINDS:
+    if not isinstance(kind, str) or kind not in OPERATION_KINDS:
         raise CorrectionError("The correction type is not supported.")
     allowed = {
+        "add_note": {"op", "target", "measureIndex", "beat", "durationBeats", "midiNote"},
         "set_pitch": {"op", "target", "midiNote"},
         "delete_note": {"op", "target"},
         "set_note_timing": {"op", "target", "measureIndex", "beat", "durationBeats"},
@@ -110,7 +114,13 @@ def validate_operation(value: Any) -> dict[str, Any]:
     if set(value) != allowed:
         raise CorrectionError("The correction has missing or unsupported fields.")
     operation: dict[str, Any] = {"op": kind}
-    if kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
+    if kind == "add_note":
+        target = _target(value["target"], frozenset({"partId"}))
+        part = target["partId"]
+        if not isinstance(part, str) or part not in NOTE_ENTRY_PART_IDS:
+            raise CorrectionError("The note's target part is not supported.")
+        operation["target"] = {"partId": part}
+    elif kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
         target = _target(value["target"], frozenset({"noteId"}))
         operation["target"] = {"noteId": _event_id(target["noteId"], "noteId")}
     elif kind in {"set_drum_voice", "delete_hit", "set_hit_timing"}:
@@ -122,9 +132,9 @@ def validate_operation(value: Any) -> dict[str, Any]:
     elif kind == "set_chord":
         target = _target(value["target"], frozenset({"measureIndex"}))
         operation["target"] = {"measureIndex": _int(target["measureIndex"], "measureIndex", 0, 2047)}
-    if kind == "set_pitch":
+    if kind in {"set_pitch", "add_note"}:
         operation["midiNote"] = _int(value["midiNote"], "midiNote", 12, 127)
-    elif kind == "set_note_timing":
+    if kind in {"set_note_timing", "add_note"}:
         operation["measureIndex"] = _int(value["measureIndex"], "measureIndex", 0, 2047)
         operation["beat"] = _beat(value["beat"], "beat", 0, 11.75)
         operation["durationBeats"] = _beat(value["durationBeats"], "durationBeats", 0.25, 4096)
@@ -260,8 +270,10 @@ def apply_corrections(
         "hitTiming": {},
         "deletedNotes": [],
         "deletedHits": [],
+        "addedNotes": {},
     }
     edited_hits: set[tuple[str, int]] = set()
+    entry_parts = {part["id"]: part for part in note_entry_parts(document)}
 
     def skip(operation: Mapping[str, Any], reason: str) -> None:
         report["notApplicable"].append({"id": operation["id"], "op": operation["op"], "reason": reason})
@@ -277,7 +289,27 @@ def apply_corrections(
     for operation in active_operations(operations):
         kind = operation["op"]
         target = operation.get("target", {})
-        if kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
+        if kind == "add_note":
+            part = entry_parts.get(target["partId"])
+            if part is None:
+                skip(operation, "The selected part is no longer in the saved prediction.")
+                continue
+            meter = corrected["timing"]["beatsPerMeasure"]
+            index = operation["measureIndex"]
+            start = index * meter + operation["beat"]
+            if (index >= len(measures) or operation["beat"] >= meter
+                    or start + operation["durationBeats"] > len(measures) * meter):
+                skip(operation, "The added note is outside the saved score's bars.")
+                continue
+            identity = "user:" + operation["id"]
+            if identity in notes:
+                skip(operation, "The added note identity is already in the score.")
+                continue
+            note = make_manual_note(operation, part, corrected, [item for _measure, item in notes.values()])
+            destination = measures[index]
+            destination["notes"].append(note)
+            notes[identity] = (destination, note)
+        elif kind in {"set_pitch", "delete_note", "set_tab", "set_note_timing"}:
             located = notes.get(target["noteId"])
             if located is None:
                 skip(operation, "The note is not in this score.")
@@ -293,6 +325,7 @@ def apply_corrections(
                         "measureIndex": measure["measureIndex"],
                         "noteName": report["notes"][note["id"]]["noteName"],
                         "quantizedBeat": note["quantizedBeat"],
+                        "origin": note.get("origin", "prediction"),
                     }
                 )
             elif kind == "set_pitch":
@@ -405,6 +438,11 @@ def apply_corrections(
             else:
                 edited_hits.add(identity)
     _recompute(corrected, edited_hits, schema, bool(report["applied"]))
+    report["addedNotes"] = {
+        note["id"]: {"entryVersion": note["entryVersion"], "correctionId": note["correctionId"],
+                     "targetPartId": note["targetPartId"], "origin": "musician"}
+        for _measure, note in notes.values() if note.get("origin") == "musician"
+    }
     for note_id in list(report["notes"]):
         if note_id in notes:
             _measure, note = notes[note_id]
@@ -431,6 +469,8 @@ def _recompute(document: dict[str, Any], edited_hits: set[tuple[str, int]], sche
     counts = document["counts"]
     all_notes = [note for measure in measures for note in measure["notes"]]
     counts["notes"] = len(all_notes)
+    if all_notes and document["layers"]["pitchedNotes"]["status"] == "omitted":
+        document["layers"]["pitchedNotes"] = {"status": "included", "note": "Notes were entered by the musician."}
     counts["chordSymbols"] = sum(1 for measure in measures if measure["chordSymbol"] is not None)
     counts["notesWithPart"] = sum(1 for note in all_notes if note.get("partId") is not None)
     part_counts: dict[str, int] = {}

@@ -140,6 +140,7 @@ from app.score_sources import (
     encode_tablature_request,
 )
 from app.tablature import TAB_INSTRUMENT_ORDER, TAB_INSTRUMENTS
+from app.score_note_entry import note_entry_parts
 from app.score_api import (
     ScorePreviewError,
     ScorePreviewUnavailableError,
@@ -1532,8 +1533,8 @@ def create_app(
             )
             raise HTTPException(status_code=422, detail=reason)
         try:
-            validate_score_artifact(corrected)
-        except ScoreArtifactError:
+            _validate_corrected_projection(corrected, report)
+        except (ScoreArtifactError, ScoreConstructionError):
             raise HTTPException(
                 status_code=422, detail="That correction would make the score invalid."
             ) from None
@@ -1682,6 +1683,7 @@ def create_app(
         )
         payload["view"] = view_value
         payload["corrections"] = corrections
+        payload["noteEntryParts"] = note_entry_parts(document)
         return payload
 
     @app.get("/api/jobs/{job_id}/score/saved/download")
@@ -3725,6 +3727,17 @@ def _corrections_state(
     }
 
 
+def _validate_corrected_projection(document: dict[str, Any], report: dict[str, Any]) -> None:
+    validate_score_artifact(document, manual_note_ids=frozenset(report["addedNotes"]))
+    if report["addedNotes"]:
+        # Rebuilds may introduce new overlap/voice/export limits too. Validate
+        # reads as well as writes; never hide a working original behind an
+        # unexportable replay, or persist this projection as model evidence.
+        export = score_export_document(document)
+        score_to_midi_bytes(export)
+        score_to_musicxml_text(export)
+
+
 def _score_view_document(
     settings: Settings,
     job_id: str,
@@ -3738,8 +3751,8 @@ def _score_view_document(
     if view == "original" or not report["applied"]:
         return document, state
     try:
-        validate_score_artifact(corrected)
-    except ScoreArtifactError:
+        _validate_corrected_projection(corrected, report)
+    except (ScoreArtifactError, ScoreConstructionError):
         logging.exception("Saved corrections no longer fit the score for job %s", job_id)
         state["unusable"] = True
         return document, state

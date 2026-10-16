@@ -69,6 +69,7 @@ SCORE_PARTS: dict[str, tuple[str, tuple[str, ...], int]] = {
     "accompaniment": ("Accompaniment reduction", ("other",), 1),
     "bass-line": ("Bass line (draft)", ("bass",), 34),
     "other-lines": ("Other pitched lines (draft)", (), 1),
+    "musician-notes": ("Musician-entered notes", (), 1),
 }
 SCORE_PART_CLEFS = frozenset({"treble", "treble-8vb", "bass", "bass-8vb", "grand"})
 _PART_FOR_SOURCE = {
@@ -832,11 +833,21 @@ def _part_clef(part_id: str, pitches: Sequence[int]) -> str:
     return "treble" if median >= _GRAND_SPLIT else "bass"
 
 
+def score_part_for_note(note: Mapping[str, Any]) -> str:
+    # Do not reserve a new sourceKind: old unknown source labels must keep
+    # their old generic part. Only explicit correction provenance routes a
+    # user-entered note to a musician-selected logical part.
+    target = note.get("targetPartId")
+    if note.get("origin") == "musician" and isinstance(target, str) and target in SCORE_PARTS:
+        return target
+    return _PART_FOR_SOURCE.get(note.get("sourceKind", "unassigned"), "other-lines")
+
+
 def plan_score_parts(notes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Group untabbed notes into instrument parts by their source line."""
     grouped: dict[str, list[Mapping[str, Any]]] = {}
     for note in notes:
-        part_id = _PART_FOR_SOURCE.get(note.get("sourceKind", "unassigned"), "other-lines")
+        part_id = score_part_for_note(note)
         grouped.setdefault(part_id, []).append(note)
     plan = []
     for part_id, (name, _sources, _program) in SCORE_PARTS.items():
@@ -1352,6 +1363,8 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
                     "quantizedBeat": start_beat,
                     "quantizedEndBeat": end_beat,
                     "tab": _parse_note_tab(note.get("tab"), midi_note),
+                    "origin": note.get("origin"),
+                    "targetPartId": note.get("targetPartId"),
                 }
             )
     if len(all_notes) > _MAX_NOTES:
@@ -1372,7 +1385,7 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
         pitched = [
             (item["id"], item["name"], item["clef"], SCORE_PARTS[item["id"]][2],
              [note for note in combined_notes
-              if _PART_FOR_SOURCE.get(note["sourceKind"], "other-lines") == item["id"]])
+              if score_part_for_note(note) == item["id"]])
             for item in plan_score_parts(combined_notes)
         ]
     else:
