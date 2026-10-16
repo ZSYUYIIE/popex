@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Draft notation · PopEx</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/score-notation.css">
+  <script src="/static/vendor/osmd-2.2.1/opensheetmusicdisplay.min.js" defer></script>
+  <script src="/static/score-notation.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#notation-controls">Skip to notation controls</a>
+  <header>
+    <a href="/#recordings">Back to recordings and corrections</a>
+    <h1 id="recording-title">Draft notation</h1>
+    <p id="recording-identity">Loading recording identity…</p>
+    <p>This is a rehearsal draft. Check it against the recording; rendering does not improve the transcription.</p>
+  </header>
+  <main>
+    <form id="notation-controls" aria-label="Notation controls">
+      <label>Score view<select id="notation-view"><option value="corrected">With musician corrections</option><option value="original">Original prediction</option></select></label>
+      <label>Part<select id="notation-part"><option value="">Full score</option></select></label>
+      <label>From bar<input id="notation-from" type="number" min="1" step="1" value="1" required></label>
+      <label>Through bar<input id="notation-through" type="number" min="1" step="1" value="1" required></label>
+      <label>Notation size<select id="notation-zoom"><option value="0.7">Small</option><option value="1" selected>Normal</option><option value="1.25">Large</option><option value="1.5">Larger</option><option value="2">Largest</option></select></label>
+      <button id="notation-render" type="submit" disabled>Render notation</button>
+    </form>
+    <p>Render up to 128 bars at a time. Change the range to read later bars; downloads always contain the complete score or part.</p>
+    <p id="notation-status" role="status" aria-live="polite">Loading saved-score information…</p>
+    <p id="notation-rendered"></p>
+    <nav aria-label="Score downloads"><a id="notation-musicxml" hidden download>Download MusicXML</a><a id="notation-midi" hidden download>Download full MIDI</a><button id="notation-retry" type="button">Reload score information</button></nav>
+    <details id="notation-warnings"><summary>Transcription warnings</summary><ul id="notation-warning-list"></ul></details>
+    <p>The visual score is not a screen-reader transcription. The <a href="/#recordings">structured bar-by-bar review</a> keeps notes, drum hits, uncertainty and editing controls accessible. Rendering failure never removes your saved score or corrections.</p>
+    <section id="notation-scroll" role="region" aria-label="Visual sheet music, horizontally scrollable" tabindex="0"><div id="notation-paper" aria-hidden="true"></div></section>
+    <noscript>This view needs local JavaScript. Return to recordings to download the saved MusicXML.</noscript>
+  </main>
+  <footer>Rendered locally with OpenSheetMusicDisplay 2.2.1. <a href="/static/vendor/osmd-2.2.1/opensheetmusicdisplay.min.js.LICENSE.txt">Third-party licenses and notices</a>. No recording is sent to a rendering service.</footer>
+</body>
+</html>

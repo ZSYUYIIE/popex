@@ -1,0 +1,27 @@
+:root { color-scheme: light; font: 100%/1.55 system-ui, sans-serif; background: #f1f2ef; color: #18201d; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: clamp(1rem, 3vw, 2.5rem); }
+header, main, footer { max-width: 90rem; margin-inline: auto; }
+h1 { font-size: clamp(1.7rem, 4vw, 2.8rem); line-height: 1.15; overflow-wrap: anywhere; }
+p, li, a { overflow-wrap: anywhere; }
+a { color: #164f3c; text-underline-offset: .2em; }
+:focus-visible { outline: 3px solid #6a3900; outline-offset: 4px; }
+.skip { position: absolute; top: -10rem; }
+.skip:focus { top: 0; background: white; padding: 1rem; z-index: 2; }
+form, nav { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; }
+label { display: flex; flex-direction: column; gap: .25rem; min-width: 0; max-width: 100%; }
+input, select, button { font: inherit; min-height: 2.75rem; padding: .45rem .65rem; max-width: 100%; border: 1px solid #62746b; border-radius: .3rem; background: white; color: inherit; }
+input[type=number] { width: 8rem; }
+select { max-width: min(100%, 24rem); }
+button { cursor: pointer; }
+button:disabled { cursor: wait; opacity: .65; }
+#notation-status { font-weight: 650; }
+#notation-status[data-error=true] { border-left: .25rem solid #863000; padding-left: .75rem; }
+#notation-scroll { margin-block: 1.5rem; max-width: 100%; overflow: auto; background: white; border: 1px solid #87968d; }
+#notation-paper { position: relative; min-height: 4rem; min-width: 720px; padding: 1rem; background: white; color: black; }
+.notation-stage { position: absolute; visibility: hidden; top: 0; left: 0; width: 100%; }
+.notation-canvas { width: 100%; }
+#notation-paper svg { display: block; }
+footer { padding-block: 1.5rem; border-top: 1px solid #87968d; font-size: .9rem; }
+@media (forced-colors: active) { :focus-visible { outline-color: Highlight; } #notation-scroll { forced-color-adjust: none; background: white; color: black; } input, select, button { border-color: ButtonText; } }
+@media print { form, nav, .skip, footer, #notation-retry { display: none; } body { padding: 0; } #notation-scroll { overflow: visible; border: 0; } }
