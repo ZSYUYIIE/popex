@@ -347,16 +347,13 @@ def test_worker_output_directory_requires_exactly_four_files(tmp_path: Path):
         )
 
 
-def test_worker_output_outside_allocated_directory_is_rejected(tmp_path: Path):
+def test_worker_output_outside_allocated_directory_is_rejected(tmp_path: Path, require_symlinks):
     config = settings(tmp_path)
     create_analysis_wav(config)
     runner = FakeWorkerRunner(symlink_output_outside=True)
 
-    try:
-        with pytest.raises(StemSeparationError, match="unsafe|outside"):
-            separate_stems(JOB_ID, config, options(runner, tmp_path))
-    except OSError:
-        pytest.skip("Directory symlinks are unavailable on this platform.")
+    with pytest.raises(StemSeparationError, match="unsafe|outside"):
+        separate_stems(JOB_ID, config, options(runner, tmp_path))
 
     outside = config.exports_dir / "outside-worker-output"
     assert not stem_manifest_path(JOB_ID, config).exists()

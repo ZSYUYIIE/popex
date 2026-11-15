@@ -535,6 +535,7 @@ def test_symlinked_readiness_file_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     synthetic_checkpoint: bytes,
+    require_symlinks: None,
 ) -> None:
     prepare_successfully(monkeypatch, tmp_path, synthetic_checkpoint)
     manifest = readiness_path(tmp_path)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from conftest import symlinks_available
 import soundfile as sf
 
 from app.percussion_transcription import (
@@ -493,10 +494,13 @@ def test_missing_nonfile_and_symlink_inputs_are_rejected_without_path_leak(
         tmp_path / "target.wav",
         _sine_pulse(70.0),
     )
-    symlink = tmp_path / "secret-link.wav"
-    symlink.symlink_to(target)
+    paths = [missing, directory]
+    if symlinks_available():  # unprivileged Windows cannot create the symlink fixture
+        symlink = tmp_path / "secret-link.wav"
+        symlink.symlink_to(target)
+        paths.append(symlink)
 
-    for path in (missing, directory, symlink):
+    for path in paths:
         with pytest.raises(PercussionTranscriptionError) as caught:
             transcribe_percussion_audio(
                 path,
