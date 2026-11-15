@@ -267,6 +267,7 @@ def _place_percussion_hits(
     percussion_hits: Sequence[Mapping[str, Any]],
     *,
     seconds_per_beat: float,
+    beat_grid: Any = None,
 ) -> list[dict[str, Any]]:
     """Quantize hits to the eighth grid and collapse same-voice duplicates.
 
@@ -286,8 +287,14 @@ def _place_percussion_hits(
         raise ScoreConstructionError("Duplicate percussion hit identity.")
     placed: list[dict[str, Any]] = []
     for hit in hits:
-        raw_beat = hit["timeSeconds"] / seconds_per_beat
-        quantized = round(raw_beat * 2.0) / 2.0
+        if beat_grid is None:
+            raw_beat = hit["timeSeconds"] / seconds_per_beat
+            quantized = round(raw_beat * 2.0) / 2.0
+            shift_seconds = abs(quantized - raw_beat) * seconds_per_beat
+        else:
+            raw_beat = beat_grid.beat_at(hit["timeSeconds"])
+            quantized = max(0.0, round(raw_beat * 2.0) / 2.0)
+            shift_seconds = abs(beat_grid.seconds_at(quantized) - hit["timeSeconds"])
         placed.append(
             {
                 "eventId": hit["eventId"],
@@ -299,9 +306,7 @@ def _place_percussion_hits(
                 "rawTimeSeconds": hit["timeSeconds"],
                 "rawBeat": round(raw_beat, 4),
                 "quantizedBeat": quantized,
-                "quantizationShiftSeconds": round(
-                    abs(quantized - raw_beat) * seconds_per_beat, 4
-                ),
+                "quantizationShiftSeconds": round(shift_seconds, 4),
                 "strength": hit["strength"],
                 "confidence": hit["confidence"],
                 "interpretationPlacement": hit["interpretationPlacement"],
@@ -340,13 +345,21 @@ def build_score_document(
     beats_per_measure: int = 4,
     chord_symbols: Sequence[str] | None = None,
     percussion_hits: Sequence[Mapping[str, Any]] | None = None,
+    beat_grid: Any = None,
 ) -> dict[str, Any]:
     """Build a versioned draft score document with explicit quantization.
 
     When ``percussion_hits`` is supplied, every measure gains a separate
     ``percussionHits`` list on the same eighth-note grid; pitched notes and
     percussion hits never share a representation.
+
+    ``beat_grid`` (an :class:`app.beat_grid.BeatGrid`) makes the bars follow
+    tracked beats instead of one constant tempo: beat positions come from the
+    grid, measure times are the real times of each bar line, and the reported
+    tempo is the grid's. Raw event times are never changed.
     """
+    if beat_grid is not None:
+        tempo_bpm = beat_grid.tempo_bpm
     tempo = _number(tempo_bpm, "tempoBpm", minimum=20.0, maximum=300.0)
     meter = _integer(beats_per_measure, "beatsPerMeasure", minimum=1, maximum=12)
     if not isinstance(pitched_events, Sequence) or isinstance(pitched_events, (str, bytes)):
@@ -374,23 +387,40 @@ def build_score_document(
 
     sorted_notes = sorted(notes, key=lambda item: (item["startSeconds"], item["endSeconds"], item["id"]))
     for note in sorted_notes:
-        note["rawStartBeat"] = note["startSeconds"] / seconds_per_beat
-        note["rawEndBeat"] = note["endSeconds"] / seconds_per_beat
-        note["quantizedStartBeat"] = round(note["rawStartBeat"] * 2.0) / 2.0
-        note["quantizedEndBeat"] = round(note["rawEndBeat"] * 2.0) / 2.0
+        if beat_grid is None:
+            note["rawStartBeat"] = note["startSeconds"] / seconds_per_beat
+            note["rawEndBeat"] = note["endSeconds"] / seconds_per_beat
+            note["quantizedStartBeat"] = round(note["rawStartBeat"] * 2.0) / 2.0
+            note["quantizedEndBeat"] = round(note["rawEndBeat"] * 2.0) / 2.0
+        else:
+            note["rawStartBeat"] = beat_grid.beat_at(note["startSeconds"])
+            note["rawEndBeat"] = beat_grid.beat_at(note["endSeconds"])
+            # Sound before bar 1 (a short lead-in) is placed on its first beat.
+            note["quantizedStartBeat"] = max(0.0, round(note["rawStartBeat"] * 2.0) / 2.0)
+            note["quantizedEndBeat"] = max(0.0, round(note["rawEndBeat"] * 2.0) / 2.0)
         if note["quantizedEndBeat"] <= note["quantizedStartBeat"]:
             note["quantizedEndBeat"] = note["quantizedStartBeat"] + 0.5
-        note["startShiftSeconds"] = abs(
-            note["quantizedStartBeat"] - note["rawStartBeat"]
-        ) * seconds_per_beat
-        note["endShiftSeconds"] = abs(
-            note["quantizedEndBeat"] - note["rawEndBeat"]
-        ) * seconds_per_beat
+        if beat_grid is None:
+            note["startShiftSeconds"] = abs(
+                note["quantizedStartBeat"] - note["rawStartBeat"]
+            ) * seconds_per_beat
+            note["endShiftSeconds"] = abs(
+                note["quantizedEndBeat"] - note["rawEndBeat"]
+            ) * seconds_per_beat
+        else:
+            note["startShiftSeconds"] = abs(
+                beat_grid.seconds_at(note["quantizedStartBeat"]) - note["startSeconds"]
+            )
+            note["endShiftSeconds"] = abs(
+                beat_grid.seconds_at(note["quantizedEndBeat"]) - note["endSeconds"]
+            )
 
     placed_hits = (
         None
         if percussion_hits is None
-        else _place_percussion_hits(percussion_hits, seconds_per_beat=seconds_per_beat)
+        else _place_percussion_hits(
+            percussion_hits, seconds_per_beat=seconds_per_beat, beat_grid=beat_grid
+        )
     )
     latest_end_beat = max(
         (note["quantizedEndBeat"] for note in sorted_notes), default=0.0
@@ -404,11 +434,25 @@ def build_score_document(
             "Score exceeds the supported measure limit; events were not collapsed."
         )
     measure_count = required_measure_count
-    measures: list[dict[str, Any]] = [
-        {"measureIndex": index, "startSeconds": index * seconds_per_measure,
-         "endSeconds": (index + 1) * seconds_per_measure, "notes": [], "chordSymbol": None}
-        for index in range(measure_count)
-    ]
+    if beat_grid is None:
+        measures: list[dict[str, Any]] = [
+            {"measureIndex": index, "startSeconds": index * seconds_per_measure,
+             "endSeconds": (index + 1) * seconds_per_measure, "notes": [], "chordSymbol": None}
+            for index in range(measure_count)
+        ]
+    else:
+        # Bar lines sit at the real time of each bar's first beat. A bar that
+        # begins before the recording does is shown from 0 s.
+        bar_lines = [
+            max(0.0, beat_grid.seconds_at(index * meter)) for index in range(measure_count + 1)
+        ]
+        if any(end <= start for start, end in zip(bar_lines, bar_lines[1:])):
+            raise ScoreConstructionError("The beat grid does not give every bar a duration.")
+        measures = [
+            {"measureIndex": index, "startSeconds": bar_lines[index],
+             "endSeconds": bar_lines[index + 1], "notes": [], "chordSymbol": None}
+            for index in range(measure_count)
+        ]
     if symbols:
         if len(symbols) > measure_count:
             raise ScoreConstructionError(
@@ -490,6 +534,8 @@ def build_score_document(
     }
     if placed_hits is not None:
         document["percussionHitCount"] = len(placed_hits)
+    if beat_grid is not None:
+        document["beatGrid"] = beat_grid.summary()
     return copy.deepcopy(document)
 
 

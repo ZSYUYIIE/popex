@@ -27,7 +27,9 @@ from typing import Any
 from app.analysis import (
     ANALYSIS_JSON_RELATIVE_PATH,
 )
+from app.beat_grid import BeatGrid, build_beat_grid
 from app.config import Settings
+from app.percussion_interpretation import broad_voice_for_hit
 from app.score_construction import (
     SCORE_BUILDER_VERSION,
     SCORE_SCHEMA_VERSION,
@@ -159,6 +161,57 @@ def _record_pointer(record: Mapping[str, Any]) -> None:
         )
 
 
+def score_beat_grid(
+    analysis: Mapping[str, Any],
+    raw_transcription: Mapping[str, Any],
+    *,
+    beats_per_measure: int,
+) -> BeatGrid | None:
+    """Build the bar grid a score uses from saved analysis and transcription.
+
+    Returns ``None`` when the analysis tracked too few usable beats; the score
+    then falls back to one constant tempo and says so.
+    """
+    timing = analysis.get("timing")
+    if not isinstance(timing, Mapping):
+        return None
+    onsets: list[float] = []
+    drum_hits: list[tuple[float, str]] = []
+    end_seconds = 0.0
+    for event in raw_transcription.get("percussionEvents", ()):
+        seconds = event.get("timeSeconds") if isinstance(event, Mapping) else None
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+            continue
+        onsets.append(float(seconds))
+        end_seconds = max(end_seconds, float(seconds))
+        for hit in event.get("hits", ()):
+            if not isinstance(hit, Mapping) or not isinstance(hit.get("kind"), str):
+                continue
+            confidence = hit.get("confidence")
+            if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+                continue
+            voice, resolved = broad_voice_for_hit(hit["kind"], float(confidence))
+            if resolved and voice in ("low_drum", "mid_drum"):
+                drum_hits.append((float(seconds), "low" if voice == "low_drum" else "mid"))
+    for event in raw_transcription.get("pitchedNoteEvents", ()):
+        end = event.get("endSeconds") if isinstance(event, Mapping) else None
+        if isinstance(end, (int, float)) and not isinstance(end, bool) and math.isfinite(end):
+            end_seconds = max(end_seconds, float(end))
+    return build_beat_grid(
+        timing.get("beatsSeconds"),
+        meter=beats_per_measure,
+        end_seconds=end_seconds,
+        onsets=onsets,
+        drum_hits=drum_hits,
+        analysis_downbeats=(
+            timing.get("downbeatsSeconds")
+            if isinstance(timing.get("downbeatsSeconds"), list)
+            else None
+        ),
+        analysis_meter_confidence=_optional_confidence(timing.get("meterConfidence")),
+    )
+
+
 def collect_score_evidence(
     job_id: str,
     settings: Settings,
@@ -269,6 +322,9 @@ def collect_score_evidence(
         "meterConfidence": _optional_confidence(timing.get("meterConfidence")),
         "tempoStable": tempo_stable if isinstance(tempo_stable, bool) else None,
         "percussionEventCount": len(raw_transcription.get("percussionEvents", ())),
+        "beatGrid": score_beat_grid(
+            analysis, raw_transcription, beats_per_measure=beats_per_measure
+        ),
     }
 
 
@@ -297,10 +353,32 @@ def score_evidence_warnings(
         warnings.append(
             "Tempo confidence is below 0.50; review score timing and measure placement."
         )
-    if evidence["tempoStable"] is False:
+    grid = evidence.get("beatGrid")
+    if grid is None:
         warnings.append(
-            "The estimated tempo is unstable; review score timing and measure placement."
+            "Too few beats were tracked to follow the recording, so bars use one "
+            "constant tempo from 0 s; bar lines may drift and need review."
         )
+        if evidence["tempoStable"] is False:
+            warnings.append(
+                "The estimated tempo is unstable; review score timing and measure placement."
+            )
+    else:
+        if grid.mode == "following":
+            warnings.append(
+                "The tempo moves in this recording; bars follow the tracked beats, "
+                "so review bar lines where the beat is unclear."
+            )
+        if grid.bar_phase_source == "none":
+            warnings.append(
+                "The first beat of the bar could not be confirmed; bars start on the "
+                "first tracked beat and may be shifted by a beat or more."
+            )
+        elif grid.bar_phase_source == "analysis":
+            warnings.append(
+                "The first beat of the bar comes from the audio analysis alone; "
+                "check that bar lines fall where you count 1."
+            )
     if meter_source == "analysis" and (
         meter_confidence is None or meter_confidence < 0.50
     ):
@@ -335,6 +413,7 @@ def build_score_preview(
             evidence["pitchedInputs"],
             tempo_bpm=evidence["tempoBpm"],
             beats_per_measure=evidence["beatsPerMeasure"],
+            beat_grid=evidence["beatGrid"],
         )
     except ScoreConstructionError as exc:
         raise ScorePreviewError(

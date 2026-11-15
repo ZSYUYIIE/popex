@@ -81,13 +81,14 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v5"
+SCORE_PIPELINE_VERSION = "score-pipeline-v6"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
     {"score-pipeline-v1", "score-pipeline-v2", "score-pipeline-v3"}
 )
 PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipeline-v4"}
+PRE_BEAT_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline-v5"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -163,6 +164,14 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and notes > 0
     ):
         return "parts"
+    measures = record.get("score_measure_count")
+    if (
+        version in PRE_BEAT_GRID_PIPELINE_VERSIONS
+        and isinstance(measures, int)
+        and not isinstance(measures, bool)
+        and measures > 1
+    ):
+        return "beat-grid"
     return None
 
 
@@ -451,8 +460,9 @@ def _map_harmony(
     beats_per_measure: int,
 ) -> dict[str, int]:
     stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0}
-    seconds_per_measure = seconds_per_beat * beats_per_measure
-    notated_end = len(measures) * seconds_per_measure
+    # Bars may follow tracked beats, so each bar has its own length;
+    # ``seconds_per_beat`` is only the fallback for a bar without a duration.
+    notated_end = measures[-1]["endSeconds"] if measures else 0.0
     ordered = sorted(
         segments,
         key=lambda item: (float(item["rawStartSeconds"]), str(item["id"])),
@@ -483,6 +493,9 @@ def _map_harmony(
         ]
         coverage: dict[str, float] = {}
         entries = []
+        bar_beat_seconds = (measure_end - measure_start) / beats_per_measure
+        if bar_beat_seconds <= 0:
+            bar_beat_seconds = seconds_per_beat
         for segment in active:
             start = max(measure_start, float(segment["rawStartSeconds"]))
             end = min(measure_end, float(segment["rawEndSeconds"]))
@@ -494,8 +507,10 @@ def _map_harmony(
             entries.append(
                 {
                     "segmentId": str(segment["id"]),
-                    "startBeat": round((start - measure_start) / seconds_per_beat, 3),
-                    "endBeat": round((end - measure_start) / seconds_per_beat, 3),
+                    "startBeat": round((start - measure_start) / bar_beat_seconds, 3),
+                    "endBeat": round(
+                        min(float(beats_per_measure), (end - measure_start) / bar_beat_seconds), 3
+                    ),
                     "symbol": symbol,
                     "confidence": (
                         None
@@ -589,6 +604,7 @@ def construct_score(
             tempo_bpm=evidence["tempoBpm"],
             beats_per_measure=evidence["beatsPerMeasure"],
             percussion_hits=percussion_inputs,
+            beat_grid=evidence["beatGrid"],
         )
     except ScoreConstructionError as exc:
         raise ScorePipelineError(
@@ -702,6 +718,8 @@ def construct_score(
         "tempoConfidence": evidence["tempoConfidence"],
         "tempoStable": evidence["tempoStable"],
         "meterConfidence": evidence["meterConfidence"],
+        # How the bar lines were placed; ``None`` means one constant tempo.
+        "beatGrid": built.get("beatGrid"),
     }
     score_parts = plan_score_parts(
         [note for measure in measures for note in measure["notes"] if note["tab"] is None]
