@@ -35,6 +35,30 @@ The web interface self-hosts these fonts from `app/static/fonts/`. They are unmo
 
 The OFL allows bundling and redistribution with software as long as the fonts are not sold by themselves and the license accompanies them. Neither license declares a Reserved Font Name. If the fonts are modified (for example re-subset), the OFL renaming and notice rules apply.
 
+## Bundled browser notation renderer
+
+The local notation page self-hosts **OpenSheetMusicDisplay 2.2.1**, BSD-3-Clause
+(Copyright 2019 PhonicScore), not PopEx MIT code. The exact, unmodified npm
+browser file and hash inventory are in `app/static/vendor/osmd-2.2.1/manifest.json`.
+It is loaded only when opening the notation page, with no runtime CDN, account,
+telemetry, paid service, model weights or training dataset.
+
+Bundled runtime sources are VexFlow 1.2.93 with the OSMD 2.2.1 patch (MIT/BSD),
+loglevel 1.9.2 and typescript-collections 1.3.3 (MIT), and JSZip 3.10.1 (MIT option
+chosen) containing lie 3.3.0, immediate 3.0.6, pako 1.0.5 (MIT plus zlib notices)
+and setimmediate 1.0.5 (MIT). Embedded VexFlow-18/Gonville outlines are not separate
+web-font files; Gonville's author allows unrestricted use of the font outlines,
+with VexFlow/OSMD additions retaining their own notices. No demo/test fonts or
+recordings are included. See the exact audit in
+[local score notation](docs/local-score-notation.md).
+
+The complete upstream notices ship beside the script as
+`opensheetmusicdisplay.min.js.LICENSE.txt` and are linked by the notation page.
+Redistribution/commercial use is allowed under the respective permissive terms;
+preserve the notices and do not imply endorsement. This is a version-specific
+integration conditionally approved by the user on 2026-10-16; the completed
+dependency/font audit is recorded in the linked document.
+
 ## External runtime tools
 
 | Component | Use | Licensing note |
@@ -127,7 +151,7 @@ Current roadmap candidates that still require version-specific review when integ
 | Spotify Basic Pitch | Initial pitched-note event extraction | Candidate only; not yet approved or bundled |
 | music21 | Symbolic music and MusicXML construction | Candidate only; not yet approved or bundled |
 | pretty_midi | MIDI generation and manipulation | Candidate only; not yet approved or bundled |
-| OpenSheetMusicDisplay or Verovio | Browser score rendering | Candidate alternatives; final selection and licensing review pending |
+| OpenSheetMusicDisplay 2.2.1 | Local browser score rendering | Approved and audited version above; Verovio is not bundled |
 | Drum/percussion transcription model | Percussion-event extraction | No model selected; licensing is part of selection criteria |
 
 ## Music and generated content

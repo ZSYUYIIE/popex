@@ -1,0 +1,24 @@
+{
+  "name": "opensheetmusicdisplay",
+  "version": "2.2.1",
+  "source": "https://registry.npmjs.org/opensheetmusicdisplay/-/opensheetmusicdisplay-2.2.1.tgz",
+  "archiveIntegrity": "sha512-2DqI2lQKKzDDoIe7yD8yNyWTofSdRbFZYTD3nGRzEo1XmTK2DJWcUXLRXZ2E5xzOt7Pd+RmSGL1quFQZRCqDMw==",
+  "file": "opensheetmusicdisplay.min.js",
+  "bytes": 1420444,
+  "sha256": "224ee5bee61d31ff3d07ade025f931a6cecd394cb54d2e39b1e7af2f0c7f1f5d",
+  "modified": false,
+  "license": "BSD-3-Clause",
+  "notices": "opensheetmusicdisplay.min.js.LICENSE.txt",
+  "runtimeSources": {
+    "vexflow": "1.2.93 with OSMD 2.2.1 tagged VexFlowPatch",
+    "loglevel": "1.9.2",
+    "typescript-collections": "1.3.3",
+    "jszip": "3.10.1",
+    "lie": "3.3.0 (inside JSZip browser distribution)",
+    "immediate": "3.0.6 (inside JSZip browser distribution)",
+    "pako": "1.0.5 (inside JSZip browser distribution, including zlib code)",
+    "setimmediate": "1.0.5 (inside JSZip browser distribution)"
+  },
+  "glyphs": "Embedded VexFlow-18/Gonville outlines, not external web fonts",
+  "runtimeNetwork": "same-origin only; no CDN or telemetry"
+}
