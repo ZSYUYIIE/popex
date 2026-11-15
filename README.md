@@ -419,6 +419,7 @@ Implemented capabilities:
 - stdlib-only MIDI and MusicXML exports with explicit quantization warnings, raw-event provenance, independent overlapping voices, and ties across measure boundaries;
 - bars that follow the recording (`beat-grid-v1`): a draft's bar lines come from the beats the analysis tracked, not from one global tempo, so a slightly wrong tempo estimate no longer slides the bars away from the music; steady recordings get one straight grid, recordings whose tempo moves get locally smoothed beats, detected onsets settle the grid on the played beat, and beat 1 comes from the kick and snare pattern when the drums show one (otherwise from confident analysis downbeats, otherwise the score says the bar start is unconfirmed); measure times are the real times of each bar line and raw event times are never changed; see [bar grid](docs/beat-grid.md);
 - persisted draft scores (`score-pipeline-v6`, document schema 6; schema-1 to schema-5 scores stay readable) built by an explicit action, with one-winner attempt claims, attempt-scoped immutable artifacts, and a SHA-256 fingerprint of the exact analysis, transcription, interpretation, and harmony versions used;
+- chords heard in the audio (`audio-chords-v1`): the harmony stage also listens to the recording on every beat of the bar grid, using the separated accompaniment and bass where they sound and the harmonic part of the full mix where they fall quiet, and names major, minor, or no chord with a confidence; drum-only and silent stretches get no chord, weak segments are left unnamed, and sevenths, suspensions and inversions are not claimed; the score uses these chords when they exist and falls back to chords named from transcribed notes otherwise; no model is downloaded; see [chords heard in the audio](docs/audio-chords.md);
 - chord symbols placed per measure only when one resolved harmonic candidate covers at least half the measure without a competing candidate, with every overlapping window (including unresolved ones) kept as review evidence;
 - chord symbols exported as structured MusicXML `<harmony>` elements (root and alteration, kind, the printed suffix exactly as shown, and slash bass), so notation software can transpose and play them back; corrected symbols follow the same rule, and any symbol the strict parser does not fully understand is exported unchanged as words;
 - editable-interpretation part labels on notes whose raw event maps to exactly one part; MIDI and MusicXML still use one combined draft part;
@@ -463,7 +464,7 @@ local upload or supported URL
 → atomic schema-3 stem manifest publication
 → explicit raw-transcription action (pitched + percussion events)
 → explicit interpretation action (parts, rhythm, drum structure, editable draft)
-→ explicit harmony action (evidence-aware harmonic context)
+→ explicit harmony action (evidence-aware harmonic context, then chords heard in the audio)
 → optional tablature choices (bass line by default, guitar line chosen by the musician)
 → explicit score action (measures, chord symbols, part labels, drum part, tablature, tonal context, persisted draft score)
 → bar-by-bar review against the recording, separate undoable corrections
@@ -759,6 +760,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Raw transcription is a local baseline (pYIN/onset); dense mixes remain approximate and carry warnings.
 - Interpretation drafts are conservative reductions; pitched parts, rhythm grid, and drum structure require musician review.
 - Harmonic context provides conservative chord candidates with unresolved accounting, not guaranteed complete chord symbols for every measure.
+- Chords heard in the audio are limited to major, minor, or no chord; chords in passages without accompaniment are implied and less certain; a small preference for chords inside the recording's overall scale can misname a borrowed chord. The recogniser was tuned and measured on one real recording and synthetic progressions, so its accuracy on other material is not yet known. It needs the harmony stage to be re-run on recordings harmonized earlier.
 - Stem separation currently supports only the audited four-stem `htdemucs` profile.
 - Separation quality varies by recording and does not guarantee complete instrument isolation.
 - Optional runtime installation is separately managed and platform-specific; the base application does not install it automatically.
