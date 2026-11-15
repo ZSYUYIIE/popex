@@ -442,6 +442,7 @@ Implemented capabilities:
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
 - local Windows, Linux/macOS, and Docker workflows for the base application;
 - optional validated Linux and Windows CPU runtime profiles;
+- an offline [accuracy scoreboard](docs/accuracy-scoreboard.md) for development: one command compares a saved draft score with a hand-written reference for the same recording (tempo, bar-grid drift, key, chord symbols and harmony windows over real time, and notes when the reference has them) and keeps runs side by side; it reads artifacts only and reports reference-free indicators separately from accuracy;
 - synthetic, offline automated tests for ordinary repository CI.
 
 ### Current processing workflow
@@ -711,6 +712,15 @@ python scripts/smoke_score_pipeline.py
 
 Generated MusicXML can be checked against the official MusicXML 3.1 schema by pointing `POPEX_MUSICXML_XSD` at a local copy of `musicxml.xsd` (with `lxml` installed) and running `pytest -k musicxml_schema`. CI fetches the schema at a pinned W3C commit with SHA-256 checks for validation only; it is not redistributed.
 
+To measure a change against a recording you know, score a saved draft against a reference you write for it (the [accuracy scoreboard](docs/accuracy-scoreboard.md)); save one run before the change and one after, then print them side by side:
+
+```bash
+python scripts/accuracy_scoreboard.py --score score.json --reference my-song.reference.json --label main --save results.json
+python scripts/accuracy_scoreboard.py --table results.json
+```
+
+References for real recordings, the recordings, and scores generated from them stay outside the repository.
+
 Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordinary repository CI does not install Demucs or PyTorch, access the network for model assets, run real inference, use copyrighted recordings, or commit model caches.
 
 ## Reliability behaviour
@@ -755,6 +765,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Dense pop arrangements cannot yet be represented as reliable instrument parts.
 - URL ingestion depends on external platform availability and must only be used where the user is authorized to process the source.
 - Version grouping is manual; PopEx does not detect that two recordings are the same song, and the comparison does not align sections or bars across versions.
+- Accuracy on real recordings is not measured in CI. The accuracy scoreboard needs a reference written by hand for each recording, measures agreement with that reference only, and reports note accuracy only when the reference contains notes; no reference for a real recording is shipped.
 
 ## Next planned cycle
 
