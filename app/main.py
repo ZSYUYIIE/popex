@@ -3822,6 +3822,12 @@ def _saved_score_payload(
             "This score was built before the modal tonal context was available; "
             "rebuild it to add mode candidates and a key signature where supported.",
         )
+    elif outdated == "beat-grid":
+        warnings.insert(
+            0,
+            "This score was built with one constant tempo, so its bar lines can "
+            "drift away from the recording; rebuild it so bars follow the tracked beats.",
+        )
     if evidence_changed:
         warnings.insert(
             0,

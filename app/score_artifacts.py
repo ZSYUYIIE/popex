@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from app.beat_grid import BAR_PHASE_SOURCES, GRID_MODES
 from app.config import Settings
 from app.score_construction import (
     PERCUSSION_NOTATION,
@@ -48,8 +49,8 @@ from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_sig
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
 # schema 4 the modal tonal context; earlier documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 5
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5})
+SCORE_ARTIFACT_SCHEMA_VERSION = 6
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -302,23 +303,66 @@ def _validate_layers(value: Any, schema_version: int) -> dict[str, str]:
     return statuses
 
 
-def _validate_timing(value: Any) -> tuple[float, int]:
+_BEAT_GRID_KEYS = frozenset(
+    {
+        "version",
+        "mode",
+        "barPhaseSource",
+        "barPhaseConfidence",
+        "onsetShiftSeconds",
+        "trackedBeats",
+        "firstBeatSeconds",
+    }
+)
+_TIMING_KEYS_V1 = frozenset(
+    {
+        "tempoBpm",
+        "beatsPerMeasure",
+        "divisions",
+        "meterSource",
+        "tempoConfidence",
+        "tempoStable",
+        "meterConfidence",
+    }
+)
+_TIMING_KEYS_V6 = _TIMING_KEYS_V1 | {"beatGrid"}
+
+
+def _validate_beat_grid(value: Any) -> None:
+    """Check the summary of how bar lines were placed (schema 6 and later).
+
+    ``None`` means the bars use one constant tempo because too few beats were
+    tracked to follow the recording.
+    """
+    if value is None:
+        return
+    grid = _mapping(value, "timing.beatGrid")
+    _exact_keys(grid, _BEAT_GRID_KEYS, "timing.beatGrid")
+    if not isinstance(grid["version"], str) or not _VERSION.fullmatch(grid["version"]):
+        raise _fail("timing.beatGrid.version is invalid.")
+    if grid["mode"] not in GRID_MODES:
+        raise _fail("timing.beatGrid.mode is invalid.")
+    if grid["barPhaseSource"] not in BAR_PHASE_SOURCES:
+        raise _fail("timing.beatGrid.barPhaseSource is invalid.")
+    _optional_number(
+        grid["barPhaseConfidence"], "timing.beatGrid.barPhaseConfidence", 0.0, 1.0
+    )
+    if (grid["barPhaseSource"] == "none") != (grid["barPhaseConfidence"] is None):
+        raise _fail("timing.beatGrid bar-phase confidence does not match its source.")
+    _number(grid["onsetShiftSeconds"], "timing.beatGrid.onsetShiftSeconds", -1.0, 1.0)
+    _integer(grid["trackedBeats"], "timing.beatGrid.trackedBeats", 1, 100_000)
+    _number(grid["firstBeatSeconds"], "timing.beatGrid.firstBeatSeconds", -60.0, 60.0)
+
+
+def _validate_timing(value: Any, schema_version: int = 5) -> tuple[float, int]:
     timing = _mapping(value, "timing")
     _exact_keys(
         timing,
-        frozenset(
-            {
-                "tempoBpm",
-                "beatsPerMeasure",
-                "divisions",
-                "meterSource",
-                "tempoConfidence",
-                "tempoStable",
-                "meterConfidence",
-            }
-        ),
+        _TIMING_KEYS_V6 if schema_version >= 6 else _TIMING_KEYS_V1,
         "timing",
     )
+    if schema_version >= 6:
+        _validate_beat_grid(timing["beatGrid"])
     tempo = _number(timing["tempoBpm"], "timing.tempoBpm", 20.0, 300.0)
     meter = _integer(timing["beatsPerMeasure"], "timing.beatsPerMeasure", 1, 12)
     _integer(timing["divisions"], "timing.divisions", 1, 9600)
@@ -379,7 +423,8 @@ def _validate_percussion_hit(
     ):
         raise _fail(f"{label} must be unresolved exactly in the unresolved lane.")
     _number(hit["rawTimeSeconds"], f"{label}.rawTimeSeconds", 0.0, 1e6)
-    _number(hit["rawBeat"], f"{label}.rawBeat", 0.0, 1e7)
+    # A hit just before bar 1 has a slightly negative raw beat on a beat grid.
+    _number(hit["rawBeat"], f"{label}.rawBeat", -16.0, 1e7)
     beat = _number(hit["quantizedBeat"], f"{label}.quantizedBeat", 0.0, 1e7)
     if int(beat // meter) != position or beat * 2 != int(beat * 2):
         raise _fail(f"{label}.quantizedBeat is outside the measure grid.")
@@ -743,6 +788,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             3: _TOP_LEVEL_KEYS_V3,
             4: _TOP_LEVEL_KEYS_V4,
             5: _TOP_LEVEL_KEYS_V5,
+            6: _TOP_LEVEL_KEYS_V5,
         }[schema_version],
         "score document",
     )
@@ -761,7 +807,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
     if score_source_fingerprint(document["sources"]) != fingerprint:
         raise _fail("sourceFingerprint does not match the recorded sources.")
     layers = _validate_layers(document["layers"], schema_version)
-    _tempo, meter = _validate_timing(document["timing"])
+    _tempo, meter = _validate_timing(document["timing"], schema_version)
     part_ids = _validate_parts(document["parts"])
     totals = _validate_measures(document["measures"], part_ids, meter, schema_version)
     counts = _mapping(document["counts"], "counts")
@@ -771,6 +817,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         3: _COUNT_KEYS_V3,
         4: _COUNT_KEYS_V3,
         5: _COUNT_KEYS_V3,
+        6: _COUNT_KEYS_V3,
     }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
