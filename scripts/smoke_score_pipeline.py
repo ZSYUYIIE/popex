@@ -18,6 +18,7 @@ Requires FFmpeg and ffprobe on ``PATH`` (or ``POPEX_FFMPEG_BINARY`` /
 from __future__ import annotations
 
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -147,14 +148,25 @@ def run(data_dir: Path) -> dict:
         step("Score", f"/api/jobs/{job_id}/score/construct", "score")
 
         details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+        evidence_hashes = {
+            path: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in (settings.exports_dir / job_id).rglob("*") if path.is_file()
+        }
         # Correct the first note up a semitone and remove one drum hit, as a
         # musician would; the original prediction must stay downloadable.
         first_note = next(note for measure in details["measures"] for note in measure["notes"])
         first_hit = next(hit for measure in details["measures"] for hit in measure["percussionHits"])
+        timing_hit = next(hit for measure in details["measures"] for hit in measure["percussionHits"]
+                          if (hit["eventId"], hit["hitIndex"]) != (first_hit["eventId"], first_hit["hitIndex"]))
+        drum_beat = 0.5 if timing_hit["quantizedBeat"] == 0 else 0
         corrections = [
             {"op": "set_pitch", "target": {"noteId": first_note["id"]},
              "midiNote": min(127, first_note["midiNote"] + 1)},
             {"op": "delete_hit", "target": {"eventId": first_hit["eventId"], "hitIndex": first_hit["hitIndex"]}},
+            {"op": "set_note_timing", "target": {"noteId": first_note["id"]},
+             "measureIndex": 0, "beat": 0.25, "durationBeats": 0.5},
+            {"op": "set_hit_timing", "target": {"eventId": timing_hit["eventId"], "hitIndex": timing_hit["hitIndex"]},
+             "measureIndex": 0, "beat": drum_beat},
         ]
         for revision, operation in enumerate(corrections):
             response = client.post(
@@ -164,6 +176,19 @@ def run(data_dir: Path) -> dict:
             if response.status_code != 200:
                 raise SystemExit(f"Correction was rejected: {response.status_code} {response.text}")
         corrected_details = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+        edited_note = next(note for measure in corrected_details["measures"]
+                           for note in measure["notes"] if note["id"] == first_note["id"])
+        timing_separate = (edited_note["quantizedBeat"] == 0.25
+                           and edited_note["quantizedDurationBeats"] == 0.5
+                           and edited_note["startSeconds"] == first_note["startSeconds"]
+                           and edited_note["endSeconds"] == first_note["endSeconds"])
+        edited_hit = next(hit for measure in corrected_details["measures"] for hit in measure["percussionHits"]
+                          if (hit["eventId"], hit["hitIndex"]) == (timing_hit["eventId"], timing_hit["hitIndex"]))
+        drum_timing_separate = (edited_hit["quantizedBeat"] == drum_beat
+                                and edited_hit["rawTimeSeconds"] == timing_hit["rawTimeSeconds"]
+                                and edited_hit["rawBeat"] == timing_hit["rawBeat"])
+        predictions_unchanged = all(hashlib.sha256(path.read_bytes()).hexdigest() == digest
+                                    for path, digest in evidence_hashes.items())
         part_downloads = {
             part["id"]: client.get(part["downloadUrl"]).status_code
             for part in corrected_details["exportParts"]
@@ -211,6 +236,9 @@ def run(data_dir: Path) -> dict:
                 "correctedPercussionHits": corrected_details["counts"]["percussionHits"],
                 "originalMusicxmlDiffers": original_xml.status_code == 200
                 and original_xml.content != musicxml.content,
+                "timingSeparate": timing_separate,
+                "drumTimingSeparate": drum_timing_separate,
+                "predictionHashesUnchanged": predictions_unchanged,
             },
             "midiChannel10NoteOns": _channel_ten_note_ons(midi.content),
             "warnings": details["warnings"],
@@ -224,9 +252,12 @@ def run(data_dir: Path) -> dict:
         problems.append("MusicXML has no percussion part")
     corrections = summary["corrections"]
     if (
-        corrections["active"] != 2
+        corrections["active"] != 4
         or corrections["correctedPercussionHits"] != corrections["originalPercussionHits"] - 1
         or not corrections["originalMusicxmlDiffers"]
+        or not corrections["timingSeparate"]
+        or not corrections["drumTimingSeparate"]
+        or not corrections["predictionHashesUnchanged"]
     ):
         problems.append("corrections were not applied separately from the prediction")
     if summary["midiChannel10NoteOns"] != summary["counts"]["notatedPercussionHits"]:

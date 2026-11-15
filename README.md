@@ -395,7 +395,7 @@ See [AGENTS.md](AGENTS.md) for the concise repository workflow.
 
 ## Current implementation status
 
-The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads and a structured review panel. Musicians can review each bar against the recording and correct the draft; corrections are stored separately from predictions and can be undone. Recordings of the same song can be grouped privately by arrangement and version and compared side by side. It does **not** yet provide engraved notation or reliable instrument-specific parts beyond the separated bass line.
+The current implementation provides local ingestion, baseline audio analysis, optional local four-stem separation, baseline raw transcription, editable interpretation drafts, evidence-aware harmonic context, and persisted, versioned draft scores (pitched notes with chord symbols and part labels where available, plus a separate broad-voice drum part and guitar/bass tablature suggestions) with MIDI and MusicXML downloads, a structured review panel, and a local browser notation view. Musicians can review each bar against the recording and correct the draft; corrections are stored separately from predictions and can be undone. Recordings of the same song can be grouped privately by arrangement and version and compared side by side. The notation view renders existing draft MusicXML; it does not provide publication-quality engraving or reliable instrument-specific parts beyond the separated bass line.
 
 Implemented capabilities:
 
@@ -428,12 +428,13 @@ Implemented capabilities:
 - MusicXML instrument parts for tabbed lines with a standard staff (octave-transposing clef) and a synchronized TAB staff (`staff-tuning`, string and fret per note); every note appears once in the score;
 - out-of-date detection: a saved score built from older evidence or tablature choices, a pitched-only score built before drum notation for a recording with percussion, or a score built before tablature for a separated recording, stays readable and downloadable but is flagged for rebuild;
 - synchronized review: a persistent review player plays any bar of the recording (or of a separated stem) from the measure table and marks the bar that is playing;
-- musician corrections (pitch by semitone or octave, delete note, tablature position, chord symbol, drum voice, delete drum hit) kept as a versioned, revision-checked operation log in SQLite, separate from the immutable saved prediction; undo, redo, and an undoable reset; corrections survive score rebuilds by stable event IDs, and ones whose target disappeared are reported rather than dropped;
+- musician corrections (pitch by semitone or octave, note start and duration, delete note, tablature position, chord symbol, drum voice and timing, delete drum hit) kept as a versioned, revision-checked operation log in SQLite, separate from the immutable saved prediction; undo, redo, and an undoable reset; corrections survive score rebuilds by stable event IDs, and ones whose target disappeared are reported rather than dropped;
 - corrected and original views of the saved score and of every MIDI, MusicXML, and JSON download;
 - a modal tonal context (`modal-collections-v1`) per score: ranked candidates across Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, harmonic and melodic minor, major and minor pentatonic, and blues collections, from duration- and confidence-weighted notes, bass emphasis, and the analysis chroma; ambiguity between relative modes, local regions (possible modulation or modal mixture), and a chromaticism score; the global analysis baseline is unchanged;
 - key signatures with mode in MusicXML and MIDI only when the tonal context reaches 0.50 confidence, with flat or sharp spelling to match and accidentals only where a note differs from the key;
 - instrument parts by source line, the only reliable instrument evidence: lead vocal (vocal stem), pitched lines (full mix), an explicitly labelled accompaniment reduction on a grand staff (accompaniment stem), and a bass line in bass clef when it is not tabbed; clefs follow each part's range, tempo and chord symbols sit on the top part, and each part carries a General MIDI program for playback;
 - per-part MusicXML downloads for every pitched, tablature, and drum part;
+- locally rendered standard, drum and tablature notation from the existing saved MusicXML, with full-score/individual-part and corrected/original choices, explicit bar ranges and retry; native recording playback beside the displayed score, bar/range seeking and repeat with an estimated current-bar cue; [renderer workflow, limits and license audit](docs/local-score-notation.md);
 - a private song library (`Composition → Arrangement → Recording version`): songs with credits, named arrangements, and per-recording version labels and kinds (studio, live, acoustic, concert, cover, remix, radio edit, other), stored as SQLite metadata only;
 - side-by-side version comparison built from each version's own artifacts (duration, tempo, key estimate, meter, score status, bars, notes, chord symbols and chords unique to a version, drum hits, fingered tab notes, corrections); parts from different versions are never merged;
 - a studio-style web interface: stage-dark by default with a designed light theme (System, Dark, or Light, remembered per browser), self-hosted OFL fonts (Bricolage Grotesque, Geist, Geist Mono), and a live piano roll drawn from saved score data (notes coloured by part, chord and drum lanes, bar numbers) in the hero and in every score panel, where its playhead follows the review player; motion respects reduced-motion settings;
@@ -442,6 +443,7 @@ Implemented capabilities:
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
 - local Windows, Linux/macOS, and Docker workflows for the base application;
 - optional validated Linux and Windows CPU runtime profiles;
+- an offline [accuracy scoreboard](docs/accuracy-scoreboard.md) for development: one command compares a saved draft score with a hand-written reference for the same recording (tempo, bar-grid drift, key, chord symbols and harmony windows over real time, and notes when the reference has them) and keeps runs side by side; it reads artifacts only and reports reference-free indicators separately from accuracy;
 - synthetic, offline automated tests for ordinary repository CI.
 
 ### Current processing workflow
@@ -582,10 +584,11 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `GET /api/jobs/{job_id}/score` with optional `?includeMeasures=true`
 - `GET /api/jobs/{job_id}/score/download?format=midi|musicxml`
 - `POST /api/jobs/{job_id}/score/construct` with optional `?force=true`
-- `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true` and `?view=corrected|original` (default `corrected`)
+- `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true`, `?includeMeasureTiming=true` (compact saved bar index/start/end only), and `?view=corrected|original` (default `corrected`)
 - `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json` with optional `&view=corrected|original`; MusicXML also accepts `&part=<id>` for one part (ids are listed in the saved score's `exportParts`)
+- `GET /jobs/{job_id}/notation` opens the local notation page; saved-export identity headers identify the actual score creation time, correction revision and view so concurrent changes cannot mislabel a render
 - `GET /api/jobs/{job_id}/score/corrections`
-- `POST /api/jobs/{job_id}/score/corrections` with strict JSON `{ "expectedRevision": n, "operation": {...} }` (`set_pitch`, `delete_note`, `set_tab`, `set_chord`, `set_drum_voice`, `delete_hit`)
+- `POST /api/jobs/{job_id}/score/corrections` with strict JSON `{ "expectedRevision": n, "operation": {...} }` (`set_pitch`, `set_note_timing`, `delete_note`, `set_tab`, `set_chord`, `set_drum_voice`, `set_hit_timing`, `delete_hit`)
 - `POST /api/jobs/{job_id}/score/corrections/undo`, `/redo`, and `/reset` with `{ "expectedRevision": n }`; a stale revision returns 409
 - `GET /api/library`
 - `POST /api/compositions` with `{ "title", "credits"?, "arrangementName"? }`; `PATCH` and `DELETE /api/compositions/{id}` (delete is refused while recordings are grouped under the song)
@@ -710,6 +713,15 @@ python scripts/smoke_score_pipeline.py
 
 Generated MusicXML can be checked against the official MusicXML 3.1 schema by pointing `POPEX_MUSICXML_XSD` at a local copy of `musicxml.xsd` (with `lxml` installed) and running `pytest -k musicxml_schema`. CI fetches the schema at a pinned W3C commit with SHA-256 checks for validation only; it is not redistributed.
 
+To measure a change against a recording you know, score a saved draft against a reference you write for it (the [accuracy scoreboard](docs/accuracy-scoreboard.md)); save one run before the change and one after, then print them side by side:
+
+```bash
+python scripts/accuracy_scoreboard.py --score score.json --reference my-song.reference.json --label main --save results.json
+python scripts/accuracy_scoreboard.py --table results.json
+```
+
+References for real recordings, the recordings, and scores generated from them stay outside the repository.
+
 Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordinary repository CI does not install Demucs or PyTorch, access the network for model assets, run real inference, use copyrighted recordings, or commit model caches.
 
 ## Reliability behaviour
@@ -733,11 +745,12 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 
 ## Known limitations
 
-- No PDF, engraved notation view, or individual instrument-part export yet.
+- No dedicated PDF export or publication-quality engraving. The local notation view renders 1–128 selected bars at a time (up to 8 MiB MusicXML / 20,000 notes); complete MusicXML and per-part downloads remain available for larger scores. The SVG visual is not a replacement for the accessible structured review.
+- Notation recording review follows saved draft bar times, not verified audio alignment. It plays the normalized full recording, not synthesized notes or separate stems; stopping at a bar boundary is browser-timer approximate, not sample-accurate. Render again after editing to update the displayed score and its playback range.
 - Tablature uses standard tuning only and suggests one position per note; held notes do not block strings for later notes, and capo, alternate tunings, and techniques (bends, slides, hammer-ons) are not modelled. Guitar parts are never detected automatically.
 - Drum notation uses broad voices on an eighth-note grid. It does not claim specific kit pieces, sticking, ghost notes, accents, flams, or 16th-note detail; off-grid hits are counted and warned about. Auxiliary percussion detection is limited to what the raw baseline labels.
 - Only the latest successful score is kept; corrections are re-applied to rebuilt scores by stable IDs. Raw predictions, interpretation drafts, and saved score files are never modified by score construction or corrections.
-- Corrections cannot yet add notes or change rhythm and duration; review playback uses the browser's audio element and bar timing from the global tempo grid.
+- Note starts and durations can be corrected in explicit quarter-beat steps, and [drum-hit placement](docs/drum-timing-corrections.md) in half-beat steps, within existing saved bars without changing raw timing or predictions; see [note timing corrections](docs/note-timing-corrections.md). Corrections cannot yet add notes or hits or change drum durations; review playback uses the browser's audio element and bar timing from the global tempo grid.
 - Score quantization uses a coarse eighth-note grid and global tempo/meter.
 - Chord symbols are review candidates placed at most one per measure; measures with competing or partial harmony show no symbol, and chord symbols export as structured MusicXML harmony (root, kind, slash bass) only when the whole symbol is understood; anything else, such as `Am(add9)` or `Cmaj7#11`, is kept exactly as words rather than guessed. Only one symbol per measure is exported, so faster harmonic rhythm is not yet notated.
 - Interpretation part labels remain review annotations. MusicXML parts follow source lines (stems), not instrument recognition, so an accompaniment stem is one reduction rather than separate keyboard, guitar, or string parts; MIDI is still one combined track.
@@ -753,6 +766,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Dense pop arrangements cannot yet be represented as reliable instrument parts.
 - URL ingestion depends on external platform availability and must only be used where the user is authorized to process the source.
 - Version grouping is manual; PopEx does not detect that two recordings are the same song, and the comparison does not align sections or bars across versions.
+- Accuracy on real recordings is not measured in CI. The accuracy scoreboard needs a reference written by hand for each recording, measures agreement with that reference only, and reports note accuracy only when the reference contains notes; no reference for a real recording is shipped.
 
 ## Next planned cycle
 

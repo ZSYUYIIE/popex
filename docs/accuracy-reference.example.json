@@ -1,0 +1,33 @@
+{
+  "artifactType": "popex-accuracy-reference",
+  "schemaVersion": 1,
+  "id": "synthetic-demo-phrase",
+  "title": "Synthetic demo phrase",
+  "source": "Written by hand for the PopEx documentation and tests. It describes no real recording.",
+  "timing": {
+    "tempoBpm": 120,
+    "beatsPerMeasure": 4,
+    "firstDownbeatSeconds": 0.0
+  },
+  "key": {
+    "tonalCenter": "C",
+    "collections": ["ionian"]
+  },
+  "chords": {
+    "bars": [
+      {"startBar": 1, "endBar": 8, "pattern": ["C", "Am", "F", ["G", "G7"]]}
+    ]
+  },
+  "notes": {
+    "bass": [
+      {"startSeconds": 0.0, "midiNote": 36},
+      {"startSeconds": 2.0, "midiNote": 33},
+      {"startSeconds": 4.0, "midiNote": 29},
+      {"startSeconds": 6.0, "midiNote": 31},
+      {"startSeconds": 8.0, "midiNote": 36},
+      {"startSeconds": 10.0, "midiNote": 33},
+      {"startSeconds": 12.0, "midiNote": 29},
+      {"startSeconds": 14.0, "midiNote": 31}
+    ]
+  }
+}
