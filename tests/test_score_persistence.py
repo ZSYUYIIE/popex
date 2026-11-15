@@ -243,8 +243,8 @@ def test_harmony_becomes_measure_chord_symbols_with_evidence(tmp_path: Path) -> 
         for entry in first["harmony"]
     )
     assert details["counts"]["chordSymbols"] >= 1
-    words = [element.text for element in ET.fromstring(musicxml.content).iter("words")]
-    assert "C" in words
+    harmonies = list(ET.fromstring(musicxml.content).iter("harmony"))
+    assert ("C", "major") in [(h.findtext("root/root-step"), h.findtext("kind")) for h in harmonies]
 
 
 def test_interpretation_parts_label_notes_without_changing_exports(tmp_path: Path) -> None:

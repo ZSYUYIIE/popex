@@ -1185,9 +1185,81 @@ def _append_directions(
         ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
     chord = measure.get("chordSymbol")
     if chord is not None:
-        # Preserve exact text without fabricating a parsed root/kind claim.
-        direction = ET.SubElement(measure_el, "direction", placement="above")
-        ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = chord
+        parsed = parse_chord_symbol(chord)
+        if parsed is None:
+            # Text the parser does not fully understand is kept exactly, never guessed.
+            direction = ET.SubElement(measure_el, "direction", placement="above")
+            ET.SubElement(ET.SubElement(direction, "direction-type"), "words").text = chord
+        else:
+            _append_harmony(measure_el, parsed)
+
+
+# Chord-symbol suffix -> MusicXML <kind> value. Covers the harmony stage's vocabulary
+# plus common spellings musicians type as corrections. Anything else stays <words>.
+_HARMONY_KINDS: dict[str, str] = {
+    "": "major", "maj": "major", "M": "major",
+    "m": "minor", "min": "minor", "-": "minor",
+    "dim": "diminished", "o": "diminished", "°": "diminished",
+    "aug": "augmented", "+": "augmented",
+    "sus2": "suspended-second", "sus4": "suspended-fourth", "sus": "suspended-fourth",
+    "5": "power",
+    "6": "major-sixth", "m6": "minor-sixth",
+    "7": "dominant",
+    "maj7": "major-seventh", "M7": "major-seventh", "Δ7": "major-seventh", "Δ": "major-seventh",
+    "m7": "minor-seventh", "min7": "minor-seventh", "-7": "minor-seventh",
+    "dim7": "diminished-seventh", "o7": "diminished-seventh", "°7": "diminished-seventh",
+    "m7b5": "half-diminished", "ø": "half-diminished", "ø7": "half-diminished",
+    "aug7": "augmented-seventh", "+7": "augmented-seventh",
+    "mMaj7": "major-minor", "mmaj7": "major-minor", "m(maj7)": "major-minor",
+    "9": "dominant-ninth", "maj9": "major-ninth", "m9": "minor-ninth",
+    "11": "dominant-11th", "13": "dominant-13th",
+}
+_CHORD_SYMBOL_RE = re.compile(r"([A-G])([#b♯♭]?)(.*?)(?:/([A-G])([#b♯♭]?))?")
+_ALTER = {"": 0, "#": 1, "♯": 1, "b": -1, "♭": -1}
+
+
+def parse_chord_symbol(symbol: str) -> dict[str, Any] | None:
+    """Parse a chord symbol into root, MusicXML kind, and optional bass, or None.
+
+    The parse is strict: the whole text must match a known root, suffix, and
+    optional slash bass. The original suffix is returned so exports print the
+    symbol exactly as written.
+    """
+    if not isinstance(symbol, str):
+        return None
+    match = _CHORD_SYMBOL_RE.fullmatch(symbol.strip())
+    if match is None:
+        return None
+    root_step, root_accidental, suffix, bass_step, bass_accidental = match.groups()
+    kind = _HARMONY_KINDS.get(suffix)
+    if kind is None:
+        return None
+    parsed: dict[str, Any] = {
+        "rootStep": root_step,
+        "rootAlter": _ALTER[root_accidental],
+        "kind": kind,
+        "kindText": suffix,
+        "bassStep": None,
+        "bassAlter": 0,
+    }
+    if bass_step is not None:
+        parsed["bassStep"] = bass_step
+        parsed["bassAlter"] = _ALTER[bass_accidental or ""]
+    return parsed
+
+
+def _append_harmony(measure_el: ET.Element, parsed: Mapping[str, Any]) -> None:
+    harmony = ET.SubElement(measure_el, "harmony", {"print-frame": "no"})
+    root = ET.SubElement(harmony, "root")
+    ET.SubElement(root, "root-step").text = parsed["rootStep"]
+    if parsed["rootAlter"]:
+        ET.SubElement(root, "root-alter").text = str(parsed["rootAlter"])
+    ET.SubElement(harmony, "kind", text=parsed["kindText"]).text = parsed["kind"]
+    if parsed["bassStep"] is not None:
+        bass = ET.SubElement(harmony, "bass")
+        ET.SubElement(bass, "bass-step").text = parsed["bassStep"]
+        if parsed["bassAlter"]:
+            ET.SubElement(bass, "bass-alter").text = str(parsed["bassAlter"])
 
 
 def _musicxml_pitched_score_part(part_list: ET.Element, xml_id: str, name: str, program: int | None) -> None:

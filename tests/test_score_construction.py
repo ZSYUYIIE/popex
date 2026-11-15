@@ -10,6 +10,7 @@ from app.score_construction import (
     SCORE_SCHEMA_VERSION,
     ScoreConstructionError,
     build_score_document,
+    parse_chord_symbol,
     score_to_midi_bytes,
     score_to_musicxml_text,
 )
@@ -345,17 +346,77 @@ def test_musicxml_preserves_pitches_at_its_octave_boundaries(midi_note: int) -> 
     assert root.findtext(".//pitch/octave") == str(midi_note // 12 - 1)
 
 
-def test_musicxml_preserves_chord_text_without_fabricated_harmony() -> None:
+def test_musicxml_exports_chord_symbols_as_structured_harmony() -> None:
     document = build_score_document(
-        [_note("w2", 0.0, 0.5, 60)],
+        [_note("w2", 0.0, 0.5, 60), _note("w2b", 2.4, 2.9, 62), _note("w2c", 4.8, 5.3, 64)],
         tempo_bpm=100.0,
-        chord_symbols=["Am7"],
+        chord_symbols=["Am7", "Bbmaj7/D", "F#m"],
     )
-    text = score_to_musicxml_text(document)
-    root = ET.fromstring(text)
-    assert root.find(".//harmony") is None
-    words = [node.text for node in root.iter("words")]
-    assert "Am7" in words
+    root = ET.fromstring(score_to_musicxml_text(document))
+    harmonies = root.findall(".//harmony")
+    assert [h.findtext("root/root-step") for h in harmonies] == ["A", "B", "F"]
+    assert [h.findtext("root/root-alter") for h in harmonies] == [None, "-1", "1"]
+    assert [h.findtext("kind") for h in harmonies] == ["minor-seventh", "major-seventh", "minor"]
+    # The printed suffix is the one the musician sees in PopEx.
+    assert [h.find("kind").get("text") for h in harmonies] == ["m7", "maj7", "m"]
+    assert harmonies[1].findtext("bass/bass-step") == "D" and harmonies[1].find("bass/bass-alter") is None
+    assert harmonies[0].find("bass") is None
+    assert not [node.text for node in root.iter("words")]
+    # The chord sits before the bar's first note, at the downbeat.
+    first_measure = list(root.find(".//measure"))
+    tags = [child.tag for child in first_measure]
+    assert tags.index("harmony") < tags.index("note")
+
+
+def test_musicxml_keeps_unparsed_chord_text_as_words() -> None:
+    document = build_score_document(
+        [_note("w4", 0.0, 0.5, 60), _note("w4b", 2.4, 2.9, 62)],
+        tempo_bpm=100.0,
+        chord_symbols=["Am(add9)", "C"],
+    )
+    root = ET.fromstring(score_to_musicxml_text(document))
+    assert [node.text for node in root.iter("words")] == ["Am(add9)"]
+    assert [h.findtext("kind") for h in root.iter("harmony")] == ["major"]
+    assert root.find(".//harmony/kind").get("text") == ""
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected"),
+    [
+        ("C", ("C", 0, "major", "", None, 0)),
+        ("Ebm", ("E", -1, "minor", "m", None, 0)),
+        ("Bdim", ("B", 0, "diminished", "dim", None, 0)),
+        ("Dsus2", ("D", 0, "suspended-second", "sus2", None, 0)),
+        ("Gsus4", ("G", 0, "suspended-fourth", "sus4", None, 0)),
+        ("E5", ("E", 0, "power", "5", None, 0)),
+        ("G7", ("G", 0, "dominant", "7", None, 0)),
+        ("C#m7b5", ("C", 1, "half-diminished", "m7b5", None, 0)),
+        ("Cm/Eb", ("C", 0, "minor", "m", "E", -1)),
+        ("F/C", ("F", 0, "major", "", "C", 0)),
+        ("A♭maj7", ("A", -1, "major-seventh", "maj7", None, 0)),
+        (" D9 ", ("D", 0, "dominant-ninth", "9", None, 0)),
+    ],
+)
+def test_parse_chord_symbol_reads_root_kind_and_bass(symbol, expected) -> None:
+    parsed = parse_chord_symbol(symbol)
+    assert parsed is not None
+    assert (
+        parsed["rootStep"], parsed["rootAlter"], parsed["kind"],
+        parsed["kindText"], parsed["bassStep"], parsed["bassAlter"],
+    ) == expected
+
+
+@pytest.mark.parametrize("symbol", ["", "H", "Cmaj7#11", "Am(add9)", "N.C.", "C/", "C/H", "cm", "C##", 7, None])
+def test_parse_chord_symbol_refuses_text_it_does_not_fully_understand(symbol) -> None:
+    assert parse_chord_symbol(symbol) is None
+
+
+def test_every_harmony_stage_quality_exports_as_structured_harmony() -> None:
+    from app.harmony_inference import _QUALITY_SUFFIX
+
+    for quality, suffix in _QUALITY_SUFFIX.items():
+        parsed = parse_chord_symbol(f"A{suffix}")
+        assert parsed is not None, quality
 
 
 def test_musicxml_rejects_tampered_measure_index_or_chord() -> None:
@@ -372,3 +433,20 @@ def test_musicxml_rejects_tampered_measure_index_or_chord() -> None:
     tampered2["measures"] = tampered_measures2
     with pytest.raises(ScoreConstructionError):
         score_to_musicxml_text(tampered2)
+
+
+_XSD = __import__("os").environ.get("POPEX_MUSICXML_XSD")
+
+
+@pytest.mark.skipif(not _XSD, reason="set POPEX_MUSICXML_XSD to the MusicXML 3.1 XSD")
+def test_structured_chord_symbols_validate_against_musicxml_schema() -> None:
+    from lxml import etree  # required whenever the schema path is configured
+
+    symbols = ["C", "Ebm", "Bdim", "Dsus2", "Gsus4", "E5", "G7", "Fmaj7", "Am7",
+               "C#m7b5", "Cm/Eb", "Bbmaj7/D", "Am(add9)"]
+    notes = [_note(f"x{i}", i * 2.4, i * 2.4 + 0.5, 60) for i in range(len(symbols))]
+    document = build_score_document(notes, tempo_bpm=100.0, chord_symbols=symbols)
+    schema = etree.XMLSchema(etree.parse(_XSD))
+    tree = etree.fromstring(score_to_musicxml_text(document).encode("utf-8"))
+    assert schema.validate(tree), schema.error_log
+    assert len(tree.findall(".//harmony")) == len(symbols) - 1
