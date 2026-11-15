@@ -389,3 +389,147 @@ def test_a_grid_that_cannot_give_bars_a_duration_is_refused():
         build_score_document(
             [note("a", 0.0, 0.5)], tempo_bpm=120.0, beats_per_measure=4, beat_grid=Collapsed()
         )
+
+
+# ---------------------------------------------------------------------------
+# Saved scores built through the pipeline
+
+
+def _set_tracked_beats(settings, job_id: str, beats: list[float], **timing) -> None:
+    import json
+
+    path = settings.exports_dir / job_id / "analysis" / "audio-analysis.json"
+    analysis = json.loads(path.read_text(encoding="utf-8"))
+    analysis["timing"]["beatsSeconds"] = beats
+    analysis["timing"].update(timing)
+    path.write_text(json.dumps(analysis), encoding="utf-8")
+
+
+def _build_saved_score(tmp_path, beats: list[float] | None, **timing) -> dict:
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from test_harmony_api import create_job, make_settings
+
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    if beats is not None:
+        _set_tracked_beats(settings, job_id, beats, **timing)
+    with TestClient(create_app(settings)) as client:
+        assert client.post(f"/api/jobs/{job_id}/score/construct").status_code == 202
+        return client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+
+
+def test_saved_score_records_the_grid_and_follows_tracked_beats(tmp_path):
+    # The analysis reports 120 BPM but the tracked beats run at 100 BPM.
+    details = _build_saved_score(tmp_path, steady_beats(100.0, 32, first=0.25))
+
+    assert details["version"] == "score-pipeline-v6"
+    grid = details["timing"]["beatGrid"]
+    assert grid["version"] == BEAT_GRID_VERSION
+    assert grid["mode"] == "steady"
+    assert grid["barPhaseSource"] == "none" and grid["barPhaseConfidence"] is None
+    assert grid["trackedBeats"] == 32
+    assert details["timing"]["tempoBpm"] == pytest.approx(100.0, abs=0.01)
+    first = details["measures"][0]
+    assert first["startSeconds"] == pytest.approx(0.25, abs=1e-6)
+    assert first["endSeconds"] - first["startSeconds"] == pytest.approx(2.4, abs=1e-6)
+    assert any("first beat of the bar could not be confirmed" in text for text in details["warnings"])
+    assert not any("one constant tempo" in text for text in details["warnings"])
+
+
+def test_saved_score_without_enough_beats_says_it_uses_one_tempo(tmp_path):
+    details = _build_saved_score(tmp_path, None)
+
+    assert details["timing"]["beatGrid"] is None
+    assert details["timing"]["tempoBpm"] == 120.0
+    assert details["measures"][0]["startSeconds"] == 0.0
+    assert any("one constant tempo" in text for text in details["warnings"])
+
+
+def test_scores_built_on_one_tempo_are_flagged_for_rebuild():
+    from app.score_pipeline import score_outdated_reason
+
+    old = {"score_version": "score-pipeline-v5", "score_note_count": 3, "score_measure_count": 12}
+    assert score_outdated_reason(old) == "beat-grid"
+    assert score_outdated_reason({**old, "score_measure_count": 1}) is None
+    assert score_outdated_reason({**old, "score_version": "score-pipeline-v6"}) is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda grid: grid.update(mode="wobbly"),
+        lambda grid: grid.update(barPhaseSource="guess"),
+        lambda grid: grid.update(barPhaseConfidence=0.5),
+        lambda grid: grid.update(barPhaseConfidence=2.0, barPhaseSource="drums"),
+        lambda grid: grid.update(trackedBeats=0),
+        lambda grid: grid.update(onsetShiftSeconds="0"),
+        lambda grid: grid.update(version="beat grid"),
+        lambda grid: grid.pop("firstBeatSeconds"),
+        lambda grid: grid.update(extra=1),
+    ],
+)
+def test_tampered_grid_summaries_are_rejected(tmp_path, mutate):
+    from app.score_artifacts import ScoreArtifactValidationError, validate_score_artifact
+    from app.score_pipeline import construct_score
+    from app.score_sources import current_score_fingerprint
+    from app import db, score_pipeline
+    from test_harmony_api import create_job, make_settings
+
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    _set_tracked_beats(settings, job_id, steady_beats(100.0, 32, first=0.25))
+    record = db.get_job(settings.database_path, job_id)
+    result = construct_score(
+        job_id,
+        settings,
+        record,
+        lambda *args: None,
+        attempt_id="a" * 32,
+        expected_fingerprint=current_score_fingerprint(record),
+    )
+    document = result.payload
+    assert validate_score_artifact(document)["schemaVersion"] == 6
+    mutate(document["timing"]["beatGrid"])
+    with pytest.raises(ScoreArtifactValidationError):
+        validate_score_artifact(document)
+    assert score_pipeline.SCORE_PIPELINE_VERSION == "score-pipeline-v6"
+
+
+def test_schema_five_scores_cannot_carry_a_grid_and_schema_six_must(tmp_path):
+    from app.score_artifacts import ScoreArtifactValidationError, validate_score_artifact
+    from app.score_pipeline import construct_score
+    from app.score_sources import current_score_fingerprint
+    from app import db
+    from test_harmony_api import create_job, make_settings
+
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    record = db.get_job(settings.database_path, job_id)
+    document = construct_score(
+        job_id,
+        settings,
+        record,
+        lambda *args: None,
+        attempt_id="b" * 32,
+        expected_fingerprint=current_score_fingerprint(record),
+    ).payload
+    older = {**document, "schemaVersion": 5}
+    with pytest.raises(ScoreArtifactValidationError):
+        validate_score_artifact(older)
+    older["timing"] = {key: value for key, value in document["timing"].items() if key != "beatGrid"}
+    assert validate_score_artifact(older)["schemaVersion"] == 5
+    missing = {**document, "timing": older["timing"]}
+    with pytest.raises(ScoreArtifactValidationError):
+        validate_score_artifact(missing)
+
+
+def test_browser_playhead_follows_saved_bar_lines():
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
+    assert "function rollBeatAt(frame,time,secondsPerBeat)" in script
+    assert 'data-bar-lines="' in script and 'data-beats-per-bar="' in script
+    assert '"beat-grid"' in script
+    assert "Rebuild it so bars follow the tracked beats." in script
