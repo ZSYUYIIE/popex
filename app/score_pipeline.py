@@ -363,8 +363,8 @@ def _load_matching_parts(
         for event_id in item.get("sourceEventIds", ()):
             assignments.setdefault(event_id, set()).add(part_id)
     return {"parts": parts, "assignments": assignments}, (
-        "Part labels come from the editable interpretation; exports still use "
-        "one combined draft part."
+        "Part labels come from the editable interpretation; MIDI and MusicXML "
+        "parts follow the separated source lines, not these labels."
     )
 
 
@@ -799,7 +799,8 @@ def construct_score(
     if part_data is not None:
         warnings.append(
             f"{notes_with_part} of {built['noteCount']} note(s) carry an editable-"
-            "interpretation part label; MIDI and MusicXML still use one combined draft part."
+            "interpretation part label; MIDI and MusicXML parts follow the separated "
+            "source lines, not these labels."
         )
         if multiply_assigned:
             warnings.append(

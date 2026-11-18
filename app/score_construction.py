@@ -2,7 +2,7 @@
 
 This is the first narrow vertical slice of canonical step 4 (measure, rhythm,
 MIDI, and MusicXML score construction). It builds a versioned, honest draft
-score document plus minimal MIDI (SMF type 0) and MusicXML (partwise) bytes
+score document plus MIDI (SMF type 1, one track per part) and MusicXML (partwise) bytes
 from already-validated pitched-note evidence, tempo, and meter.
 
 Scope limits (deliberate):
@@ -56,6 +56,8 @@ SCORE_BUILDER_VERSION = "score-construction-v5"
 # per fretted instrument (standard staff plus a synchronized TAB staff).
 _TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
 _TAB_PART_NAMES = {"bass": "Bass (draft, with TAB)", "guitar": "Guitar (fingering suggestion, with TAB)"}
+_DRUM_PART_NAME = "Drum Kit (draft, broad voices)"
+_MIDI_VELOCITY = 80
 _TAB_CLEFS = {"bass": ("F", "4"), "guitar": ("G", "2")}
 _TAB_GM_PROGRAMS = {"bass": 34, "guitar": 26}  # MusicXML 1-based: fingered bass, steel guitar
 
@@ -649,7 +651,13 @@ def _notated_percussion_hits(
 
 
 def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
-    """Render a minimal SMF type-0 MIDI file from a score document."""
+    """Render an SMF type-1 MIDI file with one named track per score part.
+
+    Track 0 carries tempo, meter and key. The parts follow the MusicXML
+    export: one track per pitched source part (with its General MIDI
+    program), one per fretted instrument, and the drum kit on channel 10.
+    Documents without ``scoreParts`` keep one combined pitched track.
+    """
     if not isinstance(document, Mapping):
         raise ScoreConstructionError("Score document must be a mapping.")
     if document.get("schemaVersion") != SCORE_SCHEMA_VERSION:
@@ -667,7 +675,7 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
     if len(measures) != measure_count:
         raise ScoreConstructionError("Score measure count is inconsistent.")
     total_beats = measure_count * meter
-    notes: list[tuple[int, int, int, str]] = []
+    notes: list[dict[str, Any]] = []
     drum_hits: list[dict[str, Any]] = []
     hit_ids: set[tuple[str, int]] = set()
     hit_slots: set[tuple[str, float]] = set()
@@ -720,60 +728,130 @@ def score_to_midi_bytes(document: Mapping[str, Any]) -> bytes:
             duration_tick = end_tick - start_tick
             if duration_tick <= 0:
                 raise ScoreConstructionError("Score note duration is invalid.")
-            notes.append((start_tick, end_tick, midi_note, event_id))
+            source_kind = _text(note.get("sourceKind", "unassigned"), "sourceKind")
+            if not _SAFE_SOURCE_KIND.fullmatch(source_kind):
+                raise ScoreConstructionError("Score sourceKind is invalid.")
+            tab = _parse_note_tab(note.get("tab"), midi_note)
+            notes.append(
+                {
+                    "start": start_tick,
+                    "end": end_tick,
+                    "midiNote": midi_note,
+                    "id": event_id,
+                    "sourceKind": source_kind,
+                    "tab": tab["instrument"] if tab else None,
+                }
+            )
     if len(notes) > _MAX_NOTES:
         raise ScoreConstructionError("Too many MIDI events.")
 
-    # A note-off must not silence another still-held copy of the same pitch.
-    # Different pitches can share a channel; overlapping unisons cannot.
-    # General MIDI channel 10 is reserved for percussion, not this pitched draft.
-    melodic_channels = tuple(channel for channel in range(16) if channel != 9)
-    channel_ends: dict[int, list[int]] = {}
-    events: list[tuple[int, bytes]] = []
-    for start_tick, end_tick, midi_note, _ in sorted(
-        notes, key=lambda note: (note[0], note[1], note[3])
-    ):
-        ends = channel_ends.setdefault(midi_note, [0] * len(melodic_channels))
-        available = next((index for index, end in enumerate(ends) if end <= start_tick), None)
-        if available is None:
-            raise ScoreConstructionError("MIDI overlapping unison channel limit exceeded.")
-        channel = melodic_channels[available]
-        ends[available] = end_tick
-        events.append((start_tick, bytes((0x90 | channel, midi_note, 80))))
-        events.append((end_tick, bytes((0x80 | channel, midi_note, 0x40))))
-    # Percussion uses only General MIDI channel 10 and the documented table.
-    # Velocity follows measured onset strength; nothing else is inferred.
-    for hit in drum_hits:
-        gm_note = PERCUSSION_NOTATION[hit["broadVoice"]][3]
-        start_tick = int(round(hit["quantizedBeat"] * _DIVISIONS))
-        velocity = max(1, min(127, int(round(40 + 80 * hit["strength"]))))
-        events.append(
-            (start_tick, bytes((0x90 | PERCUSSION_MIDI_CHANNEL, gm_note, velocity)))
-        )
-        events.append(
-            (
-                start_tick + _PERCUSSION_MIDI_TICKS,
-                bytes((0x80 | PERCUSSION_MIDI_CHANNEL, gm_note, 0x40)),
-            )
-        )
-    events.sort(key=lambda item: (item[0], item[1]))
+    # The same parts, in the same order, as the MusicXML export.
+    untabbed = [note for note in notes if note["tab"] is None]
+    tracks: list[tuple[str, int | None, list[dict[str, Any]]]] = []
+    if "scoreParts" in document:
+        for item in plan_score_parts(untabbed):
+            name, _sources, program = SCORE_PARTS[item["id"]]
+            members = [
+                note for note in untabbed
+                if _PART_FOR_SOURCE.get(note["sourceKind"], "other-lines") == item["id"]
+            ]
+            tracks.append((name, program, members))
+    elif untabbed:
+        tracks.append(("Draft pitched events", None, untabbed))
+    for instrument in TAB_INSTRUMENT_ORDER:
+        members = [note for note in notes if note["tab"] == instrument]
+        if members:
+            tracks.append((_TAB_PART_NAMES[instrument], _TAB_GM_PROGRAMS[instrument], members))
 
-    track = bytearray()
+    # A note-off must not silence another still-held copy of the same pitch.
+    # Different pitches can share a channel; overlapping unisons cannot, so a
+    # part spills them onto spare channels that carry the same program.
+    # General MIDI channel 10 is reserved for percussion, never pitched notes.
+    pool = [channel for channel in range(16) if channel != PERCUSSION_MIDI_CHANNEL]
+    track_payloads: list[bytes] = []
+    end_of_score = total_beats * _DIVISIONS
+
+    conductor = bytearray()
     microseconds = int(round(60_000_000 / tempo))
-    track += b"\x00\xff\x51\x03" + struct.pack(">I", microseconds)[1:]
-    track += b"\x00\xff\x58\x04" + bytes((meter, 2, 24, 8))
+    conductor += b"\x00\xff\x51\x03" + struct.pack(">I", microseconds)[1:]
+    conductor += b"\x00\xff\x58\x04" + bytes((meter, 2, 24, 8))
     key = _parse_key_signature(document.get("keySignature"))
     if key:
         # MIDI knows only major/minor: modes use their parent major signature.
         minor = 1 if key["mode"] in _MIDI_MINOR_MODES else 0
-        track += b"\x00\xff\x59\x02" + struct.pack(">bB", key["fifths"], minor)
+        conductor += b"\x00\xff\x59\x02" + struct.pack(">bB", key["fifths"], minor)
+    track_payloads.append(_midi_track(bytes(conductor), [], end_of_score))
+
+    for name, program, members in tracks:
+        channels: list[int] = []
+        channel_ends: dict[int, dict[int, int]] = {}
+        events: list[tuple[int, bytes]] = []
+        for note in sorted(members, key=lambda item: (item["start"], item["end"], item["id"])):
+            pitch = note["midiNote"]
+            channel = next(
+                (ch for ch in channels if channel_ends[ch].get(pitch, 0) <= note["start"]),
+                None,
+            )
+            if channel is None:
+                if not pool:
+                    raise ScoreConstructionError("MIDI overlapping unison channel limit exceeded.")
+                channel = pool.pop(0)
+                channels.append(channel)
+                channel_ends[channel] = {}
+            channel_ends[channel][pitch] = note["end"]
+            events.append((note["start"], bytes((0x90 | channel, pitch, _MIDI_VELOCITY))))
+            events.append((note["end"], bytes((0x80 | channel, pitch, 0x40))))
+        head = bytearray(_midi_track_name(name))
+        if program is not None:
+            for channel in channels:
+                head += b"\x00" + bytes((0xC0 | channel, program - 1))
+        track_payloads.append(_midi_track(bytes(head), events, end_of_score))
+
+    if drum_hits:
+        # Percussion uses only General MIDI channel 10 and the documented table.
+        # Velocity follows measured onset strength; nothing else is inferred.
+        events = []
+        for hit in drum_hits:
+            gm_note = PERCUSSION_NOTATION[hit["broadVoice"]][3]
+            start_tick = int(round(hit["quantizedBeat"] * _DIVISIONS))
+            velocity = max(1, min(127, int(round(40 + 80 * hit["strength"]))))
+            events.append(
+                (start_tick, bytes((0x90 | PERCUSSION_MIDI_CHANNEL, gm_note, velocity)))
+            )
+            events.append(
+                (
+                    start_tick + _PERCUSSION_MIDI_TICKS,
+                    bytes((0x80 | PERCUSSION_MIDI_CHANNEL, gm_note, 0x40)),
+                )
+            )
+        track_payloads.append(
+            _midi_track(_midi_track_name(_DRUM_PART_NAME), events, end_of_score)
+        )
+
+    header = struct.pack(">4sIHHH", b"MThd", 6, 1, len(track_payloads), _DIVISIONS)
+    return header + b"".join(
+        struct.pack(">4sI", b"MTrk", len(payload)) + payload for payload in track_payloads
+    )
+
+
+def _midi_track_name(name: str) -> bytes:
+    encoded = name.encode("ascii", "replace")[:127]
+    return b"\x00\xff\x03" + _midi_varlen(len(encoded)) + encoded
+
+
+def _midi_track(head: bytes, events: list[tuple[int, bytes]], end_tick: int) -> bytes:
+    """One track: tick-0 meta and program events, then sorted channel events.
+
+    Sorting by ``(tick, bytes)`` puts note-offs (0x8n) before note-ons (0x9n)
+    at the same tick, so a re-struck pitch is released first.
+    """
+    track = bytearray(head)
     last_tick = 0
-    for tick, payload in events:
+    for tick, payload in sorted(events, key=lambda item: (item[0], item[1])):
         track += _midi_varlen(tick - last_tick) + payload
         last_tick = tick
-    track += _midi_varlen(total_beats * _DIVISIONS - last_tick) + b"\xff\x2f\x00"
-    header = struct.pack(">4sIHHH", b"MThd", 6, 0, 1, _DIVISIONS)
-    return header + struct.pack(">4sI", b"MTrk", len(track)) + bytes(track)
+    track += _midi_varlen(max(0, end_tick - last_tick)) + b"\xff\x2f\x00"
+    return bytes(track)
 
 
 def _append_forward(parent: ET.Element, duration_ticks: int) -> None:
@@ -1117,7 +1195,7 @@ def _percussion_instrument_id(voice: str) -> str:
 
 def _musicxml_percussion_score_part(part_list: ET.Element, voices: Sequence[str]) -> None:
     score_part = ET.SubElement(part_list, "score-part", id="P2")
-    ET.SubElement(score_part, "part-name").text = "Drum Kit (draft, broad voices)"
+    ET.SubElement(score_part, "part-name").text = _DRUM_PART_NAME
     for voice in voices:
         instrument = ET.SubElement(
             score_part, "score-instrument", id=_percussion_instrument_id(voice)

@@ -4,6 +4,7 @@ import struct
 import xml.etree.ElementTree as ET
 
 import pytest
+from midi_reader import note_events
 
 from app.score_construction import (
     SCORE_BUILDER_VERSION,
@@ -40,40 +41,7 @@ def _note(
 
 
 def _midi_note_events(payload: bytes) -> list[tuple[int, int, int]]:
-    track_length = struct.unpack_from(">I", payload, 18)[0]
-    data = payload[22 : 22 + track_length]
-    cursor = 0
-    tick = 0
-    events: list[tuple[int, int, int]] = []
-
-    def read_varlen(offset: int) -> tuple[int, int]:
-        value = 0
-        while True:
-            byte = data[offset]
-            offset += 1
-            value = (value << 7) | (byte & 0x7F)
-            if byte < 0x80:
-                return value, offset
-
-    while cursor < len(data):
-        delta, cursor = read_varlen(cursor)
-        tick += delta
-        status = data[cursor]
-        cursor += 1
-        if status == 0xFF:
-            meta_type = data[cursor]
-            cursor += 1
-            size, cursor = read_varlen(cursor)
-            cursor += size
-            if meta_type == 0x2F:
-                break
-            continue
-        first = data[cursor]
-        second = data[cursor + 1]
-        cursor += 2
-        if (status & 0xF0) in (0x80, 0x90):
-            events.append((tick, status, first))
-    return events
+    return [(tick, status, key) for tick, status, key, _velocity in note_events(payload)]
 
 
 def test_empty_evidence_builds_single_empty_measure_with_warning() -> None:
@@ -450,3 +418,88 @@ def test_structured_chord_symbols_validate_against_musicxml_schema() -> None:
     tree = etree.fromstring(score_to_musicxml_text(document).encode("utf-8"))
     assert schema.validate(tree), schema.error_log
     assert len(tree.findall(".//harmony")) == len(symbols) - 1
+
+
+def _part_document(*, with_drums: bool = True) -> dict:
+    from app.score_construction import plan_score_parts
+    from test_score_percussion import hit_input
+
+    events = [
+        _note("v1", 0.0, 0.5, 67, source_kind="vocals"),
+        _note("a1", 0.0, 0.5, 60, source_kind="other"),
+        _note("a2", 0.0, 0.5, 64, source_kind="other"),
+        _note("a3", 0.25, 0.5, 60, source_kind="other"),
+        _note("b1", 0.0, 1.0, 40, source_kind="bass"),
+    ]
+    hits = [hit_input("k1", "low_drum", 0.0), hit_input("s1", "mid_drum", 0.5)] if with_drums else None
+    document = build_score_document(events, tempo_bpm=120.0, percussion_hits=hits)
+    for measure in document["measures"]:
+        for note in measure["notes"]:
+            note["tab"] = (
+                {"instrument": "bass", "status": "unplayable", "string": None, "fret": None}
+                if note["sourceKind"] == "bass" else None
+            )
+    document["scoreParts"] = plan_score_parts(
+        [note for measure in document["measures"] for note in measure["notes"] if note["tab"] is None]
+    )
+    return document
+
+
+def test_midi_writes_one_named_track_per_part_like_musicxml() -> None:
+    from midi_reader import read_midi
+
+    document = _part_document()
+    midi = read_midi(score_to_midi_bytes(document))
+    assert midi.format == 1 and midi.division == 480
+    names = [track.name for track in midi.tracks]
+    assert names == [
+        None,
+        "Lead vocal (draft)",
+        "Accompaniment reduction",
+        "Bass (draft, with TAB)",
+        "Drum Kit (draft, broad voices)",
+    ]
+    xml = ET.fromstring(score_to_musicxml_text(document))
+    assert [name.text for name in xml.iter("part-name")] == names[1:]
+    # The conductor track holds tempo and meter, and no notes.
+    conductor = midi.tracks[0]
+    assert not conductor.channel
+    assert {meta_type for _tick, meta_type, _data in conductor.meta} >= {0x51, 0x58, 0x2F}
+    # Every track ends with the score.
+    assert {track.end_tick for track in midi.tracks} == {4 * 480}
+
+    def programs(track):
+        return {status & 0x0F: data[0] + 1 for _t, status, data in track.channel if status & 0xF0 == 0xC0}
+
+    def note_channels(track):
+        return {status & 0x0F for _t, status, _d in track.channel if status & 0xF0 == 0x90}
+
+    vocal, accompaniment, bass, drums = midi.tracks[1:]
+    assert programs(vocal) == {0: 54}
+    assert note_channels(vocal) == {0}
+    # The overlapping unison C4 spills onto a spare channel with the same program.
+    assert programs(accompaniment) == {1: 1, 2: 1}
+    assert note_channels(accompaniment) == {1, 2}
+    assert programs(bass) == {3: 34} and note_channels(bass) == {3}
+    assert not programs(drums) and note_channels(drums) == {9}
+    pitched = [note for track in midi.tracks[1:4] for note in track.channel if note[1] & 0xF0 == 0x90]
+    assert sorted(data[0] for _t, _s, data in pitched) == [40, 60, 60, 64, 67]
+
+
+def test_midi_without_score_parts_keeps_one_combined_track() -> None:
+    from midi_reader import read_midi
+
+    document = build_score_document(
+        [_note("v1", 0.0, 0.5, 67, source_kind="vocals"), _note("a1", 0.0, 0.5, 60, source_kind="other")],
+        tempo_bpm=120.0,
+    )
+    midi = read_midi(score_to_midi_bytes(document))
+    assert [track.name for track in midi.tracks] == [None, "Draft pitched events"]
+    assert not [event for event in midi.tracks[1].channel if event[1] & 0xF0 == 0xC0]
+
+
+def test_midi_of_an_empty_score_is_a_valid_conductor_track() -> None:
+    from midi_reader import read_midi
+
+    midi = read_midi(score_to_midi_bytes(build_score_document([], tempo_bpm=120.0)))
+    assert len(midi.tracks) == 1 and midi.tracks[0].end_tick == 4 * 480
