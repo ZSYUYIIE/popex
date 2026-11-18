@@ -411,7 +411,7 @@ Implemented capabilities:
 - explicit first-use consent before any model preparation or download;
 - revision- and SHA-256-backed schema-3 stem manifests;
 - safe stem details, preview, and download endpoints;
-- local baseline raw transcription (`baseline-pyin-onset-v1`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment;
+- local raw transcription (`stem-notes-onset-v2`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment; separated vocal, bass and accompaniment stems use the bundled [Basic Pitch note model](docs/note-model.md) (Apache-2.0, run on the CPU with ONNX Runtime, nothing downloaded), which hears several notes at once, with bass and vocals reduced to one line; the full mix and any stem the model cannot process use the pYIN pitch tracker, and the result says so;
 - editable interpretation drafts (`editable-interpretation-v1`, schema 1) with source-aware pitched parts/phrases, conservative rhythm grid, and broad drum structure;
 - evidence-aware harmonic context (`pitch-class-window-v1`, schema 1) with conservative chord candidates, unresolved accounting, and per-event warning preservation;
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;
@@ -759,7 +759,7 @@ Tests generate synthetic click tracks, tonal signals, and tiny WAV stems. Ordina
 - Chord symbols are review candidates placed at most one per measure; measures with competing or partial harmony show no symbol, and chord symbols export as structured MusicXML harmony (root, kind, slash bass) only when the whole symbol is understood; anything else, such as `Am(add9)` or `Cmaj7#11`, is kept exactly as words rather than guessed. Only one symbol per measure is exported, so faster harmonic rhythm is not yet notated.
 - Interpretation part labels remain review annotations. MusicXML parts follow source lines (stems), not instrument recognition, so an accompaniment stem is one reduction rather than separate keyboard, guitar, or string parts; MIDI is still one combined track.
 - MIDI preserves overlapping unisons on separate melodic channels and includes meter and full-measure duration. More than 15 simultaneous copies of one pitch fail explicitly rather than truncate held notes or use the percussion channel.
-- Raw transcription is a local baseline (pYIN/onset); dense mixes remain approximate and carry warnings.
+- Raw transcription is approximate: the note model works on separated stems that contain bleed and artefacts, so accompaniment notes in particular include extra and missing notes; the full mix still uses a one-line pYIN baseline. Note accuracy on real recordings has not yet been measured against reference notes.
 - Interpretation drafts are conservative reductions; pitched parts, rhythm grid, and drum structure require musician review.
 - Harmonic context provides conservative chord candidates with unresolved accounting, not guaranteed complete chord symbols for every measure.
 - Chords heard in the audio are limited to major, minor, or no chord; chords in passages without accompaniment are implied and less certain; a small preference for chords inside the recording's overall scale can misname a borrowed chord. The recogniser was tuned and measured on one real recording and synthetic progressions, so its accuracy on other material is not yet known. It needs the harmony stage to be re-run on recordings harmonized earlier.

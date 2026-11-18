@@ -1,2 +1,5 @@
 # Preserve the audited third-party browser asset byte-for-byte on all hosts.
 app/static/vendor/osmd-2.2.1/opensheetmusicdisplay.min.js -text
+
+# Bundled model weights are checked by SHA-256; never convert them.
+app/models/**/*.onnx binary
