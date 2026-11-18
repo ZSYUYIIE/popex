@@ -1520,3 +1520,52 @@ form > *, .drop-zone > * {
   min-width: 0;
   max-width: 100%;
 }
+
+/* One-action draft: the first thing a recording offers. It reads as a short
+   checklist under a hairline, matching the stage panels, not a boxed card. */
+.draft-panel {
+  margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line);
+}
+.draft-heading h4 {
+  font-size: 1.3rem; letter-spacing: -.025em;
+}
+.draft-message {
+  color: var(--muted); margin: .35rem 0 0; max-width: 62ch;
+}
+.draft-steps {
+  list-style: none; margin: 1rem 0 0; padding: 0; display: grid; gap: .1rem;
+}
+.draft-step {
+  display: grid; grid-template-columns: 1.4rem minmax(0, 1fr) auto; column-gap: .6rem; align-items: baseline;
+  padding: .45rem 0; border-bottom: 1px solid var(--line); color: var(--muted);
+}
+.draft-step:last-child { border-bottom: 0; }
+.draft-step-mark { font-family: var(--font-mono); text-align: center; }
+.draft-step-label { color: var(--text); }
+.draft-step-state { font-family: var(--font-mono); font-size: .78rem; }
+.draft-step-note { grid-column: 2 / -1; font-size: .85rem; margin-top: .15rem; }
+.draft-step.is-active .draft-step-mark, .draft-step.is-active .draft-step-state { color: var(--accent); }
+.draft-step.is-ran .draft-step-mark, .draft-step.is-reused .draft-step-mark { color: var(--text); }
+.draft-step.is-failed .draft-step-mark, .draft-step.is-failed .draft-step-state { color: var(--warn); }
+.draft-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; margin-top: 1rem;
+}
+.draft-actions a {
+  color: var(--text); text-underline-offset: .2em;
+}
+.draft-consent {
+  display: flex; align-items: flex-start; gap: .5rem; color: var(--muted); font-size: .9rem; max-width: 52ch;
+}
+.draft-consent input { margin-top: .2rem; accent-color: var(--accent); }
+@media (min-width: 1000px) {
+  .draft-panel {
+    display: grid; grid-template-columns: minmax(0, 15rem) minmax(0, 1fr); column-gap: 2.5rem; align-items: start;
+  }
+  .draft-panel > * { grid-column: 2; min-width: 0; }
+  .draft-panel > .draft-heading { grid-column: 1; grid-row: 1 / span 6; }
+  .draft-panel > .draft-steps { margin-top: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .draft-step.is-active .draft-step-mark { animation: draft-pulse 1.4s ease-in-out infinite; }
+}
+@keyframes draft-pulse { 50% { opacity: .35; } }

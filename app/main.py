@@ -56,6 +56,9 @@ from app.separation_artifacts import (
     load_stem_details,
     resolve_stem_artifact,
 )
+from app.audio_chords import AudioChordsError, load_audio_chords_artifact
+from app.draft_chain import DraftStep, DraftTracker, StepResult
+from app.separation_capability import STATE_DOWNLOAD_REQUIRED
 from app.separation_service import (
     SeparationJobNotFound,
     SeparationService,
@@ -323,6 +326,12 @@ def _fingerprinted_index_html() -> str:
     return html
 
 
+class DraftStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allowModelDownload: StrictBool = False
+
+
 class SeparationStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -453,8 +462,11 @@ def create_app(
     app.state.separation_service = separation_service
     app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
+    draft_tracker = DraftTracker()
+    app.state.draft_tracker = draft_tracker
+
     def serialize_job(record: dict) -> dict:
-        return _serialize_job(record, app_settings, separation_service)
+        return _serialize_job(record, app_settings, separation_service, draft_tracker)
 
     index_html = _fingerprinted_index_html()
     notation_html = (BASE_DIR / "templates" / "score-notation.html").read_text(encoding="utf-8")
@@ -1447,6 +1459,191 @@ def create_app(
             media_type=media_type,
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    # ------------------------------------------------------------------
+    # One action: draft the whole score
+
+    def _draft_steps(allow_model_download: bool) -> list[DraftStep]:
+        database = app_settings.database_path
+
+        def record_of(job_id: str) -> dict:
+            return db.get_job(database, job_id) or {}
+
+        def separate(job_id: str, force: bool) -> StepResult:
+            if not app_settings.stem_separation_enabled:
+                return StepResult(
+                    "skipped",
+                    "Stem separation is not set up on this computer, so the full mix was transcribed.",
+                )
+            if record_of(job_id).get("separation_status") == "completed" and not force:
+                return StepResult("reused")
+            capability = separation_service.refresh_capability()
+            if capability is None or not capability.actionable:
+                return StepResult(
+                    "skipped",
+                    "Stem separation is unavailable right now, so the full mix was transcribed.",
+                )
+            if capability.state == STATE_DOWNLOAD_REQUIRED and not allow_model_download:
+                return StepResult(
+                    "skipped",
+                    "Stem separation needs your permission to download its model once; "
+                    "the full mix was transcribed.",
+                )
+            try:
+                separation_service.request_start(
+                    job_id,
+                    allow_model_download=allow_model_download,
+                    schedule=lambda run, *args, **kwargs: run(*args, **kwargs),
+                )
+            except (SeparationStartConflict, SeparationJobNotFound):
+                return StepResult(
+                    "skipped", "Stem separation could not start, so the full mix was transcribed."
+                )
+            if record_of(job_id).get("separation_status") == "completed":
+                return StepResult("ran")
+            return StepResult(
+                "failed", "Stem separation did not finish, so the full mix was transcribed."
+            )
+
+        def transcribe(job_id: str, force: bool) -> StepResult:
+            status_value = record_of(job_id).get("transcription_status")
+            if status_value == "completed" and not force:
+                return StepResult("reused")
+            if not db.claim_transcription_attempt(
+                database,
+                job_id,
+                transcription_version=TRANSCRIPTION_VERSION,
+                force=status_value == "completed" or force,
+            ):
+                return StepResult("failed", "Note and drum detection could not start.")
+            _run_transcription_job(job_id, app_settings, transcription_processor)
+            if record_of(job_id).get("transcription_status") == "completed":
+                return StepResult("ran")
+            return StepResult("failed", "Note and drum detection did not finish.")
+
+        def interpret(job_id: str, force: bool) -> StepResult:
+            status_value = record_of(job_id).get("interpretation_status")
+            if status_value == "completed" and not force:
+                return StepResult("reused")
+            if not db.claim_interpretation_attempt(
+                database,
+                job_id,
+                interpretation_version=INTERPRETATION_PIPELINE_VERSION,
+                force=status_value == "completed" or force,
+            ):
+                return StepResult("failed", "Parts and rhythm could not be organised, so notes carry no part labels.")
+            _run_interpretation_job(job_id, app_settings, interpretation_processor)
+            if record_of(job_id).get("interpretation_status") == "completed":
+                return StepResult("ran")
+            return StepResult("failed", "Parts and rhythm could not be organised, so notes carry no part labels.")
+
+        def harmonize(job_id: str, force: bool) -> StepResult:
+            record = record_of(job_id)
+            status_value = record.get("harmony_status")
+            if status_value == "completed" and not force:
+                heard = None
+                try:
+                    heard = load_audio_chords_artifact(
+                        app_settings, job_id, str(record.get("harmonized_at") or "")
+                    )
+                except AudioChordsError:
+                    heard = None
+                audio_exists = (app_settings.exports_dir / job_id / "analysis.wav").is_file()
+                if heard is not None or not audio_exists:
+                    return StepResult("reused")
+                # Harmony from before chords were heard in the audio: run it
+                # again so the score gets the far more complete chords.
+                force = True
+            attempt_id = db.claim_harmony_attempt(
+                database,
+                job_id,
+                harmony_version=HARMONY_PIPELINE_VERSION,
+                force=status_value == "completed" or force,
+            )
+            if not isinstance(attempt_id, str) or not attempt_id:
+                return StepResult("failed", "Chords could not be found, so the score has no chord symbols.")
+            _run_harmony_job(job_id, app_settings, harmony_processor, attempt_id)
+            if record_of(job_id).get("harmony_status") == "completed":
+                return StepResult("ran")
+            return StepResult("failed", "Chords could not be found, so the score has no chord symbols.")
+
+        def build_score(job_id: str, force: bool) -> StepResult:
+            record = record_of(job_id)
+            status_value = record.get("score_status")
+            fresh = (
+                status_value == "completed"
+                and record.get("score_source_fingerprint") == current_score_fingerprint(record)
+                and score_outdated_reason(record) is None
+            )
+            if fresh and not force:
+                return StepResult("reused")
+            attempt_id = db.claim_score_attempt(
+                database,
+                job_id,
+                score_version=SCORE_PIPELINE_VERSION,
+                force=status_value == "completed" or force or status_value == "failed",
+            )
+            if not isinstance(attempt_id, str) or not attempt_id:
+                return StepResult("failed", "The score could not be built.")
+            _run_score_job(job_id, app_settings, score_processor, attempt_id)
+            if record_of(job_id).get("score_status") == "completed":
+                return StepResult("ran")
+            return StepResult("failed", "The score could not be built.")
+
+        return [
+            DraftStep("separate", "Separating vocals, bass, drums and accompaniment", False, separate),
+            DraftStep("transcribe", "Detecting notes and drum hits", True, transcribe),
+            DraftStep("interpret", "Organising parts and rhythm", False, interpret),
+            DraftStep("harmonize", "Listening for chords", False, harmonize),
+            DraftStep("score", "Writing the score", True, build_score),
+        ]
+
+    def _draft_readiness(job_id: str) -> tuple[str, str | None]:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            return "failed", "The recording no longer exists."
+        preparation = record.get("preparation_status")
+        analysis_value = record.get("analysis_status")
+        if preparation == "failed" or (record.get("status") == "failed" and preparation != "completed"):
+            return "failed", "The recording could not be prepared, so no score was drafted."
+        if analysis_value == "failed":
+            return "failed", "Audio analysis did not finish, so no score was drafted. Retry the analysis."
+        if preparation == "completed" and analysis_value == "completed":
+            return "ready", None
+        if preparation == "completed" and analysis_value == "not_started" and not app_settings.audio_analysis_enabled:
+            return "failed", "Audio analysis is turned off, so no score can be drafted."
+        return "waiting", None
+
+    @app.post(
+        "/api/jobs/{job_id}/draft",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def draft_job_score(
+        job_id: str,
+        background_tasks: BackgroundTasks,
+        payload: DraftStartRequest = Body(default_factory=DraftStartRequest),
+    ) -> dict:
+        record = db.get_job(app_settings.database_path, job_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if _draft_readiness(job_id)[0] == "failed":
+            raise HTTPException(status_code=409, detail=_draft_readiness(job_id)[1])
+        if any(record.get(field) == "processing" for field in _DRAFT_STAGE_FIELDS[1:]):
+            raise HTTPException(
+                status_code=409,
+                detail="A step is already running for this recording; wait for it to finish.",
+            )
+        steps = _draft_steps(payload.allowModelDownload)
+        if not draft_tracker.claim(job_id, steps):
+            raise HTTPException(status_code=409, detail="This recording is already being drafted.")
+        background_tasks.add_task(
+            draft_tracker.run,
+            job_id,
+            steps,
+            readiness=_draft_readiness,
+            timeout_seconds=float(app_settings.audio_analysis_timeout_seconds) + 1800.0,
+        )
+        return serialize_job(db.get_job(app_settings.database_path, job_id) or record)
 
     @app.post(
         "/api/jobs/{job_id}/score/construct",
@@ -2808,6 +3005,7 @@ def _serialize_job(
     job: dict,
     settings: Settings,
     separation_service: SeparationService | None = None,
+    draft_tracker: DraftTracker | None = None,
 ) -> dict:
     payload = {
         key: value
@@ -2874,7 +3072,37 @@ def _serialize_job(
     score = _serialize_score(job)
     if score is not None:
         payload["score"] = score
+    if draft_tracker is not None:
+        draft = _serialize_draft(job, draft_tracker)
+        if draft is not None:
+            payload["draft"] = draft
     return payload
+
+
+_DRAFT_STAGE_FIELDS = (
+    "analysis_status",
+    "separation_status",
+    "transcription_status",
+    "interpretation_status",
+    "harmony_status",
+    "score_status",
+)
+
+
+def _serialize_draft(job: dict, tracker: DraftTracker) -> dict[str, Any] | None:
+    """State of the one-action draft for a recording."""
+    if job.get("preparation_status") == "failed":
+        return None
+    job_id = job["id"]
+    progress = tracker.status(job_id)
+    running = bool(progress and progress["state"] in {"waiting", "running"})
+    busy = any(job.get(field) == "processing" for field in _DRAFT_STAGE_FIELDS[1:])
+    return {
+        "startUrl": f"/api/jobs/{job_id}/draft",
+        "canStart": not running and not busy and job.get("analysis_status") != "failed",
+        "running": running,
+        "progress": progress,
+    }
 
 
 def _serialize_transcription(job: dict) -> dict[str, Any] | None:
