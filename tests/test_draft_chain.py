@@ -240,3 +240,37 @@ def test_browser_offers_one_action_drafting():
     assert "data-draft-consent" in script  # model download needs an explicit tick
     styles = (Path(__file__).resolve().parents[1] / "app" / "static" / "styles.css").read_text(encoding="utf-8")
     assert ".draft-panel" in styles and "prefers-reduced-motion" in styles
+
+def test_out_of_date_rules():
+    from app.main import _harmony_out_of_date, _interpretation_out_of_date, _transcription_out_of_date
+    from app.transcription_pipeline import TRANSCRIPTION_VERSION
+
+    fresh = {
+        "transcription_version": TRANSCRIPTION_VERSION,
+        "transcribed_at": "2026-11-18T10:00:00+00:00",
+        "separation_status": "completed",
+        "separated_at": "2026-11-18T09:00:00+00:00",
+        "interpreted_at": "2026-11-18T10:05:00+00:00",
+        "harmony_source_transcribed_at": "2026-11-18T10:00:00+00:00",
+    }
+    assert not _transcription_out_of_date(fresh)
+    assert not _interpretation_out_of_date(fresh)
+    assert not _harmony_out_of_date(fresh)
+    assert _transcription_out_of_date({**fresh, "transcription_version": "an-older-detector-v0"})
+    assert _transcription_out_of_date({**fresh, "separated_at": "2026-11-18T11:00:00+00:00"})
+    assert _interpretation_out_of_date({**fresh, "interpreted_at": "2026-11-18T09:59:00+00:00"})
+    assert _harmony_out_of_date({**fresh, "harmony_source_transcribed_at": "2026-11-17T10:00:00+00:00"})
+    assert not _harmony_out_of_date({**fresh, "harmony_source_transcribed_at": None})
+
+def test_draft_redoes_harmony_made_from_older_notes(tmp_path: Path):
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    with TestClient(create_app(settings)) as client:
+        assert client.post(f"/api/jobs/{job_id}/draft").status_code == 202
+        db.update_job(settings.database_path, job_id, harmony_source_transcribed_at="2020-01-01T00:00:00+00:00")
+        assert client.post(f"/api/jobs/{job_id}/draft").status_code == 202
+        progress = client.get(f"/api/jobs/{job_id}").json()["draft"]["progress"]
+    outcomes = {step["key"]: step["outcome"] for step in progress["steps"]}
+    assert outcomes["transcribe"] == "reused"
+    assert outcomes["harmonize"] == "ran"
+    assert outcomes["score"] == "ran"
