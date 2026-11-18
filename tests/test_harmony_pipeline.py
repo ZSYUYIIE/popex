@@ -298,6 +298,7 @@ def test_raw_only_pipeline_publishes_canonical_artifact_and_progress(
         "inferring_harmonic_context",
         "validating_harmonic_context",
         "saving_harmonic_context",
+        "listening_for_chords",
         "completed",
     ]
     assert [progress for _, _, progress in stages] == sorted(

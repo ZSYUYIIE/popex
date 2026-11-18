@@ -15,6 +15,7 @@ from app.analysis import (
     AudioAnalysisError,
     load_analysis,
 )
+from app.audio_chords_pipeline import publish_audio_chords
 from app.config import Settings
 from app.harmony_artifacts import (
     HARMONY_ARTIFACT_RELATIVE_PATH,
@@ -230,6 +231,23 @@ def infer_harmony_job(
         settings,
         artifact,
         artifact_file_name=artifact_file_name,
+    )
+
+    _report(
+        stage_callback,
+        "listening_for_chords",
+        "Listening for chords in the recording.",
+        95.0,
+    )
+    # Best effort and separate from the harmonic-context artifact: chords heard
+    # in the audio are saved beside it and never change or fail it.
+    publish_audio_chords(
+        job_id,
+        settings,
+        raw_transcription=raw,
+        timing=timing,
+        analysis_version=analysis_version,
+        harmony_created_at=reloaded["createdAt"],
     )
 
     _report(

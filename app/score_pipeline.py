@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from app.audio_chords import AudioChordsError, load_audio_chords_artifact
 from app.config import Settings
 from app.harmony_artifacts import (
     HARMONY_ARTIFACT_RELATIVE_PATH,
@@ -236,6 +237,52 @@ def _load_matching_harmony(
             "chord symbols were omitted. Re-run harmony, then rebuild the score."
         )
     return list(artifact.get("segments") or []), "Chord symbols come from resolved local harmonic candidates."
+
+
+def _load_audio_chord_segments(
+    job_id: str,
+    settings: Settings,
+    record: Mapping[str, Any],
+    identity: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Chords heard in the audio for the identity's harmony result, if any.
+
+    Returns segments in the shape :func:`_map_harmony` reads, plus the layer
+    note, or ``(None, None)`` when no matching audio chords were saved.
+    """
+    layer = identity.get("harmony")
+    if layer is None:
+        return None, None
+    try:
+        artifact = load_audio_chords_artifact(settings, job_id, layer["createdAt"])
+    except AudioChordsError:
+        return None, None
+    if artifact is None or artifact["analysisVersion"] != record.get("analysis_version"):
+        return None, None
+    segments = [
+        {
+            "id": segment["id"],
+            "rawStartSeconds": segment["startSeconds"],
+            "rawEndSeconds": segment["endSeconds"],
+            "unresolved": segment["symbol"] is None,
+            "primaryCandidate": (
+                None
+                if segment["symbol"] is None
+                else {"symbol": segment["symbol"], "confidence": segment["confidence"]}
+            ),
+        }
+        for segment in artifact["segments"]
+    ]
+    heard_from = {
+        "stems+mix": "the separated accompaniment and bass, with the full mix where they fall quiet",
+        "stems": "the separated accompaniment and bass",
+        "mix": "the full mix",
+    }[artifact["source"]]
+    return segments, (
+        f"Chord symbols were heard in the audio ({heard_from}) on each beat: major, "
+        "minor, or no chord. Sevenths, suspensions and inversions are not claimed, and "
+        "chords in passages without accompaniment are implied and less certain."
+    )
 
 
 def _load_interpretation(
@@ -620,6 +667,13 @@ def construct_score(
         job_id, settings, record, identity, evidence["rawTranscription"]
     )
     harmony_stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0}
+    if segments is not None:
+        # Chords heard in the audio are far more complete than chords named
+        # from transcribed notes, so they are used whenever they were saved
+        # for this harmony result.
+        heard, heard_note = _load_audio_chord_segments(job_id, settings, record, identity)
+        if heard is not None:
+            segments, harmony_note = heard, heard_note
     if segments is not None:
         harmony_stats = _map_harmony(
             measures,
