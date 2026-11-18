@@ -41,7 +41,7 @@ global.clearTimeout = () => {{}};
 const source = fs.readFileSync({app_path}, "utf8").replace("updateFilePresentation();loadJobs();","") + `
 ;globalThis.__popexScoreTest={{
   renderScore, renderJob, deriveState, loadJobs, hydrateCompletedScores,
-  invalidateStaleScoreDetails,
+  invalidateStaleScoreDetails, renderJobDetails, renderDraftDownloads, showIngestionProgress,
   setDetail:(id,value)=>scoreCache.set(id,value),
   hasDetail:(id)=>scoreCache.has(id),
   getDetail:(id)=>scoreCache.get(id),
@@ -315,6 +315,40 @@ def test_job_card_includes_score_panel_and_polls_while_building() -> None:
     # The scroll box must not widen the page on narrow screens.
     rule = re.search(r"\.table-scroll\s*\{([^}]*)\}", styles).group(1).replace(" ", "")
     assert "overflow-x:auto" in rule and "width:0" in rule and "min-width:100%" in rule
+
+
+def test_stage_panels_sit_in_one_disclosure_under_the_draft() -> None:
+    result = _run_node(
+        f"""
+const done={{id:"done",status:"completed",analysis:{{status:"completed"}},score:{json.dumps(SUMMARY)}}};
+const working={{id:"w",status:"completed",analysis:{{status:"completed"}},
+  transcription:{{status:"processing"}},score:{{enabled:true,status:"not_started",counts:{{}}}}}};
+const failing={{id:"f",status:"completed",analysis:{{status:"completed"}},harmony:{{status:"failed"}},
+  score:{{enabled:true,status:"not_started",counts:{{}}}}}};
+console.log(JSON.stringify({{
+  done:t.renderJobDetails(done,[]),
+  working:t.renderJobDetails(working,[]),
+  failing:t.renderJobDetails(failing,[]),
+  downloads:t.renderDraftDownloads(done),
+  unsafe:t.renderDraftDownloads({{score:{{downloadUrls:{{musicxml:"https://evil.example/x",midi:"javascript:alert(1)"}}}}}}),
+  progress:[t.showIngestionProgress({{status:"processing"}}),t.showIngestionProgress({{status:"completed",analysis:{{status:"processing"}}}}),
+    t.showIngestionProgress({{status:"failed"}}),t.showIngestionProgress(done)]
+}}));
+"""
+    )
+    done = result["done"]
+    assert done.startswith('<details class="job-details" data-open-key="details-done">')
+    assert "<summary><span class=\"job-details-title\">Review, correct and see each step</span>" in done
+    assert "2 bars · 3 notes · 1 chord symbol<" in done
+    assert "Draft score" in done and "</details>" in done
+    # A stage still running outside a one-action draft opens the disclosure.
+    assert result["working"].startswith('<details class="job-details" data-open-key="details-w" open>')
+    assert "1 step needs attention" in result["failing"]
+    downloads = result["downloads"]
+    assert 'href="/api/jobs/done/score/saved/download?format=musicxml" download>Download MusicXML</a>' in downloads
+    assert 'href="/api/jobs/done/score/saved/download?format=midi" download>Download MIDI</a>' in downloads
+    assert result["unsafe"] == ""
+    assert result["progress"] == [True, True, True, False]
 
 
 def test_upstream_work_in_progress_outranks_saved_score_state() -> None:
