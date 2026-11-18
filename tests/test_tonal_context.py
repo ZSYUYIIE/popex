@@ -152,7 +152,7 @@ def test_score_documents_carry_tonal_context_and_key(tmp_path: Path) -> None:
         musicxml = client.get(f"/api/jobs/{job_id}/score/saved/download?format=musicxml")
         comparison_job = client.get(f"/api/jobs/{job_id}").json()
     tonality = details["tonality"]
-    assert tonality["version"] == "modal-collections-v1"
+    assert tonality["version"] == "modal-collections-v2"
     assert tonality["evidence"]["bassSource"] == "bass-stem line"
     assert tonality["primaryCandidate"] == tonality["candidates"][0]
     assert any("Tonal context suggests" in warning for warning in details["warnings"])
@@ -249,3 +249,60 @@ def test_key_signature_examples_validate_against_musicxml_schema() -> None:
         root, _midi = _export([60, 61, 63, 66, 70, 71], key)
         tree = etree.fromstring(ET.tostring(root))
         assert schema.validate(tree), schema.error_log
+
+
+def chord_bars(pattern: list[str], melody: list[int], repeats: int = 4) -> list[dict]:
+    """Bars carrying mapped chord symbols (as the score pipeline leaves them) and a melody."""
+    measures = []
+    for index in range(len(pattern) * repeats):
+        symbol = pattern[index % len(pattern)]
+        notes = [
+            {"id": f"m{index}-{j}", "midiNote": midi, "quantizedBeat": index * 4 + j,
+             "quantizedDurationBeats": 1.0, "confidence": 0.6, "sourceKind": "vocals"}
+            for j, midi in enumerate(melody)
+        ]
+        measures.append({
+            "measureIndex": index,
+            "notes": notes,
+            "harmony": [{"segmentId": f"c{index:06d}", "startBeat": 0.0, "endBeat": 4.0,
+                         "symbol": symbol, "confidence": 0.9, "unresolved": False}],
+        })
+    return measures
+
+
+def test_chords_heard_on_the_bars_settle_the_tonal_centre_and_key_signature() -> None:
+    # Am Am C C G G G G with a melody on G, A, B, D: no F or F# is ever heard,
+    # so Ionian and Mixolydian cannot be told apart by the notes.
+    measures = chord_bars(["Am", "Am", "C", "C", "G", "G", "G", "G"], [67, 69, 71, 74])
+    without = build_tonal_context([{**m, "harmony": []} for m in measures])
+    result = build_tonal_context(measures)
+
+    assert result["primaryCandidate"]["tonalCenter"] == "G"
+    assert result["primaryCandidate"]["collection"] == "ionian"
+    assert result["primaryCandidate"]["confidence"] >= 0.5
+    assert result["keySignature"] == {"fifths": 1, "mode": "major"}
+    assert result["primaryCandidate"]["confidence"] >= without["primaryCandidate"]["confidence"]
+    assert any("chord symbols" in note for note in result["notes"])
+
+
+def test_a_heard_seventh_degree_still_decides_the_mode() -> None:
+    # F natural in the melody: Mixolydian is now supported by the notes.
+    measures = chord_bars(["G", "G", "F", "C"], [67, 65, 71, 74, 65])
+    result = build_tonal_context(measures)
+    assert result["primaryCandidate"]["tonalCenter"] == "G"
+    assert result["primaryCandidate"]["collection"] == "mixolydian"
+
+
+def test_minor_key_chords_give_a_minor_centre() -> None:
+    measures = chord_bars(["Am", "Am", "Dm", "E", "Am", "F", "G", "Am"], [69, 72, 76, 71])
+    result = build_tonal_context(measures)
+    assert result["primaryCandidate"]["tonalCenter"] == "A"
+    assert result["primaryCandidate"]["collection"] in {"aeolian", "harmonic_minor"}
+
+
+def test_unreadable_and_unresolved_chords_are_ignored() -> None:
+    measures = chord_bars(["Csus4", "N.C.", "C5"], [60, 64, 67, 72])
+    measures[0]["harmony"].append({"segmentId": "x", "startBeat": 0.0, "endBeat": 4.0,
+                                   "symbol": None, "confidence": None, "unresolved": True})
+    result = build_tonal_context(measures)
+    assert not any("chord symbols" in note for note in result["notes"])

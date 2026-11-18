@@ -30,10 +30,11 @@ at 16 weighted beats), clipped to 0–1.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-TONAL_CONTEXT_VERSION = "modal-collections-v1"
+TONAL_CONTEXT_VERSION = "modal-collections-v2"
 KEY_SIGNATURE_MIN_CONFIDENCE = 0.5
 
 # collection -> (label, intervals, diatonic parent offset in semitones from
@@ -65,6 +66,21 @@ _NOTE_SHARE, _CHROMA_SHARE = 0.6, 0.4
 _REGION_BARS, _REGION_HOP = 8, 4
 _REGION_MIN_NOTES, _REGION_MIN_BEATS = 6, 4.0
 _MAX_CANDIDATES, _MAX_REGIONS = 8, 32
+# Chords heard in the audio: their tones join the note histogram and their
+# roots act as tonic evidence, because a song spends most time on its home chord.
+_CHORD_SHARE = 0.4
+_CHORD_ROOT_PRIOR = 0.6
+# Notes that tell two same-tonic collections apart must carry this share of the
+# histogram before the difference counts. A draft transcription scatters a few
+# percent onto almost every pitch class, so less than this is treated as noise.
+_DECISIVE_SHARE = 0.06
+_COLLECTION_PREFERENCE = {
+    "ionian": 0, "aeolian": 1, "mixolydian": 2, "dorian": 3, "harmonic_minor": 4,
+    "melodic_minor": 5, "lydian": 6, "phrygian": 7, "major_pentatonic": 8,
+    "minor_pentatonic": 9, "blues": 10, "locrian": 11,
+}
+_CHORD_SYMBOL = re.compile(r"([A-G])([#b]?)(.*)")
+_LETTERS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
 
 
 def key_signature(root: int, collection: str) -> dict[str, Any]:
@@ -108,8 +124,13 @@ def _normalize(values: Sequence[float]) -> list[float] | None:
     return None if total <= 1e-12 else [value / total for value in values]
 
 
-def _rank(histogram: Sequence[float], bass: Sequence[float] | None) -> list[dict[str, Any]]:
+def _rank(
+    histogram: Sequence[float],
+    bass: Sequence[float] | None,
+    chord_roots: Sequence[float] | None = None,
+) -> list[dict[str, Any]]:
     bass_share = _normalize(bass) if bass is not None else None
+    root_share = _normalize(chord_roots) if chord_roots is not None else None
     ranked = []
     for collection, template in _TEMPLATES.items():
         for root in range(12):
@@ -117,9 +138,45 @@ def _rank(histogram: Sequence[float], bass: Sequence[float] | None) -> list[dict
             score = _cross_entropy(histogram, rotated)
             if bass_share is not None:
                 score += _BASS_PRIOR * bass_share[root]
+            if root_share is not None:
+                score += _CHORD_ROOT_PRIOR * root_share[root]
             ranked.append({"root": root, "collection": collection, "score": score})
     ranked.sort(key=lambda item: (-item["score"], item["collection"], item["root"]))
-    return ranked
+    return _prefer_common_collection(ranked, histogram)
+
+
+def _undecided(first: Mapping[str, Any], second: Mapping[str, Any], histogram: Sequence[float]) -> bool:
+    """Same tonic, and the notes that tell the two collections apart are barely heard."""
+    if first["root"] != second["root"]:
+        return False
+    differing = _pitch_set(first["root"], first["collection"]) ^ _pitch_set(
+        second["root"], second["collection"]
+    )
+    return sum(histogram[pc] for pc in differing) < _DECISIVE_SHARE
+
+
+def _prefer_common_collection(ranked: list[dict[str, Any]], histogram: Sequence[float]) -> list[dict[str, Any]]:
+    """Among readings the audio cannot tell apart, lead with the most common one.
+
+    A song that never sounds the seventh degree fits G Ionian and G Mixolydian
+    equally; ranking them on noise would make the key signature flip between
+    runs. Ionian, then Aeolian, then the other modes is the usual way such a
+    score is written.
+    """
+    best = ranked[0]
+    if len(COLLECTIONS[best["collection"]][1]) != 7:
+        return ranked  # a pentatonic or blues reading is a finding, not a tie
+    tied = [
+        item
+        for item in ranked
+        if len(COLLECTIONS[item["collection"]][1]) == 7
+        and _undecided(best, item, histogram)
+        and best["score"] - item["score"] < _MARGIN_SCALE
+    ]
+    leader = min(tied, key=lambda item: (_COLLECTION_PREFERENCE.get(item["collection"], 99), -item["score"]))
+    if leader is best:
+        return ranked
+    return [leader] + [item for item in ranked if item is not leader]
 
 
 def _pitch_set(root: int, collection: str) -> frozenset[int]:
@@ -138,16 +195,25 @@ def _describe(item: Mapping[str, Any], confidence: float) -> dict[str, Any]:
     }
 
 
-def _assess(histogram, bass, evidence_beats):
+def _assess(histogram, bass, evidence_beats, chord_roots=None):
     """Return ranked candidates with confidences, plus ambiguity notes."""
-    ranked = _rank(histogram, bass)
+    ranked = _rank(histogram, bass, chord_roots)
     best = ranked[0]
     best_set = _pitch_set(best["root"], best["collection"])
-    # Margin to the best clearly different reading (other notes, or same
-    # notes with another tonic: a relative mode).
+    # Margin to the best clearly different reading: another tonic, or the same
+    # tonic with different notes that are actually heard. Readings the audio
+    # cannot tell apart do not lower the confidence in the tonal centre.
+    # A same-tonic reading that would be written with the same key signature
+    # (G major pentatonic against G Ionian) is a refinement, not a rival.
+    best_signature = key_signature(best["root"], best["collection"])["fifths"]
     rival = next(
         item for item in ranked[1:]
-        if item["root"] != best["root"] or _pitch_set(item["root"], item["collection"]) != best_set
+        if item["root"] != best["root"]
+        or (
+            _pitch_set(item["root"], item["collection"]) != best_set
+            and not _undecided(best, item, histogram)
+            and key_signature(item["root"], item["collection"])["fifths"] != best_signature
+        )
     )
     evidence = min(1.0, evidence_beats / _FULL_EVIDENCE_BEATS)
     confidence = max(0.0, min(1.0, (best["score"] - rival["score"]) / _MARGIN_SCALE)) * evidence
@@ -198,12 +264,54 @@ def _bass_notes(measures: Sequence[Mapping[str, Any]]) -> tuple[list[Mapping[str
     return lowest, "lowest note at the start of each bar"
 
 
+def _chord_tones(symbol: str) -> tuple[int, tuple[int, ...]] | None:
+    """Root and triad tones of a chord symbol; extensions and basses are ignored."""
+    match = _CHORD_SYMBOL.fullmatch(symbol.strip())
+    if match is None:
+        return None
+    root = (_LETTERS[match.group(1)] + {"#": 1, "b": -1, "": 0}[match.group(2)]) % 12
+    rest = match.group(3).split("/")[0]
+    if rest.startswith(("sus", "5", "dim", "aug", "+", "o")):
+        return None
+    minor = rest.startswith(("m", "-")) and not rest.startswith("maj")
+    return root, (0, 3, 7) if minor else (0, 4, 7)
+
+
+def _chord_evidence(measures: Sequence[Mapping[str, Any]]) -> tuple[list[float], list[float]] | None:
+    """Tone and root histograms from the resolved harmony mapped onto bars."""
+    tones = [0.0] * 12
+    roots = [0.0] * 12
+    for measure in measures:
+        for entry in measure.get("harmony") or ():
+            if not isinstance(entry, Mapping) or entry.get("unresolved") or not isinstance(entry.get("symbol"), str):
+                continue
+            parsed = _chord_tones(entry["symbol"])
+            if parsed is None:
+                continue
+            try:
+                span = max(0.0, float(entry["endBeat"]) - float(entry["startBeat"]))
+                confidence = float(entry.get("confidence") or 0.5)
+            except (TypeError, ValueError, KeyError):
+                continue
+            weight = span * max(0.05, min(1.0, confidence))
+            root, intervals = parsed
+            for interval in intervals:
+                tones[(root + interval) % 12] += weight
+            roots[root] += weight
+    return (tones, roots) if sum(roots) > 1e-9 else None
+
+
 def build_tonal_context(
     measures: Sequence[Mapping[str, Any]],
     *,
     chroma_mean: Sequence[float] | None = None,
 ) -> dict[str, Any]:
-    """Return the persisted ``tonality`` layer for one score's measures."""
+    """Return the persisted ``tonality`` layer for one score's measures.
+
+    Chord symbols already mapped onto the bars (``measure["harmony"]``) count
+    as evidence when present: their tones join the histogram and their roots
+    support the tonal centre.
+    """
     notes = [note for measure in measures for note in measure["notes"]]
     bass_notes, bass_source = _bass_notes(measures)
     note_hist, bass_hist, beats = _histograms(notes, bass_notes)
@@ -217,6 +325,12 @@ def build_tonal_context(
         histogram = [_NOTE_SHARE * a + _CHROMA_SHARE * b for a, b in zip(note_share, chroma)]
     else:
         histogram = note_share or chroma
+    chords = _chord_evidence(measures)
+    chord_roots = None
+    if chords is not None and histogram is not None:
+        tone_share = _normalize(chords[0])
+        histogram = [(1 - _CHORD_SHARE) * a + _CHORD_SHARE * b for a, b in zip(histogram, tone_share)]
+        chord_roots = chords[1]
     evidence = {
         "noteCount": len(notes),
         "weightedBeats": round(beats, 3),
@@ -236,7 +350,7 @@ def build_tonal_context(
             "notes": ["No transcribed notes were available, so no scale or mode is suggested."],
         }
     candidates, ambiguous, best = _assess(
-        histogram, bass_hist if bass_notes else None, beats
+        histogram, bass_hist if bass_notes else None, beats, chord_roots
     )
     primary = candidates[0]
     members = _pitch_set(best["root"], best["collection"])
@@ -289,6 +403,8 @@ def build_tonal_context(
             break
 
     notes_out = []
+    if chord_roots is not None:
+        notes_out.append("The chord symbols on the bars count as evidence for the tonal centre.")
     if ambiguous:
         notes_out.append(
             f"{primary['displayName']} shares its notes with {', '.join(ambiguous)}; "
