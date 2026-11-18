@@ -22,6 +22,7 @@ from app.percussion_transcription import (
     PercussionTranscriptionError,
     transcribe_percussion_audio,
 )
+from app.note_model import MODEL_SOURCE_KINDS, NoteModelError, note_model_available, transcribe_notes
 from app.pitch_transcription import PitchedTranscriptionError, transcribe_pitched_audio
 from app.separation import (
     REQUIRED_STEM_KINDS,
@@ -41,7 +42,7 @@ from app.transcription_events import (
 )
 
 
-TRANSCRIPTION_VERSION = "baseline-pyin-onset-v1"
+TRANSCRIPTION_VERSION = "stem-notes-onset-v2"
 DEFAULT_PITCH_VERSION = "baseline-pyin-v1"
 
 _PITCHED_STEM_KINDS = ("vocals", "bass", "other")
@@ -100,13 +101,35 @@ class _SourceFailure(RuntimeError):
     """One detector source failed without invalidating successful sources."""
 
 
+def transcribe_pitched_source(audio_path: Path, *, source_kind: str) -> Mapping[str, Any]:
+    """Detect notes on one source with the best detector available for it.
+
+    Separated vocal, bass and accompaniment stems use the bundled note model,
+    which hears several notes at once. The full mix, and any stem when the
+    model is unavailable or fails, use the pYIN pitch tracker, and the result
+    says so.
+    """
+    if source_kind in MODEL_SOURCE_KINDS:
+        if note_model_available():
+            try:
+                return transcribe_notes(audio_path, source_kind=source_kind)
+            except NoteModelError:
+                fallback = "The note model could not process this stem, so the pYIN pitch tracker was used."
+        else:
+            fallback = "The note model is unavailable, so the pYIN pitch tracker was used for this stem."
+        result = dict(transcribe_pitched_audio(audio_path, source_kind=source_kind))
+        result["warnings"] = [fallback, *list(result.get("warnings") or [])][:8]
+        return result
+    return transcribe_pitched_audio(audio_path, source_kind=source_kind)
+
+
 def transcribe_job(
     job_id: str,
     settings: Settings,
     stage_callback: StageCallback,
     *,
     transcription_version: str = TRANSCRIPTION_VERSION,
-    pitch_processor: PitchProcessor = transcribe_pitched_audio,
+    pitch_processor: PitchProcessor = transcribe_pitched_source,
     percussion_processor: PercussionProcessor = transcribe_percussion_audio,
     alignment_processor: AlignmentProcessor = align_raw_events_to_timing,
 ) -> TranscriptionPipelineResult:

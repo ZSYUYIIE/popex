@@ -17,6 +17,7 @@ The current dependency declarations are maintained in `pyproject.toml`.
 | NumPy | Numerical arrays and signal-processing support | BSD-3-Clause, with separately licensed bundled components | https://github.com/numpy/numpy |
 | SciPy | Scientific and signal-processing support | BSD-3-Clause, with separately licensed bundled components | https://github.com/scipy/scipy |
 | SoundFile | Audio file reading through libsndfile | BSD-3-Clause | https://github.com/bastibe/python-soundfile |
+| ONNX Runtime | CPU inference for the bundled Basic Pitch note model | MIT | https://github.com/microsoft/onnxruntime |
 | pytest | Development tests | MIT | https://github.com/pytest-dev/pytest |
 | HTTPX | Development and API tests | BSD-3-Clause | https://github.com/encode/httpx |
 | setuptools | Python build backend | MIT | https://github.com/pypa/setuptools |
@@ -59,6 +60,24 @@ preserve the notices and do not imply endorsement. This is a version-specific
 integration conditionally approved by the user on 2026-10-16; the completed
 dependency/font audit is recorded in the linked document.
 
+## Bundled note model
+
+PopEx bundles the **Basic Pitch** note-detection model and a reduced port of its inference code.
+
+| Item | Detail |
+| --- | --- |
+| Component | Spotify Basic Pitch 0.4.0, ICASSP 2022 model, ONNX serialization (`nmp.onnx`) |
+| Location | `app/models/basic_pitch/nmp.onnx` (230,444 bytes) |
+| SHA-256 | `2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec`, checked before the model is loaded |
+| Source | https://github.com/spotify/basic-pitch (PyPI `basic-pitch` 0.4.0, `basic_pitch/saved_models/icassp_2022/nmp.onnx`) |
+| Code and weights licence | Apache License 2.0, Copyright 2022 Spotify AB |
+| Notice files | `app/models/basic_pitch/LICENSE` and `app/models/basic_pitch/NOTICE`, unmodified from the 0.4.0 distribution |
+| Ported code | `app/note_model.py` adapts `basic_pitch/inference.py` and `basic_pitch/note_creation.py` (windowing, output unwrapping, onset inference, polyphonic note decoding); pitch bends and MIDI writing are omitted. The file states that it is a modified port. |
+| Runtime | ONNX Runtime (MIT), CPU only; no download at run time |
+| Redistribution | Allowed under Apache-2.0 with the licence and NOTICE kept alongside |
+| Commercial use | Allowed by the Apache-2.0 licence of the code and weights |
+
+Training data, as recorded in the upstream training configuration: GuitarSet, iKala, MAESTRO, MedleyDB-Pitch and Slakh. These datasets carry their own terms (some are non-commercial or restricted). Spotify publishes the trained weights under Apache-2.0; PopEx relies on that grant and does not redistribute any training data. Distributors with strict provenance requirements should review this themselves.
 ## External runtime tools
 
 | Component | Use | Licensing note |
@@ -148,7 +167,7 @@ Current roadmap candidates that still require version-specific review when integ
 | Candidate | Planned purpose | Current repository status |
 | --- | --- | --- |
 | `adefossez/demucs` `4.1.0` with official `htdemucs` weights | Local source separation | Optional architecture approved with conditions; package, PyTorch runtime, and weights are not bundled; no universal `pyproject.toml` extra is currently safe |
-| Spotify Basic Pitch | Initial pitched-note event extraction | Candidate only; not yet approved or bundled |
+| Spotify Basic Pitch 0.4.0 (ICASSP 2022 model) | Note detection on separated stems | Approved and bundled; see Bundled note model above |
 | music21 | Symbolic music and MusicXML construction | Candidate only; not yet approved or bundled |
 | pretty_midi | MIDI generation and manipulation | Candidate only; not yet approved or bundled |
 | OpenSheetMusicDisplay 2.2.1 | Local browser score rendering | Approved and audited version above; Verovio is not bundled |
