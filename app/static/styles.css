@@ -1569,3 +1569,22 @@ form > *, .drop-zone > * {
   .draft-step.is-active .draft-step-mark { animation: draft-pulse 1.4s ease-in-out infinite; }
 }
 @keyframes draft-pulse { 50% { opacity: .35; } }
+/* Stage evidence, corrections and review live behind one disclosure, so a
+   recording reads as: what it is, its draft, and its score. */
+.job-details {
+  margin-top: 1.5rem; border-top: 1px solid var(--line);
+}
+.job-details > summary {
+  list-style: none; cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem 1rem;
+  padding: 1.1rem 0; min-height: 44px;
+}
+.job-details > summary::-webkit-details-marker { display: none; }
+.job-details > summary::before {
+  content: "+"; font-family: var(--font-mono); color: var(--muted); width: 1rem; display: inline-block;
+}
+.job-details[open] > summary::before { content: "−"; }
+.job-details-title { font-weight: 650; color: var(--text); }
+.job-details-meta { color: var(--muted); font-family: var(--font-mono); font-size: .8rem; }
+.job-details > summary:hover .job-details-title { text-decoration: underline; text-underline-offset: .2em; }
+.job-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+.job-details-body > :first-child { margin-top: 0; }

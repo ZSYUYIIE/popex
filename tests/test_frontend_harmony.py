@@ -871,10 +871,12 @@ def test_no_final_score_export_or_voicing_claims() -> None:
         "publication ready",
     ):
         assert phrase not in source
-    # MusicXML is only offered by the persisted draft-score panel, never by
-    # the harmony review or other stages.
+    # MusicXML is only offered from the persisted draft score (its panel and
+    # the draft panel's download links), never by the harmony review or
+    # other stages.
     score_functions = (
         "function renderscore(",
+        "function renderdraftdownloads(",
         "function renderscoremeasures(",
         "function scorestatustext(",
         "function scorestagetext(",

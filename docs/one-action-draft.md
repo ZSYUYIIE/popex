@@ -16,6 +16,12 @@ Adding a recording (a file or a link) starts drafting straight away. Drafting wa
 
 The recording shows each step as it runs, with a mark for done, already done, skipped, or did not finish, and a short reason for anything skipped or unfinished.
 
+## What each recording shows
+
+A recording leads with its draft: the button, the step list, and once a score is saved, **Open notation**, **Download MusicXML** and **Download MIDI** side by side. Preparation and analysis progress only shows while those are running or when they failed.
+
+Everything a musician uses to check and correct the draft (analysis, instrument stems, notes, parts, chords, the measure table and the files) sits under one disclosure, **Review, correct and see each step**. Its summary line gives the bar, note and chord symbol counts and how many steps need attention. It opens on its own while a stage started by hand is running, and it stays open or closed across page updates. With four drafted songs this keeps the recordings page about a tenth of its former length.
+
 ## Reuse
 
 A step that already finished is reused. When a step runs again, every step after it runs again too, because its results would otherwise describe old evidence. A saved score is also rebuilt when it was made from older results or by an older version of PopEx. Harmony saved before chords were heard in the audio is run again so the score gets those chords.

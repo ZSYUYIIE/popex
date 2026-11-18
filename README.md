@@ -446,6 +446,7 @@ Implemented capabilities:
 - local Windows, Linux/macOS, and Docker workflows for the base application;
 - optional validated Linux and Windows CPU runtime profiles;
 - [one-action drafting](docs/one-action-draft.md): adding a recording starts drafting its score straight away, and **Draft the score** on any recording runs separation (when set up and allowed), note and drum detection, parts and rhythm, listening for chords, and score writing in order; finished steps are reused, anything after a step that ran again is redone, optional steps may be skipped with a stated reason, and each step shows its progress on the recording;
+- focused recording cards: each recording leads with its draft, notation link and MusicXML/MIDI downloads, while the step-by-step review and correction panels sit under one **Review, correct and see each step** disclosure with a bar, note and chord summary;
 - an offline [accuracy scoreboard](docs/accuracy-scoreboard.md) for development: one command compares a saved draft score with a hand-written reference for the same recording (tempo, bar-grid drift, key, chord symbols and harmony windows over real time, and notes when the reference has them) and keeps runs side by side; it reads artifacts only and reports reference-free indicators separately from accuracy;
 - synthetic, offline automated tests for ordinary repository CI.
 
