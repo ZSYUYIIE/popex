@@ -411,7 +411,7 @@ Implemented capabilities:
 - explicit first-use consent before any model preparation or download;
 - revision- and SHA-256-backed schema-3 stem manifests;
 - safe stem details, preview, and download endpoints;
-- local baseline raw transcription (`baseline-pyin-onset-v1`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment;
+- local baseline raw transcription (`stem-profile-pyin-onset-v2`, schema 1) with separate pitched-note events, percussion events, and advisory beat alignment; pitched tracking (`stem-profile-pyin-v2`) uses a per-stem profile recorded in its diagnostics: voice E2–C6 with an 80 ms minimum note, bass guitar B0–G4 (five-string low B to the 24th fret of the G string) with a 60 ms minimum and a slower glide limit, and a conservative C2–C6 general profile with a 45 ms minimum for full-mix and accompaniment lines; transcriptions made with `baseline-pyin-v1` stay valid and keep their recorded versions;
 - editable interpretation drafts (`editable-interpretation-v1`, schema 1) with source-aware pitched parts/phrases, conservative rhythm grid, and broad drum structure;
 - evidence-aware harmonic context (`pitch-class-window-v1`, schema 1) with conservative chord candidates, unresolved accounting, and per-event warning preservation;
 - attempt-scoped, nonce-bound harmony publication with previous-result preservation and orphan reconciliation;

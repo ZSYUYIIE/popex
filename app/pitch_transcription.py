@@ -7,6 +7,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 import librosa
@@ -20,12 +21,29 @@ class PitchedTranscriptionError(RuntimeError):
 
 _SOURCE_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
-_RANGES = {
-    "bass": (float(librosa.note_to_hz("E1")), float(librosa.note_to_hz("C5"))),
-    "vocal": (float(librosa.note_to_hz("C2")), float(librosa.note_to_hz("C7"))),
-    "vocals": (float(librosa.note_to_hz("C2")), float(librosa.note_to_hz("C7"))),
+PITCH_ALGORITHM_VERSION = "stem-profile-pyin-v2"
+# Per-stem profiles. A range that matches what the instrument can play keeps pYIN
+# from reporting impossible octaves; sung and bass notes also need a longer
+# minimum duration than the dominant pitch of a mixed line. Bass covers a
+# five-string low B up to the 24th fret of the G string; voice covers a low bass
+# singer to a high soprano.
+PITCH_PROFILES: dict[str, dict[str, Any]] = {
+    "bass": {"name": "bass-guitar", "low": "B0", "high": "G4", "minEventSeconds": 0.060, "maxTransitionRate": 8.0},
+    "vocals": {"name": "voice", "low": "E2", "high": "C6", "minEventSeconds": 0.080, "maxTransitionRate": 12.0},
 }
-_GENERAL_RANGE = (float(librosa.note_to_hz("C2")), float(librosa.note_to_hz("C6")))
+PITCH_PROFILES["vocal"] = PITCH_PROFILES["vocals"]
+_GENERAL_PROFILE: dict[str, Any] = {
+    "name": "general-line", "low": "C2", "high": "C6", "minEventSeconds": 0.045, "maxTransitionRate": 12.0,
+}
+
+
+def pitch_profile(source_kind: str) -> dict[str, Any]:
+    """Return the transcription profile (range, minimum note length, glide rate) for a source."""
+    profile = dict(PITCH_PROFILES.get(source_kind, _GENERAL_PROFILE))
+    profile["fminHz"] = float(librosa.note_to_hz(profile["low"]))
+    profile["fmaxHz"] = float(librosa.note_to_hz(profile["high"]))
+    return profile
+
 _POLYPHONIC_KINDS = frozenset({"other", "full_mix", "full-mix", "mix"})
 _MIN_SR, _MAX_SR = 8_000, 192_000
 _MAX_DURATION = 360.0
@@ -33,9 +51,7 @@ _MAX_DURATION_SECONDS = _MAX_DURATION
 _MAX_SAMPLE_VALUES = 40_000_000
 _MAX_FRAMES = 100_000
 _MIN_PROBABILITY = 0.10
-_MAX_TRANSITION_RATE = 12.0
 _SPLIT_SEMITONES = 0.75
-_MIN_EVENT_SECONDS = 0.045
 _MAX_WARNINGS, _MAX_WARNING_LENGTH = 8, 200
 
 
@@ -43,14 +59,15 @@ def transcribe_pitched_audio(
     audio_path: Path,
     *,
     source_kind: str,
-    algorithm_version: str = "baseline-pyin-v1",
+    algorithm_version: str = PITCH_ALGORITHM_VERSION,
     fmin_hz: float | None = None,
     fmax_hz: float | None = None,
 ) -> dict[str, Any]:
     """Return raw pYIN events without beat quantization or score construction.
 
-    Bass defaults to approximately E1-C5, vocals to C2-C7, and other safe
-    open source kinds to a conservative C2-C6 range. Raw frame times,
+    Each source kind uses a profile (``pitch_profile``): bass B0-G4 with a
+    60 ms minimum note, voice E2-C6 with an 80 ms minimum, and other safe open
+    source kinds a conservative C2-C6 range with 45 ms. Raw frame times,
     frequencies, fractional MIDI pitches, voiced probabilities, and RMS values
     remain available in ``diagnostics.pyin.frameEvidence``.
     """
@@ -59,7 +76,8 @@ def transcribe_pitched_audio(
     version = _token(algorithm_version, _VERSION_RE, "algorithm version")
     path = _wav_path(audio_path)
     info = _wav_info(path)
-    fmin, fmax, default_range = _range(kind, int(info.samplerate), fmin_hz, fmax_hz)
+    profile = pitch_profile(kind)
+    fmin, fmax, default_range = _range(profile, int(info.samplerate), fmin_hz, fmax_hz)
     audio, sample_rate = _read(path, info)
     mono = np.mean(audio, axis=1, dtype=np.float64)
     duration = float(mono.size / sample_rate)
@@ -89,6 +107,7 @@ def transcribe_pitched_audio(
         default_range,
         frame_length,
         hop_length,
+        profile,
     )
     if rms <= 1e-5:
         warnings.append(
@@ -111,7 +130,7 @@ def transcribe_pitched_audio(
             center=True,
             pad_mode="constant",
             fill_na=np.nan,
-            max_transition_rate=_MAX_TRANSITION_RATE,
+            max_transition_rate=profile["maxTransitionRate"],
         )
         frame_rms = librosa.feature.rms(
             y=mono,
@@ -195,6 +214,7 @@ def transcribe_pitched_audio(
         sample_rate,
         hop_length,
         duration,
+        profile["minEventSeconds"],
     )
     diagnostics["eventing"].update(
         discardedShortSegments=short_count,
@@ -232,6 +252,7 @@ def _diagnostics(
     default_range: bool,
     frame_length: int,
     hop_length: int,
+    profile: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "libraries": {
@@ -252,6 +273,11 @@ def _diagnostics(
             "fmaxHz": fmax,
             "usedSourceDefault": default_range,
         },
+        "profile": {
+            "name": profile["name"],
+            "lowNote": profile["low"],
+            "highNote": profile["high"],
+        },
         "pyin": {
             "frameLength": frame_length,
             "hopLength": hop_length,
@@ -259,12 +285,12 @@ def _diagnostics(
             "voicedFrameCount": 0,
             "voicedFraction": 0.0,
             "minimumVoicedProbability": _MIN_PROBABILITY,
-            "maxTransitionRateOctavesPerSecond": _MAX_TRANSITION_RATE,
+            "maxTransitionRateOctavesPerSecond": profile["maxTransitionRate"],
             "frameEvidence": [],
         },
         "eventing": {
             "pitchSplitSemitones": _SPLIT_SEMITONES,
-            "minimumEventSeconds": _MIN_EVENT_SECONDS,
+            "minimumEventSeconds": profile["minEventSeconds"],
             "bridgedGapFrames": 1,
             "discardedShortSegments": 0,
             "discardedUnstableSegments": 0,
@@ -286,12 +312,13 @@ def _events(
     sample_rate: int,
     hop_length: int,
     duration: float,
+    min_event_seconds: float,
 ) -> tuple[list[dict[str, Any]], int, int, list[dict[str, Any]]]:
     events: list[dict[str, Any]] = []
     event_evidence: list[dict[str, Any]] = []
     short_count = unstable_count = 0
     half_hop = 0.5 * hop_length / sample_rate
-    minimum_frames = max(3, math.ceil(_MIN_EVENT_SECONDS * sample_rate / hop_length))
+    minimum_frames = max(3, math.ceil(min_event_seconds * sample_rate / hop_length))
     voiced_rms = frame_rms[used & np.isfinite(frame_rms) & (frame_rms > 0)]
     rms_reference = (
         max(float(np.percentile(voiced_rms, 95)), np.finfo(float).tiny)
@@ -303,7 +330,7 @@ def _events(
         indices = indices[used[indices]]
         start_seconds = max(0.0, float(times[indices[0]] - half_hop))
         end_seconds = min(duration, float(times[indices[-1]] + half_hop))
-        if indices.size < minimum_frames or end_seconds - start_seconds < _MIN_EVENT_SECONDS:
+        if indices.size < minimum_frames or end_seconds - start_seconds < min_event_seconds:
             short_count += 1
             continue
         pitch = _weighted_median(midi[indices], probability[indices])
@@ -473,12 +500,12 @@ def _read(path: Path, info: Any) -> tuple[np.ndarray, int]:
 
 
 def _range(
-    kind: str,
+    profile: Mapping[str, Any],
     sample_rate: int,
     fmin_hz: object,
     fmax_hz: object,
 ) -> tuple[float, float, bool]:
-    default_min, default_max = _RANGES.get(kind, _GENERAL_RANGE)
+    default_min, default_max = profile["fminHz"], profile["fmaxHz"]
     fmin = default_min if fmin_hz is None else _positive(fmin_hz)
     fmax = default_max if fmax_hz is None else _positive(fmax_hz)
     if (
