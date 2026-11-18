@@ -445,6 +445,7 @@ Implemented capabilities:
 - source, WAV, metadata, analysis, stem, transcription, interpretation, harmony, and score downloads;
 - local Windows, Linux/macOS, and Docker workflows for the base application;
 - optional validated Linux and Windows CPU runtime profiles;
+- [one-action drafting](docs/one-action-draft.md): adding a recording starts drafting its score straight away, and **Draft the score** on any recording runs separation (when set up and allowed), note and drum detection, parts and rhythm, listening for chords, and score writing in order; finished steps are reused, anything after a step that ran again is redone, optional steps may be skipped with a stated reason, and each step shows its progress on the recording;
 - an offline [accuracy scoreboard](docs/accuracy-scoreboard.md) for development: one command compares a saved draft score with a hand-written reference for the same recording (tempo, bar-grid drift, key, chord symbols and harmony windows over real time, and notes when the reference has them) and keeps runs side by side; it reads artifacts only and reports reference-free indicators separately from accuracy;
 - synthetic, offline automated tests for ordinary repository CI.
 
@@ -585,6 +586,7 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `GET /api/jobs/{job_id}/harmony/download`
 - `GET /api/jobs/{job_id}/score` with optional `?includeMeasures=true`
 - `GET /api/jobs/{job_id}/score/download?format=midi|musicxml`
+- `POST /api/jobs/{job_id}/draft` with optional strict JSON `{ "allowModelDownload": true | false }`: run every stage in order (see [one-action drafting](docs/one-action-draft.md)); every job carries a `draft` object with its progress
 - `POST /api/jobs/{job_id}/score/construct` with optional `?force=true`
 - `GET /api/jobs/{job_id}/score/saved` with optional `?includeMeasures=true`, `?includeMeasureTiming=true` (compact saved bar index/start/end only), and `?view=corrected|original` (default `corrected`)
 - `GET /api/jobs/{job_id}/score/saved/download?format=midi|musicxml|json` with optional `&view=corrected|original`; MusicXML also accepts `&part=<id>` for one part (ids are listed in the saved score's `exportParts`)
@@ -601,7 +603,7 @@ Source preparation, audio analysis, stem separation, raw transcription, interpre
 - `PUT /api/jobs/{job_id}/score/tablature` with strict JSON `{ "bass": line | null, "guitar": line | null }`, where a line is `vocals`, `bass`, `other`, or `full_mix`; rejected while a score is being built
 - `GET /api/jobs/{job_id}/files/{file_name}`
 
-Historical completed jobs are not analyzed, separated, transcribed, interpreted, harmonized, or scored automatically at startup. Use the Analyze, Separate, Transcribe, Interpret, Harmonize, and Build score actions or the corresponding endpoints. Active or already completed attempts are rejected rather than duplicated.
+Historical completed jobs are not analyzed, separated, transcribed, interpreted, harmonized, or scored automatically at startup. Use **Draft the score**, the individual Analyze, Separate, Transcribe, Interpret, Harmonize, and Build score actions, or the corresponding endpoints. Active or already completed attempts are rejected rather than duplicated.
 
 The web API never accepts a worker executable, runtime lock, cache root, model repository, model revision, checkpoint filename, checkpoint hash, device path, or arbitrary artifact path. Stem preview and download resolution always starts from the validated published manifest.
 
