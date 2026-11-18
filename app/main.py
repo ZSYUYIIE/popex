@@ -1506,8 +1506,10 @@ def create_app(
             )
 
         def transcribe(job_id: str, force: bool) -> StepResult:
-            status_value = record_of(job_id).get("transcription_status")
-            if status_value == "completed" and not force:
+            record = record_of(job_id)
+            status_value = record.get("transcription_status")
+            audio_exists = (app_settings.exports_dir / job_id / "analysis.wav").is_file()
+            if status_value == "completed" and not force and not (audio_exists and _transcription_out_of_date(record)):
                 return StepResult("reused")
             if not db.claim_transcription_attempt(
                 database,
@@ -1522,8 +1524,9 @@ def create_app(
             return StepResult("failed", "Note and drum detection did not finish.")
 
         def interpret(job_id: str, force: bool) -> StepResult:
-            status_value = record_of(job_id).get("interpretation_status")
-            if status_value == "completed" and not force:
+            record = record_of(job_id)
+            status_value = record.get("interpretation_status")
+            if status_value == "completed" and not force and not _interpretation_out_of_date(record):
                 return StepResult("reused")
             if not db.claim_interpretation_attempt(
                 database,
@@ -1540,6 +1543,8 @@ def create_app(
         def harmonize(job_id: str, force: bool) -> StepResult:
             record = record_of(job_id)
             status_value = record.get("harmony_status")
+            if status_value == "completed" and _harmony_out_of_date(record):
+                force = True
             if status_value == "completed" and not force:
                 heard = None
                 try:
@@ -3077,6 +3082,28 @@ def _serialize_job(
         if draft is not None:
             payload["draft"] = draft
     return payload
+
+
+def _later(first: Any, second: Any) -> bool:
+    """True when ISO timestamp ``first`` is later than ``second``."""
+    return isinstance(first, str) and isinstance(second, str) and first > second
+
+
+def _transcription_out_of_date(record: Mapping[str, Any]) -> bool:
+    """Saved notes come from an older detector, or stems arrived after them."""
+    return record.get("transcription_version") != TRANSCRIPTION_VERSION or (
+        record.get("separation_status") == "completed"
+        and _later(record.get("separated_at"), record.get("transcribed_at"))
+    )
+
+
+def _interpretation_out_of_date(record: Mapping[str, Any]) -> bool:
+    return _later(record.get("transcribed_at"), record.get("interpreted_at"))
+
+
+def _harmony_out_of_date(record: Mapping[str, Any]) -> bool:
+    source = record.get("harmony_source_transcribed_at")
+    return isinstance(source, str) and source != record.get("transcribed_at")
 
 
 _DRAFT_STAGE_FIELDS = (
