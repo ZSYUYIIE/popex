@@ -34,3 +34,10 @@ button:disabled { cursor: wait; opacity: .65; }
 footer { padding-block: 1.5rem; border-top: 1px solid #87968d; font-size: .9rem; }
 @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } #notation-scroll { forced-color-adjust: none; background: white; color: black; } input, select, button { border-color: ButtonText; } }
 @media print { form, nav, .skip, footer, #notation-retry, .notation-review { display: none; } body { padding: 0; } #notation-scroll { overflow: visible; border: 0; } }
+
+#notation-sections h2 { font-size: 1rem; margin: 1rem 0 0.25rem; }
+#notation-sections p { margin: 0 0 0.5rem; }
+#notation-section-list { display: flex; flex-wrap: wrap; gap: 0.5rem; list-style: none; margin: 0; padding: 0; }
+.notation-section { font: inherit; padding: 0.35rem 0.75rem; border-radius: 999px; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; }
+.notation-section:focus-visible { outline: 3px solid #f2a33a; outline-offset: 2px; }
+.notation-section:hover { background: rgba(127, 127, 127, 0.15); }

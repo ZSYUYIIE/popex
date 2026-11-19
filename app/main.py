@@ -116,6 +116,7 @@ from app.score_pipeline import (
     score_export_document,
     score_outdated_reason,
 )
+from app.song_sections import public_sections
 from app.library import (
     VERSION_KINDS,
     LibraryError,
@@ -4083,6 +4084,12 @@ def _saved_score_payload(
             "This score was built with one constant tempo, so its bar lines can "
             "drift away from the recording; rebuild it so bars follow the tracked beats.",
         )
+    elif outdated == "sections":
+        warnings.insert(
+            0,
+            "This score was built before song sections were available; draft it "
+            "again to mark where the sections change and which ones repeat.",
+        )
     if evidence_changed:
         warnings.insert(
             0,
@@ -4104,6 +4111,7 @@ def _saved_score_payload(
         "tablature": document.get("tablature"),
         "tonality": document.get("tonality"),
         "scoreParts": document.get("scoreParts"),
+        "sections": public_sections(document),
         "exportParts": _export_parts(job_id, document),
         "counts": document["counts"],
         "warnings": warnings,

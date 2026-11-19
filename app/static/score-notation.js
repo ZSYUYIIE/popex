@@ -91,7 +91,17 @@
     const partExists = Array.from(part.options).some(option => option.value === selection);
     part.value = partExists ? selection : "";
     from.max = through.max = String(saved.counts.measures);
-    if (!initialized) { through.value = String(Math.min(128, saved.counts.measures)); initialized = true; }
+    if (!initialized) {
+      through.value = String(Math.min(128, saved.counts.measures));
+      const asked = /^(\d{1,5})-(\d{1,5})$/.exec(new URLSearchParams(location.search).get("bars") || "");
+      if (asked) {
+        const first = Math.max(1, Math.min(Number(asked[1]), saved.counts.measures));
+        const last = Math.max(first, Math.min(Number(asked[2]), saved.counts.measures, first + 127));
+        from.value = String(first); through.value = String(last);
+      }
+      initialized = true;
+    }
+    showSections(saved.sections);
     const warnings = $("notation-warning-list");
     warnings.replaceChildren();
     const messages = Array.isArray(saved.warnings) ? saved.warnings.slice(0, 32).map(value => text(value)).filter(Boolean) : [];
@@ -100,6 +110,31 @@
     $("notation-warnings").hidden = messages.length === 0;
     updateDownloads();
     if (!partExists) throw new Error("That part no longer exists in this view. Choose an available part or the full score, then render again.");
+  }
+  function showSections(value) {
+    const nav = $("notation-sections"), list = $("notation-section-list");
+    list.replaceChildren();
+    const items = value && Array.isArray(value.sections) ? value.sections.slice(0, 64) : [];
+    $("notation-sections-note").textContent = value ? text(value.explanation) : "";
+    for (const item of items) {
+      if (!item || !/^(?:[A-Z]|Z\d{1,2})$/.test(item.label) || !Number.isInteger(item.startMeasure) || !Number.isInteger(item.endMeasure)) continue;
+      const first = item.startMeasure + 1, last = Math.min(item.endMeasure, first + 127);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "notation-section";
+      button.dataset.label = item.label.slice(0, 1);
+      const heard = text(item.heardText);
+      button.textContent = `${item.label} · bars ${first}-${item.endMeasure}${heard ? " · " + heard : ""}`;
+      button.addEventListener("click", () => {
+        if (busy) return;
+        from.value = String(first); through.value = String(last);
+        form.requestSubmit();
+      });
+      const entry = document.createElement("li");
+      entry.append(button);
+      list.append(entry);
+    }
+    nav.hidden = list.children.length === 0;
   }
   async function reload() {
     if (busy || !match) return;
@@ -153,7 +188,7 @@
         }
       }
       const label = part.options[part.selectedIndex]?.textContent || "Full score";
-      $("notation-rendered").textContent = `${label} · ${view.value === "original" ? "original prediction" : "with corrections"} · bars ${start}–${end} of ${details.counts.measures} · correction revision ${details.corrections?.revision ?? 0}`;
+      $("notation-rendered").textContent = `${label} · ${view.value === "original" ? "original prediction" : "with corrections"} · bars ${start}-${end} of ${details.counts.measures} · correction revision ${details.corrections?.revision ?? 0}`;
       status("Notation rendered locally. Review the transcription warnings and check it by ear.");
     } catch (error) {
       stage.remove();

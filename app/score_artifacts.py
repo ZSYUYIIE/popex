@@ -34,6 +34,7 @@ from uuid import uuid4
 
 from app.beat_grid import BAR_PHASE_SOURCES, GRID_MODES
 from app.config import Settings
+from app.song_sections import SectionError, validate_sections
 from app.score_construction import (
     PERCUSSION_NOTATION,
     UNRESOLVED_PERCUSSION_VOICE,
@@ -49,8 +50,8 @@ from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_sig
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
 # schema 4 the modal tonal context; earlier documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 6
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6})
+SCORE_ARTIFACT_SCHEMA_VERSION = 7
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -92,6 +93,7 @@ _TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"percussion"}
 _TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {"tablature"}
 _TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V3 | {"tonality"}
 _TOP_LEVEL_KEYS_V5 = _TOP_LEVEL_KEYS_V4 | {"scoreParts"}
+_TOP_LEVEL_KEYS_V7 = _TOP_LEVEL_KEYS_V5 | {"sections"}
 _CANDIDATE_KEYS = frozenset(
     {"tonalCenter", "rootPitchClass", "collection", "displayName", "score", "confidence"}
 )
@@ -789,6 +791,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             4: _TOP_LEVEL_KEYS_V4,
             5: _TOP_LEVEL_KEYS_V5,
             6: _TOP_LEVEL_KEYS_V5,
+            7: _TOP_LEVEL_KEYS_V7,
         }[schema_version],
         "score document",
     )
@@ -818,6 +821,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         4: _COUNT_KEYS_V3,
         5: _COUNT_KEYS_V3,
         6: _COUNT_KEYS_V3,
+        7: _COUNT_KEYS_V3,
     }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
@@ -853,6 +857,11 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         ]
         if document["scoreParts"] != plan_score_parts(untabbed):
             raise _fail("scoreParts does not match the notes' source lines.")
+    if schema_version >= 7:
+        try:
+            validate_sections(document["sections"], len(document["measures"]))
+        except SectionError as exc:
+            raise _fail(str(exc)) from None
     if counts["unresolvedHarmonyWindows"] > counts["harmonyWindows"]:
         raise _fail("counts.unresolvedHarmonyWindows is inconsistent.")
     if layers["chordSymbols"] == "omitted" and (

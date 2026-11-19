@@ -144,7 +144,28 @@ def version_summary(
             "tonalContext": _tonal_summary(document.get("tonality")),
             "chordsUsed": chords[:_MAX_CHORDS_LISTED],
             "chordsTruncated": len(chords) > _MAX_CHORDS_LISTED,
+            "sections": _section_summary(document),
         },
+    }
+
+
+def _section_summary(document: Mapping[str, Any]) -> dict[str, Any] | None:
+    """This version's own song sections, compact, for side-by-side form."""
+    from app.song_sections import public_sections
+
+    try:
+        value = public_sections(document)
+    except (KeyError, IndexError, TypeError):
+        return None
+    if value is None:
+        return None
+    return {
+        "form": " ".join(item["label"] for item in value["sections"]) or None,
+        "note": value["note"],
+        "sections": [
+            {key: item[key] for key in ("label", "startMeasure", "endMeasure", "bars", "startSeconds", "heardText")}
+            for item in value["sections"]
+        ],
     }
 
 

@@ -41,7 +41,7 @@ global.clearTimeout = () => {{}};
 const source = fs.readFileSync({app_path}, "utf8").replace("updateFilePresentation();loadJobs();","") + `
 ;globalThis.__popexScoreTest={{
   renderScore, renderJob, deriveState, loadJobs, hydrateCompletedScores,
-  invalidateStaleScoreDetails, renderJobDetails, renderDraftDownloads, showIngestionProgress,
+  invalidateStaleScoreDetails, renderJobDetails, renderDraftDownloads, showIngestionProgress, renderSectionStrip,
   setDetail:(id,value)=>scoreCache.set(id,value),
   hasDetail:(id)=>scoreCache.has(id),
   getDetail:(id)=>scoreCache.get(id),
@@ -542,3 +542,47 @@ def test_theme_picker_and_assets_are_wired() -> None:
     assert (ROOT / "app" / "static" / "fonts" / "LICENSE-BricolageGrotesque-OFL.txt").is_file()
     visible = template + (ROOT / "app" / "static" / "app.js").read_text(encoding="utf-8")
     assert "\u2014" not in visible and "\u2013" not in visible  # no em or en dashes in UI copy
+
+
+SECTIONS = {
+    "version": "bar-sections-v1",
+    "note": None,
+    "explanation": "Letters mark bars that sound alike; they are not verse or chorus names.",
+    "sections": [
+        {"label": "A", "startMeasure": 0, "endMeasure": 4, "bars": 4, "startSeconds": 0.0,
+         "endSeconds": 6.0, "heard": ["drums"], "heardText": "drums only", "boundaryStrength": 1.0},
+        {"label": "B", "startMeasure": 4, "endMeasure": 20, "bars": 16, "startSeconds": 6.0,
+         "endSeconds": 30.0, "heard": None, "heardText": None, "boundaryStrength": 0.7},
+        {"label": "A", "startMeasure": 20, "endMeasure": 24, "bars": 4, "startSeconds": 30.0,
+         "endSeconds": 36.0, "heard": ["drums"], "heardText": "drums <b>", "boundaryStrength": 0.5},
+        {"label": "<x>", "startMeasure": 24, "endMeasure": 28, "bars": 4, "startSeconds": 36.0,
+         "endSeconds": 42.0, "heard": None, "heardText": None, "boundaryStrength": 0.5},
+    ],
+}
+
+
+def test_section_strip_links_each_section_to_its_bars() -> None:
+    result = _run_node(
+        f"""
+t.setDetail("done", {{sections: {json.dumps(SECTIONS)}}});
+t.setDetail("short", {{sections: {{version: "bar-sections-v1", sections: [], note: "Sections need at least 16 bars; this score is shorter.", explanation: "x"}}}});
+t.setDetail("old", {{}});
+console.log(JSON.stringify({{
+  html: t.renderSectionStrip({{id: "done"}}),
+  short: t.renderSectionStrip({{id: "short"}}),
+  old: t.renderSectionStrip({{id: "old"}}),
+  missing: t.renderSectionStrip({{id: "nothing"}})
+}}));
+"""
+    )
+    html = result["html"]
+    assert '<h4 id="sections-done">Song sections</h4>' in html
+    assert '<ol aria-labelledby="sections-done">' in html
+    assert 'href="/jobs/done/notation?bars=1-4"' in html
+    assert 'href="/jobs/done/notation?bars=5-20"' in html and 'style="flex-grow:16"' in html
+    assert 'aria-label="Section A (again, time 2), bars 21 to 24, from 0:30, drums &lt;b&gt;"' in html
+    assert "drums only" in html and "<b>" not in html
+    assert "&lt;x&gt;" not in html and "bars=25-28" not in html
+    assert "they are not verse or chorus names" in html
+    assert "Sections need at least 16 bars" in result["short"]
+    assert result["old"] == "" and result["missing"] == ""

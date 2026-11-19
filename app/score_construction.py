@@ -1313,6 +1313,19 @@ def _musicxml_percussion_part(
             _append_forward(measure_el, bar_ticks)
 
 
+def _section_rehearsals(value: Any, measure_count: int) -> dict[int, str]:
+    """Bar index -> section letter for a validated section summary, or nothing."""
+    if not value:
+        return {}
+    from app.song_sections import SectionError, validate_sections
+
+    try:
+        sections = validate_sections(value, measure_count)["sections"]
+    except SectionError as exc:
+        raise ScoreConstructionError("Score sections are invalid.") from exc
+    return {item["startMeasure"]: item["label"] for item in sections}
+
+
 def _append_directions(
     measure_el: ET.Element,
     measure: Mapping[str, Any],
@@ -1327,6 +1340,12 @@ def _append_directions(
         ET.SubElement(metronome, "beat-unit").text = "quarter"
         ET.SubElement(metronome, "per-minute").text = f"{tempo:.6g}"
         ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
+    rehearsal = measure.get("rehearsal")
+    if rehearsal is not None:
+        direction = ET.SubElement(measure_el, "direction", placement="above")
+        ET.SubElement(
+            ET.SubElement(direction, "direction-type"), "rehearsal", enclosure="square"
+        ).text = rehearsal
     chord = measure.get("chordSymbol")
     if chord is not None:
         parsed = parse_chord_symbol(chord)
@@ -1497,6 +1516,7 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
     if document.get("divisions") != _DIVISIONS:
         raise ScoreConstructionError("Unsupported score divisions.")
     key = _parse_key_signature(document.get("keySignature"))
+    rehearsals = _section_rehearsals(document.get("sections"), measure_count)
 
     all_notes: list[dict[str, Any]] = []
     event_ids: set[str] = set()
@@ -1516,7 +1536,8 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
         )
         if measure_index != position:
             raise ScoreConstructionError("Score measure index is inconsistent.")
-        validated_measures.append(measure)
+        label = rehearsals.get(position)
+        validated_measures.append({**measure, "rehearsal": label} if label else measure)
         drum_hits_by_measure.append(
             _notated_percussion_hits(
                 measure,
