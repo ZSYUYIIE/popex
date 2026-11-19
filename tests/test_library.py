@@ -470,3 +470,35 @@ console.log(JSON.stringify({{all,form,searched,none}}));
     assert 'data-action="file-library" data-job-id="job2" data-url="/api/jobs/job2/library"' in form
     assert "Midnight Train" in result["searched"] and "Other Song" not in result["searched"]
     assert "No song or version matches “nothing here”." in result["none"]
+
+
+def test_new_recordings_can_be_filed_while_adding() -> None:
+    library = {
+        "versionKinds": [{"id": "studio", "label": "Studio"}, {"id": "live", "label": "Live"}],
+        "compositions": [{"id": "a" * 32, "title": "Midnight <Train>", "credits": None, "arrangements": []}],
+        "unassigned": [],
+    }
+    filed = {"createdSong": False, "songId": "a" * 32, "library": library}
+    result = _run_node(
+        f"""
+const calls=[];
+t.setFetch(async (url, options) => {{calls.push([url, options && options.body ? JSON.parse(options.body) : null]);
+  return {{ok:true,status:200,json:async()=>(url.includes("/library")&&options&&options.method==="POST"?{json.dumps(filed)}:{json.dumps(library)})}};}});
+await loadLibrary();
+const kinds=t.getElement("#add-kind").innerHTML, songs=t.getElement("#add-song-list").innerHTML;
+const empty=await fileNewRecording({{id:"job9"}});
+t.getElement("#add-song").value="  Midnight Train ";
+t.getElement("#add-kind").value="live";
+t.getElement("#add-label").value="Live at the Hall";
+const message=await fileNewRecording({{id:"job9"}});
+console.log(JSON.stringify({{kinds,songs,empty,message,calls,cleared:t.getElement("#add-song").value}}));
+"""
+    )
+    assert '<option value="live">Live</option>' in result["kinds"]
+    assert '<option value="Midnight &lt;Train&gt;"></option>' in result["songs"]
+    assert result["empty"] == ""
+    posted = [call for call in result["calls"] if call[1] is not None]
+    assert posted == [["/api/jobs/job9/library",
+                       {"title": "Midnight Train", "credits": None, "kind": "live", "label": "Live at the Hall"}]]
+    assert result["message"] == " Filed in your library beside the other versions of “Midnight Train”."
+    assert result["cleared"] == ""

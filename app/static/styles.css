@@ -1774,3 +1774,17 @@ form > *, .drop-zone > * {
     gap: 0.25rem;
   }
 }
+
+.add-filing {
+  margin-top: 1rem;
+}
+
+.add-filing summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.add-filing summary:focus-visible {
+  outline: 3px solid var(--accent, #ff6a3d);
+  outline-offset: 3px;
+}
