@@ -222,6 +222,14 @@ def public_sections(document: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def score_section_form(document: Mapping[str, Any]) -> str | None:
+    """The section letters of a score in order, e.g. ``"A B C B"``, or ``None``."""
+    value = document.get("sections")
+    if not isinstance(value, Mapping) or not value.get("sections"):
+        return None
+    return " ".join(item["label"] for item in value["sections"])[:400]
+
+
 def section_note(note: str) -> dict[str, Any]:
     """A section summary that explains why there are no sections."""
     return {"version": SECTIONS_VERSION, "sections": [], "note": note}

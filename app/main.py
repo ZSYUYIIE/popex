@@ -116,7 +116,8 @@ from app.score_pipeline import (
     score_export_document,
     score_outdated_reason,
 )
-from app.song_sections import public_sections
+from app.song_sections import public_sections, score_section_form
+from app.tonal_context import score_key_name
 from app.library import (
     VERSION_KINDS,
     LibraryError,
@@ -126,6 +127,8 @@ from app.library import (
     clean_version,
     compare_versions,
     is_library_id,
+    song_key,
+    suggest_filing,
     version_summary,
 )
 from app.score_corrections import (
@@ -305,6 +308,8 @@ _INTERNAL_SCORE_FIELDS = frozenset(
         "score_chord_symbol_count",
         "score_warning_count",
         "score_error",
+        "score_key_name",
+        "score_section_form",
         "score_tablature_request",
     }
 )
@@ -379,6 +384,15 @@ class JobVersionRequest(BaseModel):
     arrangementId: str | None
     label: str | None = None
     kind: str | None = None
+
+
+class LibraryFileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    credits: str | None = None
+    kind: str | None = None
+    label: str | None = None
 
 
 class TablatureChoiceRequest(BaseModel):
@@ -671,18 +685,39 @@ def create_app(
         snapshot = db.library_snapshot(app_settings.database_path)
         versions: dict[str, list[dict[str, Any]]] = {}
         unassigned = []
+        songs = [{"id": item["id"], "title": item["title"]} for item in snapshot["compositions"]]
         for recording in snapshot["recordings"]:
+            job_id = recording["id"]
+            scored = (
+                recording["score_status"] == "completed"
+                and is_score_artifact_file_name(recording["score_artifact_file_name"])
+            )
             entry = {
-                "jobId": recording["id"],
+                "jobId": job_id,
                 "title": recording["title"] or recording["original_filename"] or "Untitled recording",
                 "label": recording["version_label"],
                 "kind": recording["version_kind"],
                 "scoreStatus": recording["score_status"] or "not_started",
                 "createdAt": recording["created_at"],
+                "durationSeconds": recording["duration_seconds"],
+                "tempoBpm": recording["tempo_bpm"],
+                "keySymbol": recording["score_key_name"] if scored and recording["score_key_name"] else recording["key_symbol"],
+                "keySource": "score" if scored and recording["score_key_name"] else ("analysis" if recording["key_symbol"] else None),
+                "sectionForm": recording["score_section_form"] if scored else None,
+                "bars": recording["score_measure_count"] if scored else None,
+                "notationUrl": f"/jobs/{job_id}/notation" if scored else None,
+                "downloadUrls": {
+                    name: f"/api/jobs/{job_id}/score/saved/download?format={name}"
+                    for name in ("musicxml", "midi")
+                }
+                if scored
+                else None,
             }
             if recording["arrangement_id"]:
                 versions.setdefault(recording["arrangement_id"], []).append(entry)
             else:
+                entry["suggestion"] = suggest_filing(entry["title"], songs)
+                entry["fileUrl"] = f"/api/jobs/{job_id}/library"
                 unassigned.append(entry)
         arrangements: dict[str, list[dict[str, Any]]] = {}
         for arrangement in snapshot["arrangements"]:
@@ -821,6 +856,63 @@ def create_app(
         if outcome == "missing_arrangement":
             raise HTTPException(status_code=422, detail="The arrangement does not exist.")
         return serialize_job(db.get_job(app_settings.database_path, job_id) or {})
+
+    @app.post("/api/jobs/{job_id}/library")
+    def file_job_in_library(job_id: str, payload: LibraryFileRequest) -> dict:
+        """File a recording under a song in one step.
+
+        A song whose title matches loosely (case, spacing, punctuation and a
+        leading article ignored) is reused, with its first arrangement;
+        otherwise a new song with a "Main arrangement" is created.
+        """
+        if db.get_job(app_settings.database_path, job_id) is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        try:
+            title = clean_title(payload.title)
+            credits = clean_credits(payload.credits)
+            label, kind = clean_version(payload.label, payload.kind)
+        except LibraryError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        snapshot = db.library_snapshot(app_settings.database_path)
+        key = song_key(title)
+        song = next(
+            (item for item in snapshot["compositions"] if key and song_key(item["title"]) == key),
+            None,
+        )
+        created = song is None
+        if song is None:
+            composition_id, arrangement_id = db.create_composition(
+                app_settings.database_path,
+                title=title,
+                credits=credits,
+                arrangement_name="Main arrangement",
+            )
+        else:
+            composition_id = song["id"]
+            arrangement_id = next(
+                (item["id"] for item in snapshot["arrangements"] if item["composition_id"] == composition_id),
+                None,
+            ) or db.create_arrangement(
+                app_settings.database_path, composition_id, name="Main arrangement"
+            )
+        outcome = db.set_job_version(
+            app_settings.database_path,
+            job_id,
+            arrangement_id=arrangement_id,
+            label=label,
+            kind=kind,
+        )
+        if outcome == "missing_job":
+            raise HTTPException(status_code=404, detail="Job not found")
+        if outcome == "missing_arrangement":
+            raise HTTPException(status_code=409, detail="The song changed while filing; try again.")
+        return {
+            "songId": composition_id,
+            "arrangementId": arrangement_id,
+            "createdSong": created,
+            "job": serialize_job(db.get_job(app_settings.database_path, job_id) or {}),
+            "library": _library_payload(),
+        }
 
     @app.get("/api/compositions/{composition_id}/comparison")
     def compare_composition(composition_id: str) -> dict:
@@ -3775,6 +3867,8 @@ def _run_score_job(
             note_count=result.note_count,
             chord_symbol_count=result.chord_symbol_count,
             warning_count=result.warning_count,
+            key_name=score_key_name(result.payload),
+            section_form=score_section_form(result.payload),
         )
     except (ValueError, sqlite3.Error):
         logging.exception("Score completion failed for job %s", job_id)

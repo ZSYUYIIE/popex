@@ -109,7 +109,7 @@
       <div class="section-heading">
         <div>
           <h2 id="library-title">Song library</h2>
-          <p>File versions of one song together and compare them. Each keeps its own analysis, score, and corrections.</p>
+          <p>Every version of a song in one place: open its notation, download it, or compare versions side by side. Each keeps its own analysis, score, and corrections.</p>
         </div>
       </div>
       <form id="song-form" class="panel song-form" aria-describedby="song-message">
@@ -121,6 +121,7 @@
         <button id="song-button" type="submit">Add song</button>
         <p id="song-message" class="form-message" role="status" aria-live="polite"></p>
       </form>
+      <div class="library-search"><label for="library-search">Find a song or version</label><input id="library-search" type="search" maxlength="120" autocomplete="off" placeholder="Title, artist, live, acoustic…"></div>
       <div id="library" class="library"><p class="detail-note">Loading the song library…</p></div>
     </section>
 

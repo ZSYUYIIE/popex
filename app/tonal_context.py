@@ -445,3 +445,16 @@ __all__ = [
     "key_signature",
     "root_name",
 ]
+
+
+def score_key_name(document: Mapping[str, Any]) -> str | None:
+    """The score's suggested key in words (for example "G Ionian (major)"), or ``None``.
+
+    Only a candidate confident enough to set the key signature is named.
+    """
+    tonality = document.get("tonality")
+    if not isinstance(tonality, Mapping) or tonality.get("keySignature") is None:
+        return None
+    primary = tonality.get("primaryCandidate")
+    name = primary.get("displayName") if isinstance(primary, Mapping) else None
+    return name[:64] if isinstance(name, str) and name else None
