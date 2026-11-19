@@ -909,10 +909,13 @@ def _musicxml_note(
     staff: int = 1,
     technical: tuple[int, int] | None = None,
     key: Mapping[str, Any] | None = None,
+    chord: bool = False,
 ) -> None:
     step, alter = _spell(midi_note, key)
     # B# / Cb never arise from these spellings, so the octave is unchanged.
     note_el = ET.SubElement(measure, "note")
+    if chord:
+        ET.SubElement(note_el, "chord")
     pitch_el = ET.SubElement(note_el, "pitch")
     ET.SubElement(pitch_el, "step").text = step
     if alter:
@@ -1005,7 +1008,12 @@ def _parse_note_tab(value: Any, midi_note: int) -> dict[str, Any] | None:
 
 
 def _voice_lanes(notes: Sequence[Mapping[str, Any]], first_voice: int) -> tuple[dict[str, int], int]:
-    """Keep source kinds in separate voices and split overlaps into more voices."""
+    """Keep source kinds in separate voices and split overlaps into more voices.
+
+    Notes of one source that start and end at the same time are one chord, so
+    they share a voice; only notes that overlap with different timing need
+    another voice.
+    """
     voice_by_id: dict[str, int] = {}
     next_voice = first_voice
     for source_kind in sorted({note["sourceKind"] for note in notes}):
@@ -1013,19 +1021,23 @@ def _voice_lanes(notes: Sequence[Mapping[str, Any]], first_voice: int) -> tuple[
             (note for note in notes if note["sourceKind"] == source_kind),
             key=lambda item: (item["quantizedBeat"], item["quantizedEndBeat"], item["id"]),
         )
-        lane_ends: list[float] = []
+        # Per lane: (start, end) of the chord it is holding.
+        lanes: list[tuple[float, float]] = []
         for note in source_notes:
-            lane = next(
-                (index for index, lane_end in enumerate(lane_ends) if lane_end <= note["quantizedBeat"]),
-                None,
-            )
+            span = (note["quantizedBeat"], note["quantizedEndBeat"])
+            lane = next((index for index, held in enumerate(lanes) if held == span), None)
             if lane is None:
-                lane = len(lane_ends)
-                lane_ends.append(note["quantizedEndBeat"])
+                lane = next(
+                    (index for index, held in enumerate(lanes) if held[1] <= span[0]),
+                    None,
+                )
+            if lane is None:
+                lane = len(lanes)
+                lanes.append(span)
             else:
-                lane_ends[lane] = note["quantizedEndBeat"]
+                lanes[lane] = span
             voice_by_id[note["id"]] = next_voice + lane
-        next_voice += len(lane_ends)
+        next_voice += len(lanes)
     return voice_by_id, next_voice
 
 
@@ -1085,14 +1097,20 @@ def _write_measure_voices(
         if index:
             ET.SubElement(ET.SubElement(measure_el, "backup"), "duration").text = str(bar_ticks)
         cursor_ticks = 0
+        previous: tuple[int, int] | None = None
         for fragment in sorted(
-            fragments, key=lambda item: (item["localStartBeat"], item["localEndBeat"], item["id"])
+            fragments,
+            key=lambda item: (
+                item["localStartBeat"], item["localEndBeat"], item["midiNote"], item["id"]
+            ),
         ):
             start_ticks = int(round(fragment["localStartBeat"] * _DIVISIONS))
             end_ticks = int(round(fragment["localEndBeat"] * _DIVISIONS))
-            if start_ticks < cursor_ticks or end_ticks <= start_ticks:
+            chord = previous == (start_ticks, end_ticks)
+            if not chord and (start_ticks < cursor_ticks or end_ticks <= start_ticks):
                 raise ScoreConstructionError("Overlapping score notes share a MusicXML voice.")
-            _append_forward(measure_el, start_ticks - cursor_ticks)
+            if not chord:
+                _append_forward(measure_el, start_ticks - cursor_ticks)
             tab = fragment.get("tab")
             _musicxml_note(
                 measure_el,
@@ -1104,7 +1122,9 @@ def _write_measure_voices(
                 staff=staff,
                 technical=(tab["string"], tab["fret"]) if with_tab else None,
                 key=key,
+                chord=chord,
             )
+            previous = (start_ticks, end_ticks)
             cursor_ticks = end_ticks
         _append_forward(measure_el, bar_ticks - cursor_ticks)
 

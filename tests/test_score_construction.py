@@ -503,3 +503,56 @@ def test_midi_of_an_empty_score_is_a_valid_conductor_track() -> None:
 
     midi = read_midi(score_to_midi_bytes(build_score_document([], tempo_bpm=120.0)))
     assert len(midi.tracks) == 1 and midi.tracks[0].end_tick == 4 * 480
+
+
+def test_musicxml_writes_notes_that_start_and_end_together_as_one_chord() -> None:
+    document = build_score_document(
+        [
+            _note("c", 0.0, 1.0, 64),
+            _note("e", 0.0, 1.0, 60),
+            _note("g", 0.0, 1.0, 67),
+            _note("held", 0.0, 2.0, 72),  # same start, longer: needs its own voice
+            _note("next", 1.0, 1.5, 62),
+        ],
+        tempo_bpm=120.0,
+    )
+    measure = ET.fromstring(score_to_musicxml_text(document)).find("part/measure")
+    notes = measure.findall("note")
+    written = [
+        (n.findtext("voice"), n.find("chord") is not None, n.findtext("pitch/step") + n.findtext("pitch/octave"),
+         n.findtext("duration"))
+        for n in notes
+    ]
+    # The triad is one chord in voice 1, written lowest note first; the
+    # following note continues the same voice; the held C5 gets voice 2.
+    assert written == [
+        ("1", False, "C4", "960"),
+        ("1", True, "E4", "960"),
+        ("1", True, "G4", "960"),
+        ("1", False, "D4", "480"),
+        ("2", False, "C5", "1920"),
+    ]
+    # <chord/> is the first child, as MusicXML requires.
+    assert [child.tag for child in notes[1]][:2] == ["chord", "pitch"]
+
+
+def test_chords_tie_across_bar_lines_note_by_note() -> None:
+    document = build_score_document(
+        [_note("low", 1.5, 2.5, 60), _note("high", 1.5, 2.5, 64)], tempo_bpm=120.0
+    )
+    measures = ET.fromstring(score_to_musicxml_text(document)).findall("part/measure")
+    for measure, tie in zip(measures, ("start", "stop")):
+        notes = [n for n in measure.findall("note") if n.find("pitch") is not None]
+        assert [n.find("chord") is not None for n in notes] == [False, True]
+        assert {n.findtext("voice") for n in notes} == {"1"}
+        assert all(n.find(f"tie[@type='{tie}']") is not None for n in notes)
+
+
+def test_different_sources_never_share_a_chord() -> None:
+    document = build_score_document(
+        [_note("v", 0.0, 1.0, 64, source_kind="vocals"), _note("o", 0.0, 1.0, 60, source_kind="other")],
+        tempo_bpm=120.0,
+    )
+    notes = ET.fromstring(score_to_musicxml_text(document)).findall("part/measure/note")
+    assert all(n.find("chord") is None for n in notes)
+    assert len({n.findtext("voice") for n in notes}) == 2
