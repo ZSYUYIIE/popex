@@ -39,6 +39,23 @@ class SectionError(ValueError):
     """Section evidence or a saved section summary is invalid."""
 
 
+MAX_SECTION_NAME = 40
+
+
+def clean_section_name(value: Any) -> str | None:
+    """A musician's section name: one line, 1-40 characters, or ``None`` to clear."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise SectionError("A section name must be text.")
+    text = " ".join(value.split())
+    if not text:
+        return None
+    if len(text) > MAX_SECTION_NAME or any(ord(c) < 32 or c in "<>" for c in text):
+        raise SectionError(f"A section name is one line of at most {MAX_SECTION_NAME} characters.")
+    return text
+
+
 def bar_features(
     bar_spans: Sequence[tuple[float, float]],
     *,
@@ -209,6 +226,7 @@ def public_sections(document: Mapping[str, Any]) -> dict[str, Any] | None:
                 "endSeconds": round(float(last["endSeconds"]), 3),
                 "heard": item["heard"],
                 "heardText": describe_heard(item["heard"]),
+                "name": item.get("name"),
                 "boundaryStrength": item["boundaryStrength"],
             }
         )
@@ -217,7 +235,8 @@ def public_sections(document: Mapping[str, Any]) -> dict[str, Any] | None:
         "note": value["note"],
         "sections": items,
         "explanation": (
-            "Letters mark bars that sound alike; they are not verse or chorus names."
+            "Letters mark bars that sound alike; they are not verse or chorus names. "
+            "Name a section yourself to label it."
         ),
     }
 
@@ -269,10 +288,13 @@ def validate_sections(value: Any, measure_count: int) -> dict[str, Any]:
         raise SectionError("Sections carry either sections or a note.")
     cursor = 0
     for index, item in enumerate(items):
-        if not isinstance(item, Mapping) or set(item) != {
+        keys = set(item) if isinstance(item, Mapping) else set()
+        if not isinstance(item, Mapping) or keys - {"name"} != {
             "startMeasure", "endMeasure", "label", "boundaryStrength", "heard"
         }:
             raise SectionError(f"sections[{index}] is malformed.")
+        if "name" in item and (item["name"] is None or clean_section_name(item["name"]) != item["name"]):
+            raise SectionError(f"sections[{index}].name is invalid.")
         start, end = item["startMeasure"], item["endMeasure"]
         if any(type(x) is not int for x in (start, end)) or start != cursor or end <= start:
             raise SectionError(f"sections[{index}] does not follow the previous section.")

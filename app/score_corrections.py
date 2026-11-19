@@ -41,6 +41,7 @@ from app.score_construction import (
     percussion_hit_counts,
     plan_score_parts,
 )
+from app.song_sections import SectionError, clean_section_name
 from app.tablature import TAB_INSTRUMENTS, positions_for, tab_position_is_consistent
 
 CORRECTIONS_SCHEMA_VERSION = 1
@@ -51,7 +52,7 @@ _EVENT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 _CHORD_TEXT = re.compile(r"[A-Za-z0-9#♯♭b/+()°ø△ ,.-]{1,32}")
 _STEP_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 OPERATION_KINDS = frozenset(
-    {"set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "set_hit_timing", "delete_hit", "reset_all"}
+    {"set_pitch", "delete_note", "set_note_timing", "set_tab", "set_chord", "set_drum_voice", "set_hit_timing", "delete_hit", "set_section_name", "reset_all"}
 )
 
 
@@ -105,6 +106,7 @@ def validate_operation(value: Any) -> dict[str, Any]:
         "set_drum_voice": {"op", "target", "broadVoice"},
         "set_hit_timing": {"op", "target", "measureIndex", "beat"},
         "delete_hit": {"op", "target"},
+        "set_section_name": {"op", "target", "name"},
         "reset_all": {"op"},
     }[kind]
     if set(value) != allowed:
@@ -122,6 +124,16 @@ def validate_operation(value: Any) -> dict[str, Any]:
     elif kind == "set_chord":
         target = _target(value["target"], frozenset({"measureIndex"}))
         operation["target"] = {"measureIndex": _int(target["measureIndex"], "measureIndex", 0, 2047)}
+    elif kind == "set_section_name":
+        target = _target(value["target"], frozenset({"startMeasure"}))
+        operation["target"] = {"startMeasure": _int(target["startMeasure"], "startMeasure", 0, 2047)}
+        try:
+            name = clean_section_name(value["name"])
+        except SectionError as exc:
+            raise CorrectionError(str(exc)) from None
+        if value["name"] is not None and name != value["name"]:
+            raise CorrectionError("Send the section name without extra spaces.")
+        operation["name"] = name
     if kind == "set_pitch":
         operation["midiNote"] = _int(value["midiNote"], "midiNote", 12, 127)
     elif kind == "set_note_timing":
@@ -260,8 +272,13 @@ def apply_corrections(
         "hitTiming": {},
         "deletedNotes": [],
         "deletedHits": [],
+        "sections": {},
     }
     edited_hits: set[tuple[str, int]] = set()
+    section_items = {
+        item["startMeasure"]: item
+        for item in ((corrected.get("sections") or {}).get("sections") or ())
+    }
 
     def skip(operation: Mapping[str, Any], reason: str) -> None:
         report["notApplicable"].append({"id": operation["id"], "op": operation["op"], "reason": reason})
@@ -346,6 +363,16 @@ def apply_corrections(
                     "string": operation["string"],
                     "fret": operation["fret"],
                 }
+        elif kind == "set_section_name":
+            item = section_items.get(target["startMeasure"])
+            if item is None:
+                skip(operation, "No section starts at that bar in this score.")
+                continue
+            report["sections"].setdefault(str(target["startMeasure"]), item.get("name"))
+            if operation["name"] is None:
+                item.pop("name", None)
+            else:
+                item["name"] = operation["name"]
         elif kind == "set_chord":
             index = target["measureIndex"]
             if index >= len(measures):
@@ -416,6 +443,9 @@ def apply_corrections(
     for index, original in list(report["chords"].items()):
         if measures[int(index)]["chordSymbol"] == original:
             del report["chords"][index]
+    for start, original in list(report["sections"].items()):
+        if section_items[int(start)].get("name") == original:
+            del report["sections"][start]  # named back to the prediction
     for key, original in list(report["hits"].items()):
         event_id, hit_index = key.rsplit("#", 1)
         located = hits.get((event_id, int(hit_index)))

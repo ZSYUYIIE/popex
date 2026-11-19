@@ -6,6 +6,8 @@ Everything stays on this computer. Filing reads only the recording's own title o
 
 ## Adding a recording
 
+While adding a recording (file or link), the optional **Add it to a song in your library** panel takes the song, artist, version and label up front; the new recording is filed as soon as it is created, using the same matching as below.
+
 An ungrouped recording shows **Add to your library**. Its fields start with a suggestion taken from the recording's name:
 
 | Name | Song | Artist or credits | Version | Label |

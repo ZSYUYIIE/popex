@@ -587,3 +587,26 @@ console.log(JSON.stringify({{
     assert "they are not verse or chorus names" in html
     assert "Sections need at least 16 bars" in result["short"]
     assert result["old"] == "" and result["missing"] == ""
+
+
+def test_named_sections_show_their_names_and_a_naming_panel() -> None:
+    named = json.loads(json.dumps(SECTIONS))
+    named["sections"][1]["name"] = "Verse <1>"
+    corrections = {"revision": 3, "urls": {"add": "/api/jobs/done/score/corrections"}}
+    result = _run_node(
+        f"""
+t.setDetail("done", {{sections: {json.dumps(named)}, corrections: {json.dumps(corrections)}}});
+t.setDetail("readonly", {{sections: {json.dumps(named)}}});
+console.log(JSON.stringify({{html: t.renderSectionStrip({{id: "done"}}), readonly: t.renderSectionStrip({{id: "readonly"}})}}));
+"""
+    )
+    html = result["html"]
+    assert '<span class="section-letter">Verse &lt;1&gt;</span><span class="section-meta">B · 5-20</span>' in html
+    assert 'aria-label="Verse &lt;1&gt;, section B, bars 5 to 20, from 0:06"' in html
+    assert '<details class="section-names" data-open-key="section-names-done"><summary>Name the sections</summary>' in html
+    assert 'id="section-name-done-4" name="section-name" data-start="4" data-label="B" maxlength="40"' in html
+    assert 'value="Verse &lt;1&gt;"' in html
+    # "A" repeats, so the same-letter option is offered.
+    assert 'name="same-letter" checked' in html
+    assert 'data-action="save-section-names" data-job-id="done"' in html
+    assert "Name the sections" not in result["readonly"]  # no corrections available yet

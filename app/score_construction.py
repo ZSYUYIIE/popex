@@ -1323,7 +1323,7 @@ def _section_rehearsals(value: Any, measure_count: int) -> dict[int, str]:
         sections = validate_sections(value, measure_count)["sections"]
     except SectionError as exc:
         raise ScoreConstructionError("Score sections are invalid.") from exc
-    return {item["startMeasure"]: item["label"] for item in sections}
+    return {item["startMeasure"]: item.get("name") or item["label"] for item in sections}
 
 
 def _append_directions(

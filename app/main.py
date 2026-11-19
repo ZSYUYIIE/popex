@@ -4076,6 +4076,7 @@ def _corrections_state(
             "hitTiming": report["hitTiming"],
             "deletedNotes": report["deletedNotes"],
             "deletedHits": report["deletedHits"],
+            "sections": report["sections"],
         },
         "urls": {
             "add": base,

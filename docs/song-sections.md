@@ -20,9 +20,19 @@ Method version: `bar-sections-v1`, in `app/song_sections.py`.
 
 ## What the letters mean
 
-Letters mean "these bars sound alike". They are not verse or chorus names, and PopEx does not claim to know a song's form. Two sections with the same chords can get different letters when the arrangement changes (for example the bass comes in), and a verse and chorus over one loop can share a letter when they sound alike.
+Letters mean "these bars sound alike". They are not verse or chorus names, and PopEx does not claim to know a song's form; the musician can name sections (see below). Two sections with the same chords can get different letters when the arrangement changes (for example the bass comes in), and a verse and chorus over one loop can share a letter when they sound alike.
 
 Letters are per recording. An "A" in a live version and an "A" in the studio version are unrelated.
+
+## Naming sections
+
+Under the strip, **Name the sections** lists every section with a box for its name, such as "Intro", "Verse 1", "Chorus" or "Bridge". Names are musician corrections: they are saved in the score's correction log beside the detected letters, can be undone like any other correction, and never change the original prediction. Leave a box empty to clear a name.
+
+When a letter repeats and only one of its sections gets a new name, **Give every section with the same letter the same name** (on by default) copies that name to the others. Turn it off to name repeats separately, for example "Chorus 1" and "Chorus 2".
+
+Named sections show the name first and keep the letter: on the strip ("Chorus, D · 29-44"), on the notation page's section buttons ("Chorus (D)"), and as the rehearsal mark text in the corrected MusicXML. The original-prediction download keeps the letters. The in-app notation renderer does not draw rehearsal marks; notation programs that open the MusicXML do.
+
+Correction: `{"op": "set_section_name", "target": {"startMeasure": 28}, "name": "Chorus"}` (name 1 to 40 characters on one line, or `null` to clear). It does not apply when no section starts at that bar, for example after the score is drafted again with different sections.
 
 ## When there are no sections
 

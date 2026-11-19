@@ -91,6 +91,16 @@
           </form>
         </section>
       </div>
+      <details id="add-filing" class="panel add-filing">
+        <summary>Add it to a song in your library <span class="hint">(optional)</span></summary>
+        <p class="hint">Fill this in before adding the recording. A song with the same title is reused; otherwise a new song is created. You can also do this later on the recording.</p>
+        <div class="song-fields">
+          <div><label for="add-song">Song</label><input id="add-song" maxlength="160" autocomplete="off" list="add-song-list" placeholder="e.g. Shake It Off"><datalist id="add-song-list"></datalist></div>
+          <div><label for="add-credits">Artist or credits <span class="hint">(optional)</span></label><input id="add-credits" maxlength="300" autocomplete="off"></div>
+          <div><label for="add-kind">Version</label><select id="add-kind"><option value="">Not specified</option></select></div>
+          <div><label for="add-label">Version label <span class="hint">(optional)</span></label><input id="add-label" maxlength="80" autocomplete="off" placeholder="e.g. Live in Osaka 2019"></div>
+        </div>
+      </details>
     </section>
 
     <section id="recordings" class="jobs-section" aria-labelledby="jobs-title">

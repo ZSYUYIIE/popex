@@ -124,7 +124,8 @@
       button.className = "notation-section";
       button.dataset.label = item.label.slice(0, 1);
       const heard = text(item.heardText);
-      button.textContent = `${item.label} · bars ${first}-${item.endMeasure}${heard ? " · " + heard : ""}`;
+      const given = text(item.name).slice(0, 40);
+      button.textContent = `${given ? given + " (" + item.label + ")" : item.label} · bars ${first}-${item.endMeasure}${heard ? " · " + heard : ""}`;
       button.addEventListener("click", () => {
         if (busy) return;
         from.value = String(first); through.value = String(last);
