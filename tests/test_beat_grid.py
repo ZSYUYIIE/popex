@@ -424,7 +424,7 @@ def test_saved_score_records_the_grid_and_follows_tracked_beats(tmp_path):
     # The analysis reports 120 BPM but the tracked beats run at 100 BPM.
     details = _build_saved_score(tmp_path, steady_beats(100.0, 32, first=0.25))
 
-    assert details["version"] == "score-pipeline-v6"
+    assert details["version"] == "score-pipeline-v7"
     grid = details["timing"]["beatGrid"]
     assert grid["version"] == BEAT_GRID_VERSION
     assert grid["mode"] == "steady"
@@ -453,7 +453,10 @@ def test_scores_built_on_one_tempo_are_flagged_for_rebuild():
     old = {"score_version": "score-pipeline-v5", "score_note_count": 3, "score_measure_count": 12}
     assert score_outdated_reason(old) == "beat-grid"
     assert score_outdated_reason({**old, "score_measure_count": 1}) is None
+    # Scores from before song sections are rebuilt once they are long enough to have them.
     assert score_outdated_reason({**old, "score_version": "score-pipeline-v6"}) is None
+    assert score_outdated_reason({**old, "score_version": "score-pipeline-v6", "score_measure_count": 40}) == "sections"
+    assert score_outdated_reason({**old, "score_version": "score-pipeline-v7", "score_measure_count": 40}) is None
 
 
 @pytest.mark.parametrize(
@@ -490,11 +493,11 @@ def test_tampered_grid_summaries_are_rejected(tmp_path, mutate):
         expected_fingerprint=current_score_fingerprint(record),
     )
     document = result.payload
-    assert validate_score_artifact(document)["schemaVersion"] == 6
+    assert validate_score_artifact(document)["schemaVersion"] == 7
     mutate(document["timing"]["beatGrid"])
     with pytest.raises(ScoreArtifactValidationError):
         validate_score_artifact(document)
-    assert score_pipeline.SCORE_PIPELINE_VERSION == "score-pipeline-v6"
+    assert score_pipeline.SCORE_PIPELINE_VERSION == "score-pipeline-v7"
 
 
 def test_schema_five_scores_cannot_carry_a_grid_and_schema_six_must(tmp_path):
@@ -515,7 +518,8 @@ def test_schema_five_scores_cannot_carry_a_grid_and_schema_six_must(tmp_path):
         attempt_id="b" * 32,
         expected_fingerprint=current_score_fingerprint(record),
     ).payload
-    older = {**document, "schemaVersion": 5}
+    older = {key: value for key, value in document.items() if key != "sections"}
+    older["schemaVersion"] = 5
     with pytest.raises(ScoreArtifactValidationError):
         validate_score_artifact(older)
     older["timing"] = {key: value for key, value in document["timing"].items() if key != "beatGrid"}

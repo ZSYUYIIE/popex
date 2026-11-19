@@ -24,10 +24,12 @@ dry-run before publication so a saved score is always downloadable.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from app.audio_chords import AudioChordsError, load_audio_chords_artifact
@@ -69,6 +71,7 @@ from app.score_sources import (
     score_source_fingerprint,
     score_source_identity,
 )
+from app.song_sections import MIN_BARS_FOR_SECTIONS, find_sections, section_note
 from app.tonal_context import (
     KEY_SIGNATURE_MIN_CONFIDENCE,
     build_tonal_context,
@@ -82,7 +85,7 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v6"
+SCORE_PIPELINE_VERSION = "score-pipeline-v7"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
@@ -90,14 +93,15 @@ PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
 )
 PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipeline-v4"}
 PRE_BEAT_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline-v5"}
+PRE_SECTIONS_PIPELINE_VERSIONS = PRE_BEAT_GRID_PIPELINE_VERSIONS | {"score-pipeline-v6"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
     "other": "accompaniment-stem line",
     "full_mix": "full-mix melody line",
 }
-SCORE_MIDI_EXPORT_VERSION = "smf-type0-v2"
-SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v2"
+SCORE_MIDI_EXPORT_VERSION = "smf-type1-parts-v3"
+SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v3"
 
 _MAX_WARNINGS = 32
 _MAX_MEASURE_HARMONY = 16
@@ -125,6 +129,9 @@ class ScorePipelineResult:
     payload: dict[str, Any]
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -137,7 +144,9 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     tablature for a recording with separated stems, where the default bass
     tablature applies. ``tonal-context``: a score with notes from before the
     modal tonal context. ``parts``: a score with notes from before instrument
-    parts by source line. Such scores stay readable and downloadable.
+    parts by source line. ``beat-grid``: bars from before beat-following bar
+    lines. ``sections``: a score from before song sections. Such scores stay
+    readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -173,6 +182,13 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and measures > 1
     ):
         return "beat-grid"
+    if (
+        version in PRE_SECTIONS_PIPELINE_VERSIONS
+        and isinstance(measures, int)
+        and not isinstance(measures, bool)
+        and measures >= MIN_BARS_FOR_SECTIONS
+    ):
+        return "sections"
     return None
 
 
@@ -188,6 +204,7 @@ def score_export_document(document: Mapping[str, Any]) -> dict[str, Any]:
         "measures": document["measures"],
         "keySignature": (document.get("tonality") or {}).get("keySignature"),
         **({"scoreParts": document["scoreParts"]} if "scoreParts" in document else {}),
+        **({"sections": document["sections"]} if document.get("sections") else {}),
     }
 
 
@@ -601,6 +618,55 @@ def _segment_symbol(segment: Mapping[str, Any]) -> str | None:
     return symbol
 
 
+def find_score_sections(
+    job_id: str,
+    settings: Settings,
+    record: Mapping[str, Any],
+    measures: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Find song sections on the score's bar grid; never fails the score.
+
+    Uses the analysis audio, plus the separated stems when this recording has
+    them. When the audio cannot be read the score carries a note instead.
+    """
+    if len(measures) < MIN_BARS_FOR_SECTIONS:
+        return section_note(
+            f"Sections need at least {MIN_BARS_FOR_SECTIONS} bars; this score is shorter."
+        )
+    try:
+        from app.audio_chords import ANALYSIS_SAMPLE_RATE, load_audio
+        from app.separation import STEM_MANIFEST_RELATIVE_PATH, load_stem_manifest
+        from app.separation_artifacts import resolve_stem_artifact
+        from app.song_sections import STEM_ORDER, bar_features
+
+        mix_path = Path(settings.exports_dir) / job_id / "analysis.wav"
+        if not mix_path.is_file():
+            return section_note("The analysis audio is unavailable, so sections were not measured.")
+        mix = load_audio(mix_path)
+        stems = None
+        if (
+            record.get("separation_status") == "completed"
+            and record.get("stem_manifest_file_name") == STEM_MANIFEST_RELATIVE_PATH
+        ):
+            try:
+                if load_stem_manifest(job_id, settings) is not None:
+                    stems = {
+                        name: load_audio(resolve_stem_artifact(job_id, name, settings, record).path)
+                        for name in STEM_ORDER
+                    }
+            except Exception:  # stems are optional evidence
+                _LOGGER.warning("Stems were not usable for song sections.", exc_info=True)
+                stems = None
+        spans = [(measure["startSeconds"], measure["endSeconds"]) for measure in measures]
+        features, levels = bar_features(
+            spans, mix=mix, stems=stems, sample_rate=ANALYSIS_SAMPLE_RATE
+        )
+        return find_sections(features, levels)
+    except Exception:  # sections are best effort
+        _LOGGER.warning("Song sections could not be measured.", exc_info=True)
+        return section_note("Sections could not be measured from this recording's audio.")
+
+
 def construct_score(
     job_id: str,
     settings: Settings,
@@ -763,6 +829,9 @@ def construct_score(
         measures, chroma_mean=chroma if isinstance(chroma, list) else None
     )
 
+    progress("finding_sections", "Finding the song's sections.", 78)
+    sections = find_score_sections(job_id, settings, record, measures)
+
     progress("checking_exports", "Checking MIDI and MusicXML exports.", 80)
     timing = {
         "tempoBpm": built["tempoBpm"],
@@ -779,7 +848,13 @@ def construct_score(
         [note for measure in measures for note in measure["notes"] if note["tab"] is None]
     )
     export_document = score_export_document(
-        {"timing": timing, "measures": measures, "tonality": tonality, "scoreParts": score_parts}
+        {
+            "timing": timing,
+            "measures": measures,
+            "tonality": tonality,
+            "scoreParts": score_parts,
+            "sections": sections,
+        }
     )
     try:
         score_to_midi_bytes(export_document)
@@ -968,6 +1043,7 @@ def construct_score(
         "percussion": percussion_summary,
         "tonality": tonality,
         "scoreParts": score_parts,
+        "sections": sections,
         "tablature": {
             "version": TABLATURE_VERSION,
             "origin": tab_origin,

@@ -27,6 +27,7 @@
       <label>Notation size<select id="notation-zoom"><option value="0.7">Small</option><option value="1" selected>Normal</option><option value="1.25">Large</option><option value="1.5">Larger</option><option value="2">Largest</option></select></label>
       <button id="notation-render" type="submit" disabled>Render notation</button>
     </form>
+    <nav id="notation-sections" aria-label="Song sections" hidden><h2>Go to a section</h2><p id="notation-sections-note"></p><ol id="notation-section-list"></ol></nav>
     <p>Render up to 128 bars at a time. Change the range to read later bars; downloads always contain the complete score or part.</p>
     <p id="notation-status" role="status" aria-live="polite">Loading saved-score information…</p>
     <p id="notation-rendered"></p>
