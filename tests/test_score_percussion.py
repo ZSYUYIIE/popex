@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
+from midi_reader import note_events
 from fastapi.testclient import TestClient
 
 from app import db
@@ -287,28 +288,8 @@ def test_builder_rejects_duplicate_hit_identity() -> None:
 
 
 def _midi_channel_events(data: bytes) -> list[tuple[int, int, int, int]]:
-    """Return ``(tick, status, key, velocity)`` for channel voice messages."""
-    assert data[:4] == b"MThd"
-    length = struct.unpack(">I", data[18:22])[0]
-    track = data[22 : 22 + length]
-    position, tick, events = 0, 0, []
-    while position < len(track):
-        delta = 0
-        while True:
-            byte = track[position]
-            position += 1
-            delta = (delta << 7) | (byte & 0x7F)
-            if not byte & 0x80:
-                break
-        tick += delta
-        status = track[position]
-        if status == 0xFF:
-            meta_length = track[position + 2]
-            position += 3 + meta_length
-            continue
-        events.append((tick, status, track[position + 1], track[position + 2]))
-        position += 3
-    return events
+    """Return ``(tick, status, key, velocity)`` note events of every track."""
+    return note_events(data)
 
 
 def test_midi_puts_percussion_on_channel_ten_with_documented_notes() -> None:

@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
+from midi_reader import note_events
 
 from app.score_artifacts import validate_score_artifact
 from app.score_construction import score_to_midi_bytes, score_to_musicxml_text
@@ -210,30 +211,8 @@ console.log(JSON.stringify({{keys}}));
 
 
 def midi_events(data):
-    """Read generated format-0 events, retaining absolute ticks and note pitch."""
-    track = data[22:22+int.from_bytes(data[18:22], "big")]
-    offset, tick, events = 0, 0, []
-    def vlq():
-        nonlocal offset
-        value = 0
-        while True:
-            byte = track[offset]
-            offset += 1
-            value = (value << 7) | (byte & 127)
-            if byte < 128:
-                return value
-    while offset < len(track):
-        tick += vlq()
-        status = track[offset]
-        offset += 1
-        if status == 255:
-            offset += 1
-            size = vlq()
-            offset += size
-        else:
-            events.append((tick, status & 240, track[offset]))
-            offset += 1 if status & 240 in (192, 208) else 2
-    return events
+    """Note events of every track with absolute ticks, status kind and pitch."""
+    return [(tick, status & 240, key) for tick, status, key, _velocity in note_events(data)]
 
 
 @pytest.mark.skipif(not os.environ.get("POPEX_MUSICXML_XSD"), reason="set POPEX_MUSICXML_XSD")

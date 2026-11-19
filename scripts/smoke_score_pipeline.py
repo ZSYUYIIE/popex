@@ -90,20 +90,25 @@ def synthetic_recording() -> bytes:
 
 
 def _channel_ten_note_ons(data: bytes) -> int:
-    length = struct.unpack(">I", data[18:22])[0]
-    track = data[22 : 22 + length]
-    position, count = 0, 0
-    while position < len(track):
-        while track[position] & 0x80:
+    """Count channel-10 note-ons in every track of a type-0 or type-1 file."""
+    track_count = struct.unpack(">H", data[10:12])[0]
+    offset, count = 14, 0
+    for _ in range(track_count):
+        length = struct.unpack(">I", data[offset + 4 : offset + 8])[0]
+        track = data[offset + 8 : offset + 8 + length]
+        offset += 8 + length
+        position = 0
+        while position < len(track):
+            while track[position] & 0x80:
+                position += 1
             position += 1
-        position += 1
-        status = track[position]
-        if status == 0xFF:
-            position += 3 + track[position + 2]
-            continue
-        if status == 0x99 and track[position + 2] > 0:
-            count += 1
-        position += 3
+            status = track[position]
+            if status == 0xFF:
+                position += 3 + track[position + 2]
+                continue
+            if status == 0x99 and track[position + 2] > 0:
+                count += 1
+            position += 2 if status & 0xF0 in (0xC0, 0xD0) else 3
     return count
 
 
