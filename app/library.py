@@ -12,7 +12,9 @@ estimates side by side and never merges parts.
 
 from __future__ import annotations
 
+import difflib
 import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -182,6 +184,117 @@ def compare_versions(summaries: Sequence[dict[str, Any]]) -> list[dict[str, Any]
     return list(summaries)
 
 
+# Filing suggestions: read only the recording's own name and existing song titles.
+
+_EXTENSION = re.compile(r"\.(?:mp3|m4a|aac|wav|flac|ogg|opus|webm|mp4|mkv|mov|wma|aiff?)$", re.IGNORECASE)
+_BRACKETS = re.compile(r"[\(\[\{]([^\)\]\}]*)[\)\]\}]")
+_NOISE = re.compile(
+    r"^(?:official(?: music| lyric)?(?: video| audio| visuali[sz]er)?|music video|lyric video|lyrics?|audio|video|"
+    r"visuali[sz]er|hd|hq|4k|1080p|720p|explicit|clean|full song|with lyrics|mp3\.\w+|[\w.-]+\.(?:com|net|pm|org|io))$",
+    re.IGNORECASE,
+)
+_SEPARATORS = (" - ", " – ", " — ", " | ", ": ")
+_FEATURING = re.compile(r"\s+(?:feat\.?|ft\.?|featuring)\s+.*$", re.IGNORECASE)
+# (pattern, kind) in priority order; the first match wins.
+_KIND_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bradio edit\b", re.IGNORECASE), "radio_edit"),
+    (re.compile(r"\b(?:remix|rmx|re-?mix|bootleg|edit\s+mix|club mix|extended mix)\b", re.IGNORECASE), "remix"),
+    (re.compile(r"\b(?:acoustic|unplugged|stripped)\b", re.IGNORECASE), "acoustic"),
+    (re.compile(r"\b(?:in concert|concert|tour)\b", re.IGNORECASE), "concert"),
+    (re.compile(r"\blive\b", re.IGNORECASE), "live"),
+    (re.compile(r"\b(?:cover|covered by|tribute)\b", re.IGNORECASE), "cover"),
+)
+_MATCH_RATIO = 0.84
+_VERSION_TAIL = re.compile(r"(?:live|acoustic|unplugged|stripped|remix|cover|radio edit|in concert)\b", re.IGNORECASE)
+
+
+def _plain(text: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", text).replace("_", " ").split())
+
+
+def song_key(title: str) -> str:
+    """A loose key for matching song titles: lower case letters and digits only."""
+    text = unicodedata.normalize("NFKD", title.casefold())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = re.sub(r"^(?:the|a|an)\s+", "", text)
+    return re.sub(r"[^0-9a-z\u0080-￿]+", "", text)
+
+
+def suggest_filing(name: str | None, songs: Sequence[Mapping[str, Any]] = ()) -> dict[str, Any]:
+    """Guess song title, credits, version kind and label, and a matching song.
+
+    Returns ``title``, ``credits``, ``kind``, ``label`` (each may be ``None``)
+    and ``matchingSongId`` when an existing song's title matches closely.
+    """
+    text = _plain(_EXTENSION.sub("", (name or "").strip()))
+    if text and " " not in text and re.search(r"[a-z]", text) and not re.search(r"[A-Z]", text):
+        # A file-style name such as "shake-it-off": hyphens were spaces.
+        text = " ".join(word.capitalize() for word in re.split(r"[-.]+", text) if word)
+    kind = None
+    label = None
+    kept_brackets = []
+    for match in _BRACKETS.finditer(text):
+        inner = " ".join(match.group(1).split())
+        if not inner or _NOISE.match(inner):
+            continue
+        found = _kind_of(inner)
+        if found and kind is None:
+            kind, label = found, inner[:80]
+        elif not found:
+            kept_brackets.append(inner)
+    text = " ".join(_BRACKETS.sub(" ", text).split())
+
+    credits = None
+    for separator in _SEPARATORS:
+        if separator in text:
+            left, right = (part.strip() for part in text.split(separator, 1))
+            if left and right:
+                found = _kind_of(right)
+                if found and kind is None and _VERSION_TAIL.match(right):
+                    # "Song - Live at X": the right side names the version.
+                    kind, label, text = found, right[:80], left
+                else:
+                    credits, text = left, right
+            break
+    text = _FEATURING.sub("", text).strip(" -–—|:")
+    if kind is None:
+        found = _kind_of(text)
+        if found:
+            kind = found
+            # "Song - Live at X" style tails are a label, not part of the title.
+            tail = re.search(r"\b(live|acoustic|unplugged|remix|cover|radio edit)\b.*$", text, re.IGNORECASE)
+            if tail and tail.start() > 0:
+                label = tail.group(0)[:80]
+                text = text[: tail.start()].strip(" -–—|:,")
+    title = text[:160] or None
+
+    matching = None
+    if title:
+        key = song_key(title)
+        best = 0.0
+        for song in songs:
+            other = song_key(str(song.get("title") or ""))
+            if not other or not key:
+                continue
+            ratio = 1.0 if other == key else difflib.SequenceMatcher(None, key, other).ratio()
+            if ratio >= _MATCH_RATIO and ratio > best:
+                best, matching = ratio, song.get("id")
+    return {
+        "title": title,
+        "credits": credits[:300] if credits else None,
+        "kind": kind,
+        "label": label,
+        "matchingSongId": matching,
+    }
+
+
+def _kind_of(text: str) -> str | None:
+    for pattern, kind in _KIND_PATTERNS:
+        if pattern.search(text):
+            return kind
+    return None
+
+
 __all__ = [
     "LibraryError",
     "VERSION_KINDS",
@@ -191,5 +304,7 @@ __all__ = [
     "clean_version",
     "compare_versions",
     "is_library_id",
+    "song_key",
+    "suggest_filing",
     "version_summary",
 ]

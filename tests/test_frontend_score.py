@@ -46,6 +46,7 @@ const source = fs.readFileSync({app_path}, "utf8").replace("updateFilePresentati
   hasDetail:(id)=>scoreCache.has(id),
   getDetail:(id)=>scoreCache.get(id),
   setFetch:(value)=>{{fetchImpl=value;}},
+  setLibraryQuery:(value)=>{{libraryQuery=value;}},
   getElement:element,
   getListener:(selector,type)=>listeners.get(selector+":"+type)
 }};`;

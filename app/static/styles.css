@@ -1659,3 +1659,76 @@ form > *, .drop-zone > * {
 .section-chip[data-tint="3"] { --section-tint: #7aa7ff; }
 .section-chip[data-tint="4"] { --section-tint: #c792ea; }
 .section-chip[data-tint="5"] { --section-tint: #e8e3dc; }
+
+.library-search {
+  display: grid;
+  gap: 0.35rem;
+  max-width: 28rem;
+  margin: 1.25rem 0 1rem;
+}
+
+.library-search input {
+  font: inherit;
+}
+
+.library-version {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0.45rem 0;
+}
+
+.library-version .version-kind {
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.8rem;
+}
+
+.library-meta {
+  display: block;
+  margin-top: 0.15rem;
+}
+
+.library-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.library-file {
+  margin: 0.75rem 0;
+}
+
+.library-file summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  align-items: baseline;
+  cursor: pointer;
+}
+
+.library-file-title {
+  font-weight: 600;
+}
+
+.library-file summary:focus-visible {
+  outline: 3px solid var(--accent, #ff6a3d);
+  outline-offset: 3px;
+}
+
+.unfiled {
+  margin-top: 1.5rem;
+}
+
+.unfiled h3 {
+  font-size: 1rem;
+}
+
+.mini-link {
+  margin-left: 0.5rem;
+  font-size: 0.85rem;
+}

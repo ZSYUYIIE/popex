@@ -210,6 +210,8 @@ NEW_COLUMNS: dict[str, str] = {
         "INTEGER CHECK (score_warning_count IS NULL OR score_warning_count >= 0)"
     ),
     "score_error": "TEXT",
+    "score_key_name": "TEXT",
+    "score_section_form": "TEXT",
     "score_tablature_request": "TEXT",
     "arrangement_id": "TEXT",
     "version_label": "TEXT",
@@ -733,7 +735,9 @@ def _normalize_score_columns(connection: sqlite3.Connection) -> None:
             score_measure_count = NULL,
             score_note_count = NULL,
             score_chord_symbol_count = NULL,
-            score_warning_count = NULL
+            score_warning_count = NULL,
+            score_key_name = NULL,
+            score_section_form = NULL
         WHERE (score_status = 'completed' OR score_artifact_file_name IS NOT NULL)
           AND score_status != 'processing'
           AND (
@@ -1713,7 +1717,10 @@ def library_snapshot(database_path: Path) -> dict[str, list[dict[str, Any]]]:
             dict(row)
             for row in connection.execute(
                 "SELECT id, title, original_filename, arrangement_id, version_label, "
-                "version_kind, created_at, score_status FROM jobs ORDER BY created_at"
+                "version_kind, created_at, score_status, duration_seconds, tempo_bpm, "
+                "key_symbol, score_measure_count, score_artifact_file_name, "
+                "score_key_name, score_section_form "
+                "FROM jobs ORDER BY created_at"
             )
         ]
     return {"compositions": compositions, "arrangements": arrangements, "recordings": recordings}
@@ -1997,8 +2004,15 @@ def complete_score_attempt(
     chord_symbol_count: int,
     warning_count: int,
     message: str = "Draft score saved.",
+    key_name: str | None = None,
+    section_form: str | None = None,
 ) -> ScoreCompletion:
-    """Publish one attempt's score only if its evidence is still current."""
+    """Publish one attempt's score only if its evidence is still current.
+
+    ``key_name`` (the score's tonal context) and ``section_form`` (its section
+    letters) are short summaries for library rows; the score file stays the
+    source of truth.
+    """
     safe_attempt_id = _validate_score_attempt_id(attempt_id)
     if safe_attempt_id is None:
         raise ValueError("score_attempt_id is required.")
@@ -2020,6 +2034,16 @@ def complete_score_attempt(
     if chord_symbol_count > measure_count:
         raise ValueError("chord_symbol_count cannot exceed measure_count.")
     safe_message = _validate_harmony_text(message, "score message", 500)
+    if key_name is not None and (
+        not isinstance(key_name, str) or not 0 < len(key_name) <= 64 or not key_name.isprintable()
+    ):
+        raise ValueError("score key name is invalid.")
+    if section_form is not None and (
+        not isinstance(section_form, str)
+        or not 0 < len(section_form) <= 400
+        or not re.fullmatch(r"[A-Z0-9]+(?: [A-Z0-9]+)*", section_form)
+    ):
+        raise ValueError("score section form is invalid.")
     with _score_write_transaction(database_path, job_id) as (connection, row):
         if (
             row is None
@@ -2047,6 +2071,8 @@ def complete_score_attempt(
                 score_note_count = ?,
                 score_chord_symbol_count = ?,
                 score_warning_count = ?,
+                score_key_name = ?,
+                score_section_form = ?,
                 score_error = NULL,
                 updated_at = ?
             WHERE id = ?
@@ -2063,6 +2089,8 @@ def complete_score_attempt(
                 note_count,
                 chord_symbol_count,
                 warning_count,
+                key_name,
+                section_form,
                 utc_now(),
                 job_id,
                 safe_attempt_id,

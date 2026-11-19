@@ -256,13 +256,15 @@ console.log(JSON.stringify({{library,job}}));
     )
     library, job = result["library"], result["job"]
     assert '<h3 id="song-' in library and "Midnight Train</h3>" in library
-    assert '<a href="#job-job1-title">Studio take</a> <span class="detail-note">Album · Studio</span>' in library
+    assert '<a href="#job-job1-title">Studio take</a> <span class="version-kind">Album · Studio</span>' in library
+    assert '<span class="detail-note">no draft yet</span>' in library
     assert "Acoustic</strong> <span class=\"detail-note\">no recordings yet</span>" in library
     assert 'aria-label="Delete arrangement Acoustic"' in library
     assert ">Compare versions (1)</button>" in library and 'aria-expanded="false"' in library
     assert "Delete song" not in library  # a song with recordings cannot be deleted
     assert '<label for="arrangement-' in library and ">Add arrangement</button>" in library
-    assert "1 recording is not grouped yet." in library
+    assert '<h3 id="unfiled-title">Not in a song yet</h3>' in library
+    assert 'data-open-filing="job2">Add to library</a>' in library
     assert "<summary>Recording version: Midnight Train · Album band · Album · Studio</summary>" in job
     assert '<optgroup label="Midnight Train">' in job
     assert f'<option value="{"b" * 32}" selected>Album band</option>' in job
@@ -304,3 +306,167 @@ console.log(JSON.stringify({{html:t.getElement("#library").innerHTML}}));
     assert "<td>F</td>" in html  # chords only in the studio version
     assert html.count('<span class="detail-note">not available</span>') >= 5
     assert 'role="region" aria-label="Version comparison table" tabindex="0"' in html
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("Taylor Swift - Shake It Off (Official Video)",
+         {"title": "Shake It Off", "credits": "Taylor Swift", "kind": None, "label": None}),
+        ("Coldplay - Yellow (Live in Buenos Aires).mp3",
+         {"title": "Yellow", "credits": "Coldplay", "kind": "live", "label": "Live in Buenos Aires"}),
+        ("Yellow - Acoustic", {"title": "Yellow", "credits": None, "kind": "acoustic", "label": "Acoustic"}),
+        ("Artist - Song - Live", {"title": "Song", "credits": "Artist", "kind": "live", "label": "Live"}),
+        ("Some_Band_-_Track_(mp3.pm).mp3", {"title": "Track", "credits": "Some Band", "kind": None, "label": None}),
+        ("Song (Remix) [feat. Guest]", {"title": "Song", "credits": None, "kind": "remix", "label": "Remix"}),
+        ("周杰伦 - 晴天 (Live)",
+         {"title": "晴天", "credits": "周杰伦", "kind": "live", "label": "Live"}),
+        ("Liveson - Song", {"title": "Song", "credits": "Liveson", "kind": None, "label": None}),
+        ("", {"title": None, "credits": None, "kind": None, "label": None}),
+        (None, {"title": None, "credits": None, "kind": None, "label": None}),
+    ],
+)
+def test_filing_suggestions_read_only_the_recording_name(name, expected) -> None:
+    from app.library import suggest_filing
+
+    suggestion = suggest_filing(name, [])
+    assert {key: suggestion[key] for key in expected} == expected
+    assert suggestion["matchingSongId"] is None
+
+
+def test_filing_suggestions_match_existing_songs_loosely() -> None:
+    from app.library import song_key, suggest_filing
+
+    songs = [{"id": "a" * 32, "title": "Shake It Off"}, {"id": "b" * 32, "title": "The Yellow Song"}]
+    assert suggest_filing("Taylor Swift - shake it off!", songs)["matchingSongId"] == "a" * 32
+    assert suggest_filing("Shake It Of", songs)["matchingSongId"] == "a" * 32  # a typo still matches
+    assert suggest_filing("Yellow Song (Live)", songs)["matchingSongId"] == "b" * 32  # leading article ignored
+    assert suggest_filing("Something Else", songs)["matchingSongId"] is None
+    assert song_key("The  Yellow-Song") == song_key("yellow song") == "yellowsong"
+
+
+def test_unfiled_recordings_carry_a_suggestion_and_file_in_one_step(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    first = create_job(settings)
+    second = create_job(settings)
+    db.update_job(settings.database_path, first, title="Night Owls - Midnight Train (Live at the Hall)")
+    db.update_job(settings.database_path, second, title="Midnight train")
+    with client_for(settings) as client:
+        library = client.get("/api/library").json()
+        entry = next(item for item in library["unassigned"] if item["jobId"] == first)
+        assert entry["suggestion"] == {
+            "title": "Midnight Train", "credits": "Night Owls", "kind": "live",
+            "label": "Live at the Hall", "matchingSongId": None,
+        }
+        assert entry["fileUrl"] == f"/api/jobs/{first}/library"
+        assert entry["notationUrl"] is None and entry["downloadUrls"] is None
+
+        created = client.post(entry["fileUrl"], json={
+            "title": "Midnight Train", "credits": "Night Owls", "kind": "live", "label": "Live at the Hall",
+        })
+        assert created.status_code == 200
+        body = created.json()
+        assert body["createdSong"] is True
+        assert body["job"]["version"]["arrangementId"] == body["arrangementId"]
+        assert body["job"]["version"]["kind"] == "live"
+        songs = body["library"]["compositions"]
+        assert [song["title"] for song in songs] == ["Midnight Train"]
+        assert songs[0]["credits"] == "Night Owls"
+        assert songs[0]["arrangements"][0]["name"] == "Main arrangement"
+
+        # The second recording's suggestion now points at that song, and filing reuses it.
+        library = client.get("/api/library").json()
+        entry = next(item for item in library["unassigned"] if item["jobId"] == second)
+        assert entry["suggestion"]["matchingSongId"] == body["songId"]
+        reused = client.post(entry["fileUrl"], json={"title": "midnight  train!", "kind": "studio"}).json()
+        assert reused["createdSong"] is False and reused["songId"] == body["songId"]
+        assert reused["arrangementId"] == body["arrangementId"]
+        versions = reused["library"]["compositions"][0]["arrangements"][0]["versions"]
+        assert {item["jobId"] for item in versions} == {first, second}
+        assert reused["library"]["unassigned"] == []
+
+        assert client.post(f"/api/jobs/{'0' * 32}/library", json={"title": "X"}).status_code == 404
+        assert client.post(f"/api/jobs/{first}/library", json={"title": "  "}).status_code == 422
+        assert client.post(f"/api/jobs/{first}/library", json={"title": "X", "kind": "bootleg"}).status_code == 422
+        assert client.post(f"/api/jobs/{first}/library", json={"title": "X", "extra": 1}).status_code == 422
+
+
+def test_library_rows_link_scored_versions_to_notation_and_downloads(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    job_id = create_job(settings)
+    with client_for(settings) as client:
+        assert client.post(f"/api/jobs/{job_id}/score/construct").status_code == 202
+        for _ in range(200):
+            if job_json(client, job_id)["score"]["status"] in {"completed", "failed"}:
+                break
+        assert job_json(client, job_id)["score"]["status"] == "completed"
+        entry = client.get("/api/library").json()["unassigned"][0]
+    assert entry["notationUrl"] == f"/jobs/{job_id}/notation"
+    assert entry["downloadUrls"] == {
+        "musicxml": f"/api/jobs/{job_id}/score/saved/download?format=musicxml",
+        "midi": f"/api/jobs/{job_id}/score/saved/download?format=midi",
+    }
+    assert isinstance(entry["bars"], int) and entry["bars"] >= 1
+    # Short fixture: no sections; its tonal context is too uncertain to name, so the analysis key is shown as such.
+    assert entry["sectionForm"] is None
+    assert entry["keySource"] in {"score", "analysis", None}
+
+
+def test_score_summaries_for_library_rows() -> None:
+    from app.song_sections import score_section_form
+    from app.tonal_context import score_key_name
+
+    tonality = {"keySignature": {"fifths": 1, "mode": "major"}, "primaryCandidate": {"displayName": "G Ionian (major)"}}
+    assert score_key_name({"tonality": tonality}) == "G Ionian (major)"
+    assert score_key_name({"tonality": {**tonality, "keySignature": None}}) is None
+    assert score_key_name({}) is None
+    sections = {"sections": [{"label": "A"}, {"label": "B"}, {"label": "A"}]}
+    assert score_section_form({"sections": sections}) == "A B A"
+    assert score_section_form({"sections": {"sections": []}}) is None and score_section_form({}) is None
+
+
+def test_filing_form_search_and_rich_rows_render() -> None:
+    library = {
+        "versionKinds": [{"id": "studio", "label": "Studio"}, {"id": "live", "label": "Live"}],
+        "compositions": [
+            {"id": "a" * 32, "title": "Midnight Train", "credits": "Night Owls", "url": "/api/compositions/" + "a" * 32,
+             "comparisonUrl": "/api/compositions/" + "a" * 32 + "/comparison",
+             "arrangements": [{"id": "b" * 32, "name": "Main arrangement", "url": "/api/arrangements/" + "b" * 32,
+                               "versions": [{"jobId": "job1", "title": "Studio take", "label": None, "kind": "studio",
+                                             "durationSeconds": 212.4, "tempoBpm": 118.2, "keySymbol": "A minor",
+                                             "bars": 104, "notationUrl": "/jobs/job1/notation",
+                                             "downloadUrls": {"musicxml": "/api/x?format=musicxml",
+                                                              "midi": "https://evil.example/m"}}]}]},
+            {"id": "c" * 32, "title": "Other Song", "credits": None, "url": "/api/compositions/" + "c" * 32,
+             "comparisonUrl": "/api/compositions/" + "c" * 32 + "/comparison", "arrangements": []},
+        ],
+        "unassigned": [{"jobId": "job2", "title": "Night Owls - Midnight Train (Live)", "fileUrl": "/api/jobs/job2/library",
+                        "suggestion": {"title": "Midnight Train", "credits": "Night Owls <b>", "kind": "live",
+                                       "label": "Live", "matchingSongId": "a" * 32}}],
+    }
+    result = _run_node(
+        f"""
+t.setFetch(async () => ({{ok:true,status:200,json:async()=>({json.dumps(library)})}}));
+await loadLibrary();
+const all=t.getElement("#library").innerHTML;
+const form=t.renderJob({{id:"job2",status:"completed",files:[],version:{{arrangementId:null,label:null,kind:null,url:"/api/jobs/job2/version"}}}});
+t.setLibraryQuery("live owls");renderLibrary();const searched=t.getElement("#library").innerHTML;
+t.setLibraryQuery("nothing here");renderLibrary();const none=t.getElement("#library").innerHTML;
+console.log(JSON.stringify({{all,form,searched,none}}));
+"""
+    )
+    all_html, form = result["all"], result["form"]
+    assert '<span class="detail-note library-meta">3:32 · 118 BPM · A minor · 104 bars</span>' in all_html
+    assert '<a href="/jobs/job1/notation">Open notation</a>' in all_html
+    assert '<a href="/api/x?format=musicxml" download>MusicXML</a>' in all_html
+    assert "evil.example" not in all_html
+    assert 'data-open-filing="job2">Add to library</a>' in all_html
+    assert '</article></li></ul><section class="unfiled"' in all_html  # after the songs, not inside one
+    assert '<details class="library-file" data-open-key="file-job2">' in form
+    assert "Matches the song “Midnight Train” in your library" in form
+    assert 'name="file-title" maxlength="160" required value="Midnight Train" list="file-songs-job2"' in form
+    assert 'value="Night Owls &lt;b&gt;"' in form and "<b>" not in form
+    assert '<option value="live" selected>Live</option>' in form
+    assert 'data-action="file-library" data-job-id="job2" data-url="/api/jobs/job2/library"' in form
+    assert "Midnight Train" in result["searched"] and "Other Song" not in result["searched"]
+    assert "No song or version matches “nothing here”." in result["none"]
