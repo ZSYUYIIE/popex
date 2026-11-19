@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -9,6 +11,7 @@ from app.song_sections import (
     bar_features,
     describe_heard,
     find_sections,
+    public_sections,
     validate_sections,
 )
 
@@ -216,3 +219,76 @@ def test_sections_are_measured_from_the_recording_on_the_bar_grid(tmp_path) -> N
     assert missing["sections"] == [] and "unavailable" in missing["note"]
     short = find_score_sections(job_id, settings, {}, measures[:8])
     assert short["sections"] == [] and "16 bars" in short["note"]
+
+
+def _document_with_sections(tmp_path):
+    document = _built_document(tmp_path)
+    # The fixture score is one bar long: one section is enough to name.
+    document["sections"] = {
+        "version": SECTIONS_VERSION,
+        "note": None,
+        "sections": [
+            {"startMeasure": 0, "endMeasure": len(document["measures"]), "label": "A",
+             "boundaryStrength": 1.0, "heard": None},
+        ],
+    }
+    return document
+
+
+@pytest.mark.parametrize(
+    ("name", "error"),
+    [("x" * 41, "at most 40"), ("Verse<1>", "at most 40"), ("  Chorus", "extra spaces"), (7, "must be text")],
+)
+def test_section_names_are_short_single_lines(name, error) -> None:
+    from app.score_corrections import CorrectionError, validate_operation
+
+    with pytest.raises(CorrectionError, match=error):
+        validate_operation({"op": "set_section_name", "target": {"startMeasure": 0}, "name": name})
+    assert validate_operation({"op": "set_section_name", "target": {"startMeasure": 3}, "name": "Pre-chorus 2"}) == {
+        "op": "set_section_name", "target": {"startMeasure": 3}, "name": "Pre-chorus 2",
+    }
+    assert validate_operation({"op": "set_section_name", "target": {"startMeasure": 3}, "name": None})["name"] is None
+
+
+def test_section_names_are_corrections_beside_the_detected_letters(tmp_path) -> None:
+    from app.score_artifacts import validate_score_artifact
+    from app.score_construction import score_to_musicxml_text
+    from app.score_corrections import apply_corrections, new_operation
+    from app.score_pipeline import score_export_document
+
+    document = _document_with_sections(tmp_path)
+    original = json.loads(json.dumps(document))
+    ops = [
+        new_operation({"op": "set_section_name", "target": {"startMeasure": 0}, "name": "Chorus"}),
+        new_operation({"op": "set_section_name", "target": {"startMeasure": 5}, "name": "Nowhere"}),
+    ]
+    corrected, report = apply_corrections(document, ops)
+    assert document == original  # the prediction is untouched
+    items = corrected["sections"]["sections"]
+    assert items[0]["name"] == "Chorus" and items[0]["label"] == "A"
+    assert report["sections"] == {"0": None}
+    assert report["notApplicable"][0]["reason"] == "No section starts at that bar in this score."
+    validate_score_artifact(corrected)
+    public = public_sections(corrected)
+    assert [item["name"] for item in public["sections"]] == ["Chorus"]
+    import xml.etree.ElementTree as ET
+
+    marks = [mark.text for mark in ET.fromstring(score_to_musicxml_text(score_export_document(corrected))).iter("rehearsal")]
+    assert marks == ["Chorus"]
+
+    # Clearing the name again returns to the prediction and leaves nothing to review.
+    cleared, report = apply_corrections(
+        document, [*ops, new_operation({"op": "set_section_name", "target": {"startMeasure": 0}, "name": None})]
+    )
+    assert "name" not in cleared["sections"]["sections"][0] and report["sections"] == {}
+
+
+def test_saved_section_names_fail_closed() -> None:
+    features, levels = _song([("A", 8, FULL), ("B", 8, NO_BASS), ("A", 8, FULL)])
+    value = find_sections(features, levels)
+    value["sections"][0]["name"] = "Intro"
+    assert validate_sections(value, 24)["sections"][0]["name"] == "Intro"
+    for bad in (None, "", " Intro", "x" * 41, "<b>"):
+        value["sections"][0]["name"] = bad
+        with pytest.raises(SectionError):
+            validate_sections(value, 24)
