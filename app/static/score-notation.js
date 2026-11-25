@@ -137,6 +137,31 @@
     }
     nav.hidden = list.children.length === 0;
   }
+  function keepBars(xml, start, end) {
+    const merge = (into, from) => {
+      for (const child of Array.from(from.children)) {
+        const same = Array.from(into.children).find(item => item.localName === child.localName && item.getAttribute("number") === child.getAttribute("number"));
+        if (same) same.replaceWith(child.cloneNode(true)); else into.append(child.cloneNode(true));
+      }
+    };
+    if (typeof xml.getElementsByTagName !== "function") return;
+    for (const partElement of Array.from(xml.getElementsByTagName("part"))) {
+      let carried = null;
+      for (const measure of Array.from(partElement.children).filter(item => item.localName === "measure")) {
+        const number = Number(measure.getAttribute("number"));
+        const attributes = Array.from(measure.children).find(item => item.localName === "attributes");
+        if (number < start) {
+          if (attributes) { if (carried) merge(carried, attributes); else carried = attributes.cloneNode(true); }
+          measure.remove();
+        } else if (number > end) {
+          measure.remove();
+        } else if (number === start && carried) {
+          if (attributes) { merge(carried, attributes); attributes.replaceWith(carried); }
+          else measure.insertBefore(carried, measure.firstChild);
+        }
+      }
+    }
+  }
   async function reload() {
     if (busy || !match) return;
     lock(true);
@@ -167,10 +192,14 @@
       const document = new DOMParser().parseFromString(xml, "application/xml");
       if (document.documentElement.localName !== "score-partwise" || document.querySelector("parsererror")) throw new Error("The MusicXML could not be read. Its saved source and downloads are unchanged.");
       if (document.querySelectorAll("note").length > 20000) throw new Error("This score has too many notes for the browser view. Select an individual part or use the complete download.");
+      // The renderer drops directions (section marks, words) on the first bar
+      // of a partial range, so load only the chosen bars, carrying the clef,
+      // key and time forward. Bar numbers stay those of the full score.
+      keepBars(document, start, end);
       const Renderer = globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay;
       if (typeof Renderer !== "function") throw new Error("The local notation renderer is unavailable. Reload this page or use the MusicXML download.");
       const renderer = new Renderer(stage, {backend: "svg", autoResize: false, drawTitle: false, disableCursor: false, followCursor: false,
-        cursorsOptions: [{type: 3, color: "#205f47", alpha: 0.18, follow: false}], drawFromMeasureNumber: start, drawUpToMeasureNumber: end});
+        cursorsOptions: [{type: 3, color: "#205f47", alpha: 0.18, follow: false}]});
       renderer.Zoom = Number(zoom.value);
       await renderer.load(document);
       renderer.render();
@@ -180,7 +209,7 @@
       if (audioReview) {
         const source = Array.isArray(recording?.files) ? recording.files.find(file => file?.kind === "analysis") : null;
         try {
-          audioReview.setScore({jobId: match[1], sourceUrl: source?.preview_url, start, end, measures: details.measureTiming}, globalThis.PopexNotationAudio.measureCue(renderer));
+          audioReview.setScore({jobId: match[1], sourceUrl: source?.preview_url, start, end, measures: details.measureTiming}, globalThis.PopexNotationAudio.measureCue(renderer, start - 1));
         } catch (_) {
           $("notation-audio-controls").disabled = true;
           $("notation-audio").hidden = true;

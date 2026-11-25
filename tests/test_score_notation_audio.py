@@ -206,3 +206,15 @@ global.PopexNotationAudio={Review:class{setScore(){throw new Error("audio unavai
 ''')
     assert result["svg"] and result["disabled"]
     assert "notation and downloads remain usable" in result["message"]
+
+
+def test_bar_cursor_counts_from_the_first_shown_bar():
+    # The notation page loads only the shown bars, so score bar 30 (index 29)
+    # is the cursor's second measure when bars 29-36 are shown.
+    result = audio_node('''
+const calls=[];const iterator={CurrentMeasureIndex:0,EndReached:false};
+const cursor={Iterator:iterator,hide(){},show(){calls.push("show:"+iterator.CurrentMeasureIndex);},next(){iterator.CurrentMeasureIndex++;},reset(){iterator.CurrentMeasureIndex=0;}};
+const update=measureCue({cursor},28);update(29,true);update(28,true);
+console.log(JSON.stringify({calls}));
+''')
+    assert result["calls"] == ["show:1", "show:0"]

@@ -145,13 +145,14 @@
     }
   }
   // Cursor failure is cosmetic; it must never interrupt the recording or SVG.
-  function measureCue(renderer) {
+  function measureCue(renderer, offset = 0) {
     let previous = null;
     return (index, playing) => {
       const cursor = renderer?.cursor;
       if (!cursor) return;
       try {
         if (index === null || !playing) { cursor.hide(); previous = null; return; }
+        index -= offset;
         if (index === previous) return;
         cursor.hide();
         if (cursor.Iterator.CurrentMeasureIndex > index) cursor.reset();
