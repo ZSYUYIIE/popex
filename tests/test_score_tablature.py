@@ -227,7 +227,9 @@ def test_choices_cannot_change_during_a_build_or_for_unknown_jobs(tmp_path: Path
         choices = client.get(f"/api/jobs/{job_id}/score/tablature").json()
     assert busy.status_code == 409 and missing.status_code == 404
     assert choices["request"] == {"bass": "bass", "guitar": None}
-    assert [item["sourceKind"] for item in choices["sources"]] == ["vocals", "bass", "other", "full_mix"]
+    assert [item["sourceKind"] for item in choices["sources"]] == [
+            "vocals", "bass", "other", "full_mix", "mix_melody", "mix_bass", "mix_chords"
+        ]
 
 
 def test_job_serialization_hides_the_raw_column(tmp_path: Path) -> None:

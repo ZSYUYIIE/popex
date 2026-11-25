@@ -33,7 +33,7 @@ _FINGERPRINT_RE = re.compile(r"[a-f0-9]{64}")
 
 # Tablature choices: which transcribed line each fretted instrument fingers.
 # The default tabs only the separated bass-stem line; guitar is never inferred.
-TAB_SOURCE_KINDS = ("vocals", "bass", "other", "full_mix")
+TAB_SOURCE_KINDS = ("vocals", "bass", "other", "full_mix", "mix_melody", "mix_bass", "mix_chords")
 TAB_REQUEST_INSTRUMENTS = ("bass", "guitar")
 DEFAULT_TABLATURE_REQUEST: dict[str, str | None] = {"bass": "bass", "guitar": None}
 

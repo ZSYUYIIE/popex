@@ -1,6 +1,6 @@
 # Rhythm grids
 
-A draft score writes each pitched source line (lead vocal, bass, accompaniment, full-mix melody) on its own rhythm grid. Eighth notes are the default. A line moves to a sixteenth-note grid only when its note onsets clearly show sixteenths.
+A draft score writes each pitched source line (lead vocal, bass, accompaniment, full-mix melody, or the full mix's top line, lowest line and chords) on its own rhythm grid. Eighth notes are the default. A line moves to a sixteenth-note grid only when its note onsets clearly show sixteenths.
 
 ## The rule
 

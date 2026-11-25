@@ -181,7 +181,7 @@ def infer_harmony(
         )
 
     source_kinds = sorted({event.source_kind for event in events})
-    if source_kinds == ["full_mix"]:
+    if source_kinds and set(source_kinds) <= {"full_mix", "mix_melody", "mix_bass", "mix_chords"}:
         _append_warning(
             warnings,
             "Full-mix pitch evidence may omit simultaneous chord tones; harmonic candidates remain intentionally conservative.",

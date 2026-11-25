@@ -54,6 +54,22 @@ _SOURCE_SETTINGS: dict[str, dict[str, Any]] = {
     "other": {"min_hz": 60.0, "max_hz": 2100.0, "onset": 0.5, "frame": 0.3, "min_ms": 80.0, "one_line": False},
 }
 MODEL_SOURCE_KINDS = frozenset(_SOURCE_SETTINGS)
+
+# Without stems, the full mix is heard once and split by register into three
+# estimated lines. They are labelled as lines of the mix, never as stems.
+MIX_LINE_KINDS = ("mix_melody", "mix_bass", "mix_chords")
+_MIX_SETTINGS = {"min_hz": 30.0, "max_hz": 2100.0, "onset": 0.5, "frame": 0.3, "min_ms": 80.0}
+MIX_BASS_MAX_MIDI = 52  # E3: the lowest line is taken from notes at or below it
+MIX_MELODY_MIN_MIDI = 55  # G3: the top line is taken from notes at or above it
+MIX_LINE_MIN_SECONDS = 0.100
+# Two notes clash in a line when they overlap by more than a quarter of the shorter one.
+MIX_LINE_OVERLAP_SHARE = 0.25
+# A note inside a stronger one (starting 20 ms or more later, under 60% of its
+# strength) is not a line candidate; it stays in the chords line.
+MIX_GHOST_LEAD_SECONDS = 0.020
+MIX_GHOST_STRENGTH_SHARE = 0.6
+_mix_cache_lock = threading.Lock()
+_mix_cache: tuple[tuple[str, int, int], list[tuple[float, float, int, float]], float] | None = None
 # The score holds at most 5000 notes; a dense accompaniment keeps its strongest.
 _MAX_NOTES_PER_SOURCE = 2400
 _MAX_DURATION_SECONDS = 1800.0
@@ -259,6 +275,107 @@ def one_line(notes: list[tuple[float, float, int, float]], *, tolerance: float =
     return sorted(kept, key=lambda item: (item[0], item[2]))
 
 
+def split_mix_lines(
+    notes: list[tuple[float, float, int, float]], *, tolerance: float = 0.03
+) -> dict[str, list[tuple[float, float, int, float]]]:
+    """Split full-mix notes into a lowest line, a top line and the chords between.
+
+    The lowest line keeps the lowest note wherever notes at or below E3
+    overlap (the loudest low note is often the bass's octave overtone). The
+    top line keeps the highest note wherever the remaining notes at or above
+    G3 overlap. Notes overlap when they share more than a quarter of the
+    shorter note; a smaller legato overlap keeps both, and the earlier note is
+    shortened to end where the next begins. Both lines ignore notes shorter
+    than 100 ms and weak notes that start inside a much stronger note (often
+    its overtone or undertone). Every other note stays in the chords line, so
+    no detected note is dropped.
+    """
+
+    def clash(first: tuple[float, float, int, float], second: tuple[float, float, int, float]) -> bool:
+        overlap = min(first[1], second[1]) - max(first[0], second[0])
+        shorter = min(first[1] - first[0], second[1] - second[0])
+        return overlap > max(tolerance, MIX_LINE_OVERLAP_SHARE * shorter)
+
+    def ghost(index: int, candidates: list[int]) -> bool:
+        # A weak note that starts inside a much stronger note and ends with it
+        # is usually that note's overtone or undertone, not a line of its own.
+        note = notes[index]
+        return any(
+            other != index
+            and notes[other][0] <= note[0] - MIX_GHOST_LEAD_SECONDS
+            and notes[other][1] >= note[1] - tolerance
+            and note[3] < MIX_GHOST_STRENGTH_SHARE * notes[other][3]
+            for other in candidates
+        )
+
+    def single_line(candidates: list[int], key) -> list[int]:
+        candidates = [index for index in candidates if not ghost(index, candidates)]
+        kept: list[int] = []
+        for index in sorted(candidates, key=key):
+            if not any(clash(notes[index], notes[other]) for other in kept):
+                kept.append(index)
+        return kept
+
+    def trimmed(indices: list[int]) -> list[tuple[float, float, int, float]]:
+        # A legato line keeps both notes; the earlier one ends where the next begins.
+        line = sorted((notes[index] for index in indices), key=lambda note: (note[0], note[2]))
+        for position in range(len(line) - 1):
+            start, end, midi, amplitude = line[position]
+            following = line[position + 1][0]
+            if end > following:
+                line[position] = (start, max(start + 0.02, following), midi, amplitude)
+        return line
+
+    long_enough = [index for index, note in enumerate(notes) if note[1] - note[0] >= MIX_LINE_MIN_SECONDS]
+    bass = single_line(
+        [index for index in long_enough if notes[index][2] <= MIX_BASS_MAX_MIDI],
+        key=lambda index: (notes[index][2], -notes[index][3], notes[index][0], index),
+    )
+    taken = set(bass)
+    melody = single_line(
+        [index for index in long_enough if index not in taken and notes[index][2] >= MIX_MELODY_MIN_MIDI],
+        key=lambda index: (-notes[index][2], -notes[index][3], notes[index][0], index),
+    )
+    taken.update(melody)
+    chords = [index for index in range(len(notes)) if index not in taken]
+    order = lambda note: (note[0], note[2])  # noqa: E731
+    return {
+        "mix_melody": trimmed(melody),
+        "mix_bass": trimmed(bass),
+        "mix_chords": sorted((notes[index] for index in chords), key=order),
+    }
+
+
+def _full_mix_notes(path: Path) -> tuple[list[tuple[float, float, int, float]], float]:
+    """Run the model once per full-mix file and reuse it for all three lines."""
+    global _mix_cache
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise NoteModelError("The audio could not be read for note detection.") from exc
+    key = (str(path.resolve()), info.st_mtime_ns, info.st_size)
+    with _mix_cache_lock:
+        if _mix_cache is not None and _mix_cache[0] == key:
+            return list(_mix_cache[1]), _mix_cache[2]
+    audio = _read_audio(path)
+    duration = audio.shape[0] / SAMPLE_RATE
+    rms = float(np.sqrt(np.mean(np.square(audio, dtype=np.float64)))) if audio.size else 0.0
+    if audio.size < SAMPLE_RATE // 4 or rms <= 1e-5:
+        notes: list[tuple[float, float, int, float]] = []
+    else:
+        notes = activations_to_notes(
+            model_activations(audio),
+            onset_threshold=_MIX_SETTINGS["onset"],
+            frame_threshold=_MIX_SETTINGS["frame"],
+            min_note_frames=int(round(_MIX_SETTINGS["min_ms"] / 1000.0 * (SAMPLE_RATE / FFT_HOP))),
+            min_hz=_MIX_SETTINGS["min_hz"],
+            max_hz=_MIX_SETTINGS["max_hz"],
+        )
+    with _mix_cache_lock:
+        _mix_cache = (key, list(notes), duration)
+    return notes, duration
+
+
 # ---------------------------------------------------------------------------
 # Detector with the same result contract as app.pitch_transcription
 
@@ -363,7 +480,102 @@ def transcribe_notes(audio_path: Path | str, *, source_kind: str, algorithm_vers
     return {"algorithmVersion": algorithm_version, "sourceKind": source_kind, "events": events, "warnings": warnings, "diagnostics": diagnostics}
 
 
+def _events_from_notes(
+    notes: list[tuple[float, float, int, float]], source_kind: str, duration: float
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    events = []
+    evidence = []
+    for index, (start, end, midi, amplitude) in enumerate(notes):
+        if not 0 <= midi <= 127:
+            continue
+        event_id = f"p{index + 1:06d}"
+        event_warnings = ["This note has a weak model activation."] if amplitude < 0.45 else []
+        events.append(
+            {
+                "id": event_id,
+                "sourceKind": source_kind,
+                "startSeconds": round(start, 4),
+                "endSeconds": round(min(duration, max(end, start + 0.02)), 4),
+                "midiNote": int(midi),
+                "midiPitch": float(midi),
+                "frequencyHz": float(440.0 * 2 ** ((midi - 69) / 12)),
+                "noteName": f"{_NOTE_NAMES[midi % 12]}{midi // 12 - 1}",
+                "confidence": round(amplitude, 4),
+                "velocity": int(min(127, max(1, round(1 + 126 * math.sqrt(amplitude))))),
+                "warnings": event_warnings,
+            }
+        )
+        evidence.append({"eventId": event_id, "modelActivation": round(amplitude, 4)})
+    return events, evidence
+
+
+_MIX_LINE_WARNINGS = {
+    "mix_melody": (
+        "Without separated stems, the melody is the top line of the full mix: the highest "
+        "note at or above G3 wherever notes overlap. It may follow a harmony or a chord's top note."
+    ),
+    "mix_bass": (
+        "Without separated stems, the bass line is the lowest line of the full mix: the lowest "
+        "note at or below E3 wherever notes overlap. Low chord notes can appear in it."
+    ),
+    "mix_chords": (
+        "Without separated stems, the chords line holds every other note heard in the full mix; "
+        "voicings mix several instruments and need review."
+    ),
+}
+
+
+def transcribe_mix_lines(audio_path: Path | str, *, algorithm_version: str = NOTE_MODEL_VERSION) -> list[dict[str, Any]]:
+    """Detect notes in the full mix once and return the three estimated lines."""
+    notes, duration = _full_mix_notes(Path(audio_path))
+    lines = split_mix_lines(notes)
+    results = []
+    for source_kind in MIX_LINE_KINDS:
+        line_notes = lines[source_kind]
+        warnings = [_MIX_LINE_WARNINGS[source_kind]]
+        if len(line_notes) > _MAX_NOTES_PER_SOURCE:
+            warnings.append(
+                f"The {source_kind.replace('mix_', '')} line gave {len(line_notes)} notes; "
+                f"the {_MAX_NOTES_PER_SOURCE} strongest are kept."
+            )
+            line_notes = sorted(
+                sorted(line_notes, key=lambda note: -note[3])[:_MAX_NOTES_PER_SOURCE],
+                key=lambda note: (note[0], note[2]),
+            )
+        events, evidence = _events_from_notes(line_notes, source_kind, duration)
+        if not events:
+            warnings.append("No notes passed the note model's thresholds for this line of the mix.")
+        results.append(
+            {
+                "algorithmVersion": algorithm_version,
+                "sourceKind": source_kind,
+                "events": events,
+                "warnings": warnings,
+                "diagnostics": {
+                    "model": {
+                        "version": algorithm_version,
+                        "sha256": MODEL_SHA256,
+                        "sampleRate": SAMPLE_RATE,
+                        "minHz": _MIX_SETTINGS["min_hz"],
+                        "maxHz": _MIX_SETTINGS["max_hz"],
+                        "onsetThreshold": _MIX_SETTINGS["onset"],
+                        "frameThreshold": _MIX_SETTINGS["frame"],
+                        "minNoteMs": _MIX_SETTINGS["min_ms"],
+                        "oneLine": source_kind != "mix_chords",
+                        "detectedNotes": len(notes),
+                        "keptNotes": len(events),
+                    },
+                    "eventing": {"eventEvidence": evidence},
+                },
+            }
+        )
+    return results
+
+
 __all__ = [
+    "MIX_BASS_MAX_MIDI",
+    "MIX_LINE_KINDS",
+    "MIX_MELODY_MIN_MIDI",
     "MODEL_SOURCE_KINDS",
     "NOTE_MODEL_VERSION",
     "NoteModelError",
@@ -371,5 +583,7 @@ __all__ = [
     "model_activations",
     "note_model_available",
     "one_line",
+    "split_mix_lines",
+    "transcribe_mix_lines",
     "transcribe_notes",
 ]

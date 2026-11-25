@@ -33,18 +33,34 @@ _LARGE_GAP_SECONDS = 1.5
 _MEASURE_GAP_BOUNDARY = 2
 _OVERLAP_EPSILON_SECONDS = 1e-9
 
-_SOURCE_PRIORITY = {"vocals": 0, "bass": 1, "other": 2, "full_mix": 3}
+_SOURCE_PRIORITY = {
+    "vocals": 0,
+    "bass": 1,
+    "other": 2,
+    "full_mix": 3,
+    "mix_melody": 4,
+    "mix_bass": 5,
+    "mix_chords": 6,
+}
+# Broad sources: no precise instrument can be inferred from them.
+_BROAD_SOURCES = frozenset({"other", "full_mix", "mix_chords"})
 _SOURCE_LABELS = {
     "vocals": "Vocals",
     "bass": "Bass",
     "other": "Other pitched source",
     "full_mix": "Full mix",
+    "mix_melody": "Top line of the full mix",
+    "mix_bass": "Lowest line of the full mix",
+    "mix_chords": "Rest of the full mix",
 }
 _SOURCE_ROLES = {
     "vocals": "vocal_line",
     "bass": "bass_line",
     "other": "unresolved_pitched_source",
     "full_mix": "unresolved_pitched_source",
+    "mix_melody": "unresolved_pitched_source",
+    "mix_bass": "bass_line",
+    "mix_chords": "unresolved_pitched_source",
 }
 _ALIGNMENT_FIELDS = {
     "eventId",
@@ -133,7 +149,7 @@ def infer_pitched_parts(
         voice_groups = _partition_voices(source_events)
         if len(voices) + len(voice_groups) > _MAX_VOICES:
             raise PitchedPartInferenceError("Too many pitched voices were inferred.")
-        if source_kind in {"other", "full_mix"}:
+        if source_kind in _BROAD_SOURCES:
             broad_source_event_ids.update(event["id"] for event in source_events)
 
         part_voice_ids: list[str] = []
@@ -203,7 +219,7 @@ def infer_pitched_parts(
             overlap_alternative_voices,
         )
         part_warnings = []
-        if source_kind in {"other", "full_mix"}:
+        if source_kind in _BROAD_SOURCES:
             part_warnings.append(
                 "The source kind remains broad; no precise instrument is inferred."
             )

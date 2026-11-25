@@ -788,7 +788,7 @@ def _rest_candidates(
                 "resolved": confidence >= _DURATION_CONFIDENCE_THRESHOLD,
                 "warnings": [],
             }
-            if source_kind in {"full_mix", "other"}:
+            if source_kind in {"full_mix", "other", "mix_melody", "mix_bass", "mix_chords"}:
                 rest.update(
                     confidence=min(
                         rest["confidence"],

@@ -166,12 +166,12 @@ def test_dense_stems_keep_only_the_strongest_notes(tmp_path, monkeypatch):
 # Choice of detector in the transcription pipeline
 
 
-def test_stems_use_the_note_model_and_the_full_mix_uses_pyin(tmp_path):
+def test_stems_and_the_full_mix_use_the_note_model(tmp_path):
     path = write(tmp_path, sequence([[43], [47], [50], [55]]))
     stem = transcription_pipeline.transcribe_pitched_source(path, source_kind="bass")
     mix = transcription_pipeline.transcribe_pitched_source(path, source_kind="full_mix")
     assert stem["algorithmVersion"] == NOTE_MODEL_VERSION
-    assert mix["algorithmVersion"] == "baseline-pyin-v1"
+    assert [line["algorithmVersion"] for line in mix["lines"]] == [NOTE_MODEL_VERSION] * 3
 
 
 def test_the_pipeline_falls_back_to_pyin_and_says_so(tmp_path, monkeypatch):

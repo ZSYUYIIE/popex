@@ -68,11 +68,13 @@ _TAB_GM_PROGRAMS = {"bass": 34, "guitar": 26}  # MusicXML 1-based: fingered bass
 SCORE_PARTS: dict[str, tuple[str, tuple[str, ...], int]] = {
     "lead-vocal": ("Lead vocal (draft)", ("vocals",), 54),
     "pitched-lines": ("Pitched lines (full mix, draft)", ("full_mix",), 1),
-    "accompaniment": ("Accompaniment reduction", ("other",), 1),
-    "bass-line": ("Bass line (draft)", ("bass",), 34),
+    "melody": ("Melody (top line of the full mix, draft)", ("mix_melody",), 1),
+    "accompaniment": ("Accompaniment reduction", ("other", "mix_chords"), 1),
+    "bass-line": ("Bass line (draft)", ("bass", "mix_bass"), 34),
     "other-lines": ("Other pitched lines (draft)", (), 1),
 }
 SCORE_PART_CLEFS = frozenset({"treble", "treble-8vb", "bass", "bass-8vb", "grand"})
+ACCOMPANIMENT_SOURCE_KINDS = SCORE_PARTS["accompaniment"][1]
 _PART_FOR_SOURCE = {
     source: part_id for part_id, (_name, sources, _program) in SCORE_PARTS.items() for source in sources
 }
@@ -1056,7 +1058,7 @@ def _part_clef(part_id: str, pitches: Sequence[int]) -> str:
         return "treble" if median >= _GRAND_SPLIT else "bass"
     if part_id == "bass-line":
         return "bass-8vb" if median < 48 else "bass"
-    if part_id == "lead-vocal":
+    if part_id in {"lead-vocal", "melody"}:
         if median >= 60:
             return "treble"
         return "treble-8vb" if median >= 48 else "bass"
@@ -1873,6 +1875,7 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
 
 
 __all__ = [
+    "ACCOMPANIMENT_SOURCE_KINDS",
     "PERCUSSION_MIDI_CHANNEL",
     "PERCUSSION_NOTATION",
     "SCORE_BUILDER_VERSION",

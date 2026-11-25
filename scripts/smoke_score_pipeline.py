@@ -145,8 +145,13 @@ def run(data_dir: Path) -> dict:
         step("Transcription", f"/api/jobs/{job_id}/transcribe", "transcription")
         step("Interpretation", f"/api/jobs/{job_id}/interpret", "interpretation")
         step("Harmony", f"/api/jobs/{job_id}/harmonize", "harmony")
+        # Without stems the note model splits the full mix into lines; the
+        # melody is its top line. The pYIN fallback writes one full-mix line.
+        from app.note_model import note_model_available
+
+        melody_line = "mix_melody" if note_model_available() else "full_mix"
         choice = client.put(
-            f"/api/jobs/{job_id}/score/tablature", json={"bass": "bass", "guitar": "full_mix"}
+            f"/api/jobs/{job_id}/score/tablature", json={"bass": "bass", "guitar": melody_line}
         )
         if choice.status_code != 200:
             raise SystemExit(f"Tablature choice was rejected: {choice.status_code} {choice.text}")
@@ -214,6 +219,8 @@ def run(data_dir: Path) -> dict:
             note
             for note in root.findall("part[@id='P4']/measure/note")
             if note.find("notations/technical/fret") is not None
+            # A note held across a bar line is written again, tied; count it once.
+            and note.find("tie[@type='stop']") is None
         ]
         summary = {
             "jobId": job_id,
