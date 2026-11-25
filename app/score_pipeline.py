@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,7 +87,7 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v7"
+SCORE_PIPELINE_VERSION = "score-pipeline-v8"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
@@ -96,6 +96,7 @@ PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
 PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipeline-v4"}
 PRE_BEAT_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline-v5"}
 PRE_SECTIONS_PIPELINE_VERSIONS = PRE_BEAT_GRID_PIPELINE_VERSIONS | {"score-pipeline-v6"}
+PRE_RHYTHM_GRID_PIPELINE_VERSIONS = PRE_SECTIONS_PIPELINE_VERSIONS | {"score-pipeline-v7"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -136,6 +137,45 @@ _LOGGER = logging.getLogger(__name__)
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _check_notes_on_their_grids(
+    measures: Sequence[Mapping[str, Any]], grids: Sequence[Mapping[str, Any]]
+) -> None:
+    """Refuse to save a prediction whose notes are off their line's grid."""
+    unit_for_kind = {grid["sourceKind"]: grid["unitBeats"] for grid in grids}
+    for measure in measures:
+        for note in measure["notes"]:
+            unit = unit_for_kind.get(note.get("sourceKind", "unassigned"))
+            if unit is None:
+                raise ScorePipelineError("A note's source line has no rhythm grid.")
+            for key in ("quantizedBeat", "quantizedEndBeat"):
+                steps = float(note[key]) / unit
+                if abs(steps - round(steps)) > 1e-9:
+                    raise ScorePipelineError("A note does not sit on its line's rhythm grid.")
+
+
+def rhythm_grid_note(grids: Sequence[Mapping[str, Any]]) -> str:
+    """Describe each line's quantization grid in musician-facing words."""
+    if not grids:
+        return "Quantized from raw pitched events; no notes were available."
+    sixteenth = [
+        _SOURCE_LABELS.get(grid["sourceKind"], "unlabelled line")
+        for grid in grids
+        if grid["unit"] == "sixteenth"
+    ]
+    if not sixteenth:
+        return "Quantized from raw pitched events to an eighth-note grid."
+    if len(sixteenth) == len(grids):
+        return (
+            "Quantized from raw pitched events to a sixteenth-note grid, "
+            "which the note onsets support."
+        )
+    return (
+        "Quantized from raw pitched events to a sixteenth-note grid for the "
+        + ", ".join(sorted(sixteenth))
+        + ", where the note onsets support it, and an eighth-note grid elsewhere."
+    )
 
 
 def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
@@ -191,6 +231,13 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and measures >= MIN_BARS_FOR_SECTIONS
     ):
         return "sections"
+    if (
+        version in PRE_RHYTHM_GRID_PIPELINE_VERSIONS
+        and isinstance(notes, int)
+        and not isinstance(notes, bool)
+        and notes > 0
+    ):
+        return "rhythm-grid"
     return None
 
 
@@ -726,6 +773,7 @@ def construct_score(
             "The saved evidence could not be placed into measures safely."
         ) from exc
     measures = built["measures"]
+    _check_notes_on_their_grids(measures, built["rhythmGrids"])
     for measure in measures:
         measure["harmony"] = []
     seconds_per_beat = 60.0 / built["tempoBpm"]
@@ -1036,7 +1084,7 @@ def construct_score(
         "layers": {
             "pitchedNotes": {
                 "status": "included",
-                "note": "Quantized from raw pitched events to an eighth-note grid.",
+                "note": rhythm_grid_note(built["rhythmGrids"]),
             },
             "chordSymbols": {
                 "status": "included" if segments is not None else "omitted",
@@ -1061,6 +1109,7 @@ def construct_score(
         "tonality": tonality,
         "scoreParts": score_parts,
         "sections": sections,
+        "rhythmGrids": built["rhythmGrids"],
         "tablature": {
             "version": TABLATURE_VERSION,
             "origin": tab_origin,
