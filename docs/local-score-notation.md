@@ -75,7 +75,7 @@ MusicXML locally. Keep structured review/corrections and downloads available.
 No score construction, inference or private recording upload to a service occurs.
 No runtime CDN, account, telemetry, paid API or model download is permitted.
 
-The view renders a selected window of 1–128 bars, with the exact range shown;
+The view renders a selected window of 1–128 bars, with the exact range shown. Only the chosen bars are loaded into the renderer (with the clef, key and time carried forward and the full score's bar numbers kept), so section marks and other directions on the first shown bar are drawn;
 change the range to read the rest of a long score. Downloads always contain the
 whole score/part. Browser XML reads are capped at 8 MiB and 20,000 notes; larger
 scores keep working through downloads and the existing structured review.

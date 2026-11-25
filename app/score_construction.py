@@ -1437,6 +1437,62 @@ def _musicxml_pitched_score_part(part_list: ET.Element, xml_id: str, name: str, 
         ).text = str(program)
 
 
+READING_REDUCTION_MAX_PER_STAFF = 4
+
+
+def reading_reduction(
+    notes: Sequence[Mapping[str, Any]],
+    *,
+    split_staves: bool = True,
+    max_per_chord: int | None = READING_REDUCTION_MAX_PER_STAFF,
+) -> tuple[list[dict[str, Any]], int]:
+    """Make a dense accompaniment readable on a grand staff.
+
+    On each staff (split at middle C) the notes that start together become one
+    chord, held until the next chord on that staff starts (never longer than
+    its longest note). A chord keeps at most four notes, the most confident
+    first; repeated pitches are written once. Returns the reduced notes and how
+    many notes were left out. Only the notation uses this: the score data and
+    MIDI keep every note with its own timing.
+
+    With ``max_per_chord=None`` no note is left out (used for fretted parts,
+    whose every note carries a fingering); only overlapping holds are shortened.
+    """
+    reduced: list[dict[str, Any]] = []
+    left_out = 0
+    sides = (True, False) if split_staves else (None,)
+    for upper in sides:
+        side = [
+            note for note in notes
+            if upper is None or (note["midiNote"] >= _GRAND_SPLIT) == upper
+        ]
+        groups: dict[float, list[Mapping[str, Any]]] = {}
+        for note in side:
+            groups.setdefault(note["quantizedBeat"], []).append(note)
+        onsets = sorted(groups)
+        for index, onset in enumerate(onsets):
+            ranked = sorted(
+                groups[onset],
+                key=lambda note: (-(note.get("confidence") if note.get("confidence") is not None else 1.0),
+                                  note["midiNote"], note["id"]),
+            )
+            chosen: list[Mapping[str, Any]] = []
+            pitches: set[int] = set()
+            for note in ranked:
+                if max_per_chord is not None and (
+                    note["midiNote"] in pitches or len(chosen) >= max_per_chord
+                ):
+                    left_out += 1
+                    continue
+                pitches.add(note["midiNote"])
+                chosen.append(note)
+            end = max(note["quantizedEndBeat"] for note in chosen)
+            if index + 1 < len(onsets):
+                end = min(end, onsets[index + 1])
+            reduced.extend({**note, "quantizedEndBeat": end} for note in chosen)
+    return reduced, left_out
+
+
 def _musicxml_pitched_part(
     root: ET.Element,
     xml_id: str,
@@ -1589,13 +1645,20 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
                     "quantizedBeat": start_beat,
                     "quantizedEndBeat": end_beat,
                     "tab": _parse_note_tab(note.get("tab"), midi_note),
+                    "confidence": note.get("confidence"),
                 }
             )
     if len(all_notes) > _MAX_NOTES:
         raise ScoreConstructionError("Too many score notes.")
 
+    # Fretted parts keep every note and fingering; overlapping holds are
+    # shortened to the next note so the staff reads in few voices.
     tab_notes = {
-        instrument: [note for note in all_notes if note["tab"] and note["tab"]["instrument"] == instrument]
+        instrument: reading_reduction(
+            [note for note in all_notes if note["tab"] and note["tab"]["instrument"] == instrument],
+            split_staves=False,
+            max_per_chord=None,
+        )[0]
         for instrument in TAB_INSTRUMENT_ORDER
     }
     combined_notes = [note for note in all_notes if note["tab"] is None]
@@ -1606,12 +1669,16 @@ def score_to_musicxml_text(document: Mapping[str, Any], *, only_part: str | None
     # Schema-5 documents carry ``scoreParts``: untabbed notes are split into
     # instrument parts by source line. Earlier documents keep one part.
     if "scoreParts" in document:
-        pitched = [
-            (item["id"], item["name"], item["clef"], SCORE_PARTS[item["id"]][2],
-             [note for note in combined_notes
-              if _PART_FOR_SOURCE.get(note["sourceKind"], "other-lines") == item["id"]])
-            for item in plan_score_parts(combined_notes)
-        ]
+        pitched = []
+        for item in plan_score_parts(combined_notes):
+            members = [
+                note for note in combined_notes
+                if _PART_FOR_SOURCE.get(note["sourceKind"], "other-lines") == item["id"]
+            ]
+            if item["id"] == "accompaniment":
+                # A reading reduction; the data and MIDI keep every note.
+                members = reading_reduction(members)[0]
+            pitched.append((item["id"], item["name"], item["clef"], SCORE_PARTS[item["id"]][2], members))
     else:
         pitched = [
             ("combined", "Other Pitched Lines" if any(tab_notes.values()) else "Draft Pitched Events",

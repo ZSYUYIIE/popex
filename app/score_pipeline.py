@@ -56,6 +56,8 @@ from app.score_artifacts import (
 )
 from app.percussion_interpretation import broad_voice_for_hit
 from app.score_construction import (
+    READING_REDUCTION_MAX_PER_STAFF,
+    reading_reduction,
     PERCUSSION_NOTATION,
     SCORE_BUILDER_VERSION,
     SCORE_SCHEMA_VERSION,
@@ -101,7 +103,7 @@ _SOURCE_LABELS = {
     "full_mix": "full-mix melody line",
 }
 SCORE_MIDI_EXPORT_VERSION = "smf-type1-parts-v3"
-SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v3"
+SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v4"
 
 _MAX_WARNINGS = 32
 _MAX_MEASURE_HARMONY = 16
@@ -942,9 +944,24 @@ def construct_score(
                 "a playable chord shape and are left without a position."
             )
     if any(item["id"] == "accompaniment" for item in score_parts):
+        accompaniment = [
+            note
+            for measure in measures
+            for note in measure["notes"]
+            if note["tab"] is None and note["sourceKind"] == "other"
+        ]
+        _reduced, left_out = reading_reduction(accompaniment)
         warnings.append(
             "The accompaniment reduction collects the separated accompaniment stem on a "
-            "grand staff; it is not split into specific instruments."
+            "grand staff; it is not split into specific instruments. For reading, notes "
+            "that start together are written as one chord held until the next chord, "
+            f"with at most {READING_REDUCTION_MAX_PER_STAFF} notes per staff"
+            + (
+                f"; {left_out} quieter or repeated note(s) are left out of the notation "
+                "but kept in the score data and MIDI."
+                if left_out
+                else "."
+            )
         )
     if fingered_count:
         warnings.append(

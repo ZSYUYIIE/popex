@@ -30,7 +30,7 @@ Under the strip, **Name the sections** lists every section with a box for its na
 
 When a letter repeats and only one of its sections gets a new name, **Give every section with the same letter the same name** (on by default) copies that name to the others. Turn it off to name repeats separately, for example "Chorus 1" and "Chorus 2".
 
-Named sections show the name first and keep the letter: on the strip ("Chorus, D · 29-44"), on the notation page's section buttons ("Chorus (D)"), and as the rehearsal mark text in the corrected MusicXML. The original-prediction download keeps the letters. The in-app notation renderer does not draw rehearsal marks; notation programs that open the MusicXML do.
+Named sections show the name first and keep the letter: on the strip ("Chorus, D · 29-44"), on the notation page's section buttons ("Chorus (D)"), and as the rehearsal mark text in the corrected MusicXML. The original-prediction download keeps the letters. The in-app notation view draws the marks too, including on the first bar of the range you render.
 
 Correction: `{"op": "set_section_name", "target": {"startMeasure": 28}, "name": "Chorus"}` (name 1 to 40 characters on one line, or `null` to clear). It does not apply when no section starts at that bar, for example after the score is drafted again with different sections.
 

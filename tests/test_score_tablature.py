@@ -446,10 +446,31 @@ def _tab_document() -> dict:
 
 
 def test_tab_export_writes_each_note_once_with_ties_on_both_staves() -> None:
-    root = ET.fromstring(score_to_musicxml_text(_tab_document()))
+    document = _tab_document()
+    root = ET.fromstring(score_to_musicxml_text(document))
     bass = root.find("part[@id='P3']")
+    fingered = [
+        note for measure in document["measures"] for note in measure["notes"]
+        if note["tab"] and note["tab"]["instrument"] == "bass" and note["tab"]["status"] == "assigned"
+    ]
+    tab_staff = [note for note in bass.iter("note") if note.findtext("staff") == "2" and note.find("tie") is None]
+    # Overlapping bass holds end at the next note, so every fingered note is
+    # written once and each staff reads in one voice.
+    assert len(tab_staff) == len(fingered)
+    assert {note.findtext("voice") for note in bass.iter("note") if note.findtext("staff") == "1"} == {"1"}
+
+    # A held note that crosses a bar line is still tied on both staves.
+    held = build_score_document(
+        [{"id": "h", "sourceKind": "bass", "startSeconds": 1.5, "endSeconds": 3.0, "midiNote": 33, "confidence": 0.9}],
+        tempo_bpm=120.0,
+    )
+    flat = [note for measure in held["measures"] for note in measure["notes"]]
+    positions = assign_tablature(flat, "bass")
+    for note in flat:
+        note["tab"] = {"instrument": "bass", **positions[note["id"]]}
+    held_part = ET.fromstring(score_to_musicxml_text(held)).find("part[@id='P3']")
     tied_tab = [
-        note for note in bass.iter("note")
+        note for note in held_part.iter("note")
         if note.findtext("staff") == "2" and note.find("tie") is not None
     ]
     assert tied_tab  # sustained bass notes tie across bars on the TAB staff too
