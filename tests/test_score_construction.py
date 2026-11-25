@@ -556,3 +556,60 @@ def test_different_sources_never_share_a_chord() -> None:
     notes = ET.fromstring(score_to_musicxml_text(document)).findall("part/measure/note")
     assert all(n.find("chord") is None for n in notes)
     assert len({n.findtext("voice") for n in notes}) == 2
+
+
+def _reading_note(note_id, start, end, midi, confidence=0.9):
+    return {"id": note_id, "midiNote": midi, "quantizedBeat": start, "quantizedEndBeat": end,
+            "confidence": confidence, "sourceKind": "other", "tab": None}
+
+
+def test_reading_reduction_holds_each_chord_until_the_next_one() -> None:
+    from app.score_construction import reading_reduction
+
+    notes = [
+        _reading_note("a", 0.0, 3.0, 64), _reading_note("b", 0.0, 1.5, 67), _reading_note("c", 0.0, 2.0, 72),
+        _reading_note("d", 1.0, 2.0, 65),            # next chord on the upper staff
+        _reading_note("low", 0.0, 4.0, 48),           # lower staff keeps its own timing
+    ]
+    reduced, left_out = reading_reduction(notes)
+    by_id = {note["id"]: note for note in reduced}
+    assert left_out == 0
+    assert {by_id[key]["quantizedEndBeat"] for key in ("a", "b", "c")} == {1.0}
+    assert by_id["d"]["quantizedEndBeat"] == 2.0 and by_id["low"]["quantizedEndBeat"] == 4.0
+    assert notes[0]["quantizedEndBeat"] == 3.0  # the input is not changed
+
+
+def test_reading_reduction_keeps_the_four_most_confident_notes_per_staff() -> None:
+    from app.score_construction import reading_reduction
+
+    notes = [_reading_note(f"n{i}", 0.0, 1.0, 60 + i, confidence=0.1 * (i + 1)) for i in range(6)]
+    notes.append(_reading_note("again", 0.0, 1.0, 65, confidence=0.95))  # same pitch as n5
+    reduced, left_out = reading_reduction(notes)
+    assert sorted(note["id"] for note in reduced) == ["again", "n2", "n3", "n4"]
+    assert left_out == 3
+    everything, none_left = reading_reduction(notes, split_staves=False, max_per_chord=None)
+    assert len(everything) == len(notes) and none_left == 0
+
+
+def test_accompaniment_notation_reads_in_one_voice_per_staff() -> None:
+    from app.score_construction import plan_score_parts
+
+    events = [
+        _note(f"o{i}", start, start + length, midi, source_kind="other")
+        for i, (start, length, midi) in enumerate(
+            [(0.0, 1.5, 64), (0.0, 0.75, 67), (0.0, 1.0, 72), (0.5, 1.0, 69), (1.0, 1.5, 48), (1.0, 0.5, 52)]
+        )
+    ]
+    document = build_score_document(events, tempo_bpm=120.0)
+    for measure in document["measures"]:
+        for note in measure["notes"]:
+            note["tab"] = None
+    document["scoreParts"] = plan_score_parts([n for m in document["measures"] for n in m["notes"]])
+    part = ET.fromstring(score_to_musicxml_text(document)).find("part")
+    voices = {(note.findtext("staff"), note.findtext("voice")) for note in part.iter("note") if note.find("pitch") is not None}
+    assert voices == {("1", "1"), ("2", "5")}
+    # MIDI keeps every note with its own length.
+    from midi_reader import read_midi
+
+    midi = read_midi(score_to_midi_bytes(document))
+    assert sum(1 for _t, status, _d in midi.tracks[1].channel if status & 0xF0 == 0x90) == 6
