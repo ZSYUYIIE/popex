@@ -9,6 +9,12 @@ from app.beat_grid import BEAT_GRID_VERSION, BeatGrid, build_beat_grid
 from app.score_construction import ScoreConstructionError, build_score_document
 
 
+
+def _distance_to_bar_start(beat: float, meter: int = 4) -> float:
+    """Distance to the nearest bar start, so 3.9999999 and 0.0000001 both count as 0."""
+    phase = beat % meter
+    return min(phase, meter - phase)
+
 def steady_beats(tempo: float = 120.0, count: int = 64, first: float = 0.0) -> list[float]:
     beat = 60.0 / tempo
     return [first + index * beat for index in range(count)]
@@ -198,7 +204,7 @@ def test_backbeat_finds_the_first_beat_of_the_bar(downbeat_index):
     assert grid.bar_phase_confidence is not None and grid.bar_phase_confidence >= 0.15
     # Every kick on beat 1 falls on a bar line.
     for index in range(downbeat_index, 96, 4):
-        assert grid.beat_at(beats[index]) % 4 == pytest.approx(0.0, abs=1e-6)
+        assert _distance_to_bar_start(grid.beat_at(beats[index])) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_a_pickup_gets_its_own_first_bar():
@@ -244,7 +250,7 @@ def test_confident_analysis_downbeats_are_used_when_the_drums_are_silent():
     )
 
     assert confident.bar_phase_source == "analysis"
-    assert confident.beat_at(beats[2]) % 4 == pytest.approx(0.0, abs=1e-6)
+    assert _distance_to_bar_start(confident.beat_at(beats[2])) == pytest.approx(0.0, abs=1e-6)
     assert unsure.bar_phase_source == "none"
 
 
@@ -259,7 +265,7 @@ def test_drums_outrank_analysis_downbeats():
         analysis_meter_confidence=0.9,
     )
     assert grid.bar_phase_source == "drums"
-    assert grid.beat_at(beats[0]) % 4 == pytest.approx(0.0, abs=1e-6)
+    assert _distance_to_bar_start(grid.beat_at(beats[0])) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_grid_covers_the_whole_recording_in_whole_bars():
@@ -424,7 +430,7 @@ def test_saved_score_records_the_grid_and_follows_tracked_beats(tmp_path):
     # The analysis reports 120 BPM but the tracked beats run at 100 BPM.
     details = _build_saved_score(tmp_path, steady_beats(100.0, 32, first=0.25))
 
-    assert details["version"] == "score-pipeline-v7"
+    assert details["version"] == "score-pipeline-v8"
     grid = details["timing"]["beatGrid"]
     assert grid["version"] == BEAT_GRID_VERSION
     assert grid["mode"] == "steady"
@@ -452,11 +458,14 @@ def test_scores_built_on_one_tempo_are_flagged_for_rebuild():
 
     old = {"score_version": "score-pipeline-v5", "score_note_count": 3, "score_measure_count": 12}
     assert score_outdated_reason(old) == "beat-grid"
-    assert score_outdated_reason({**old, "score_measure_count": 1}) is None
+    # A one-bar score has no beat-grid drift; it is only flagged for the
+    # per-line rhythm grids its notes predate.
+    assert score_outdated_reason({**old, "score_measure_count": 1}) == "rhythm-grid"
     # Scores from before song sections are rebuilt once they are long enough to have them.
-    assert score_outdated_reason({**old, "score_version": "score-pipeline-v6"}) is None
+    assert score_outdated_reason({**old, "score_version": "score-pipeline-v6"}) == "rhythm-grid"
     assert score_outdated_reason({**old, "score_version": "score-pipeline-v6", "score_measure_count": 40}) == "sections"
-    assert score_outdated_reason({**old, "score_version": "score-pipeline-v7", "score_measure_count": 40}) is None
+    assert score_outdated_reason({**old, "score_version": "score-pipeline-v7", "score_measure_count": 40}) == "rhythm-grid"
+    assert score_outdated_reason({**old, "score_version": "score-pipeline-v8", "score_measure_count": 40}) is None
 
 
 @pytest.mark.parametrize(
@@ -493,11 +502,11 @@ def test_tampered_grid_summaries_are_rejected(tmp_path, mutate):
         expected_fingerprint=current_score_fingerprint(record),
     )
     document = result.payload
-    assert validate_score_artifact(document)["schemaVersion"] == 7
+    assert validate_score_artifact(document)["schemaVersion"] == 8
     mutate(document["timing"]["beatGrid"])
     with pytest.raises(ScoreArtifactValidationError):
         validate_score_artifact(document)
-    assert score_pipeline.SCORE_PIPELINE_VERSION == "score-pipeline-v7"
+    assert score_pipeline.SCORE_PIPELINE_VERSION == "score-pipeline-v8"
 
 
 def test_schema_five_scores_cannot_carry_a_grid_and_schema_six_must(tmp_path):
@@ -518,7 +527,7 @@ def test_schema_five_scores_cannot_carry_a_grid_and_schema_six_must(tmp_path):
         attempt_id="b" * 32,
         expected_fingerprint=current_score_fingerprint(record),
     ).payload
-    older = {key: value for key, value in document.items() if key != "sections"}
+    older = {key: value for key, value in document.items() if key not in {"sections", "rhythmGrids"}}
     older["schemaVersion"] = 5
     with pytest.raises(ScoreArtifactValidationError):
         validate_score_artifact(older)

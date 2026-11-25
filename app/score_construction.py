@@ -51,7 +51,7 @@ from app.tablature import (
 )
 
 SCORE_SCHEMA_VERSION = 1
-SCORE_BUILDER_VERSION = "score-construction-v5"
+SCORE_BUILDER_VERSION = "score-construction-v6"
 # Fixed MusicXML part identities: combined pitched part, drums, then one part
 # per fretted instrument (standard staff plus a synchronized TAB staff).
 _TAB_PART_IDS = {"bass": "P3", "guitar": "P4"}
@@ -388,20 +388,26 @@ def build_score_document(
             raise ScoreConstructionError("Too many chord symbols.")
 
     sorted_notes = sorted(notes, key=lambda item: (item["startSeconds"], item["endSeconds"], item["id"]))
+    rhythm_grids = choose_rhythm_grids(
+        sorted_notes, seconds_per_beat=seconds_per_beat, beat_grid=beat_grid
+    )
+    unit_for_kind = {grid["sourceKind"]: grid["unitBeats"] for grid in rhythm_grids}
     for note in sorted_notes:
+        unit = unit_for_kind[note.get("sourceKind", "unassigned")]
+        steps = 1.0 / unit
         if beat_grid is None:
             note["rawStartBeat"] = note["startSeconds"] / seconds_per_beat
             note["rawEndBeat"] = note["endSeconds"] / seconds_per_beat
-            note["quantizedStartBeat"] = round(note["rawStartBeat"] * 2.0) / 2.0
-            note["quantizedEndBeat"] = round(note["rawEndBeat"] * 2.0) / 2.0
+            note["quantizedStartBeat"] = round(note["rawStartBeat"] * steps) / steps
+            note["quantizedEndBeat"] = round(note["rawEndBeat"] * steps) / steps
         else:
             note["rawStartBeat"] = beat_grid.beat_at(note["startSeconds"])
             note["rawEndBeat"] = beat_grid.beat_at(note["endSeconds"])
             # Sound before bar 1 (a short lead-in) is placed on its first beat.
-            note["quantizedStartBeat"] = max(0.0, round(note["rawStartBeat"] * 2.0) / 2.0)
-            note["quantizedEndBeat"] = max(0.0, round(note["rawEndBeat"] * 2.0) / 2.0)
+            note["quantizedStartBeat"] = max(0.0, round(note["rawStartBeat"] * steps) / steps)
+            note["quantizedEndBeat"] = max(0.0, round(note["rawEndBeat"] * steps) / steps)
         if note["quantizedEndBeat"] <= note["quantizedStartBeat"]:
-            note["quantizedEndBeat"] = note["quantizedStartBeat"] + 0.5
+            note["quantizedEndBeat"] = note["quantizedStartBeat"] + unit
         if beat_grid is None:
             note["startShiftSeconds"] = abs(
                 note["quantizedStartBeat"] - note["rawStartBeat"]
@@ -503,7 +509,8 @@ def build_score_document(
         )
     if large_shift:
         warnings.append(
-            f"{large_shift} note(s) start or end shifted by more than 50ms during 8th-note quantization."
+            f"{large_shift} note(s) start or end shifted by more than 50ms during quantization to "
+            f"{_grid_phrase(rhythm_grids)}."
         )
     if fractional_pitch:
         warnings.append(
@@ -531,6 +538,7 @@ def build_score_document(
         "divisions": _DIVISIONS,
         "measureCount": measure_count,
         "noteCount": len(sorted_notes),
+        "rhythmGrids": rhythm_grids,
         "measures": measures,
         "warnings": warnings,
     }
@@ -539,6 +547,94 @@ def build_score_document(
     if beat_grid is not None:
         document["beatGrid"] = beat_grid.summary()
     return copy.deepcopy(document)
+
+
+# A line earns a sixteenth grid only from clear onset evidence; eighths stay
+# the default. See docs/rhythm-grids.md for the rule and its rationale.
+RHYTHM_GRID_UNITS = {"eighth": 0.5, "sixteenth": 0.25}
+RHYTHM_GRID_REASONS = frozenset(
+    {"off-eighth-onsets", "insufficient-evidence", "tempo-too-fast"}
+)
+GRID_MIN_CONFIDENCE = 0.50
+GRID_ONSET_TOLERANCE_SECONDS = 0.030
+GRID_MIN_SUPPORTING_ONSETS = 3
+GRID_MIN_SUPPORTING_SHARE = 0.15
+GRID_MIN_SIXTEENTH_SECONDS = 0.090
+
+
+def choose_rhythm_grids(
+    notes: Sequence[Mapping[str, Any]],
+    *,
+    seconds_per_beat: float,
+    beat_grid: Any = None,
+) -> list[dict[str, Any]]:
+    """Choose an eighth or sixteenth grid per source line from onset evidence.
+
+    An onset supports sixteenths when it sits within 30 ms of an off-eighth
+    sixteenth position (the "e" or "a" of a beat). Positions and distances are
+    measured on ``beat_grid`` when given, so a recording whose tempo moves is
+    judged against its own tracked beats. A line switches to sixteenths only
+    with at least three such confident onsets making up at least 15% of its
+    confident onsets, and only when a sixteenth lasts at least 90 ms at this
+    tempo. The evidence counts are returned for review.
+    """
+    tempo_seconds_per_beat = (
+        60.0 / beat_grid.tempo_bpm if beat_grid is not None else seconds_per_beat
+    )
+    tempo_allows = tempo_seconds_per_beat / 4.0 >= GRID_MIN_SIXTEENTH_SECONDS
+    by_kind: dict[str, list[Mapping[str, Any]]] = {}
+    for note in notes:
+        by_kind.setdefault(note.get("sourceKind", "unassigned"), []).append(note)
+    grids: list[dict[str, Any]] = []
+    for source_kind in sorted(by_kind):
+        confident = [
+            note for note in by_kind[source_kind] if note["confidence"] >= GRID_MIN_CONFIDENCE
+        ]
+        supporting = 0
+        for note in confident:
+            start = note["startSeconds"]
+            if beat_grid is None:
+                position = start / seconds_per_beat * 4.0
+                slot = round(position)
+                distance = abs(position - slot) * seconds_per_beat / 4.0
+            else:
+                position = beat_grid.beat_at(start) * 4.0
+                slot = round(position)
+                distance = abs(beat_grid.seconds_at(slot / 4.0) - start)
+            if slot % 2 == 1 and distance <= GRID_ONSET_TOLERANCE_SECONDS:
+                supporting += 1
+        sixteenth = (
+            tempo_allows
+            and supporting >= GRID_MIN_SUPPORTING_ONSETS
+            and supporting >= GRID_MIN_SUPPORTING_SHARE * len(confident)
+        )
+        if sixteenth:
+            reason = "off-eighth-onsets"
+        elif not tempo_allows and supporting:
+            reason = "tempo-too-fast"
+        else:
+            reason = "insufficient-evidence"
+        unit = "sixteenth" if sixteenth else "eighth"
+        grids.append(
+            {
+                "sourceKind": source_kind,
+                "unit": unit,
+                "unitBeats": RHYTHM_GRID_UNITS[unit],
+                "confidentOnsets": len(confident),
+                "offEighthOnsets": supporting,
+                "reason": reason,
+            }
+        )
+    return grids
+
+
+def _grid_phrase(grids: Sequence[Mapping[str, Any]]) -> str:
+    units = {grid["unit"] for grid in grids}
+    if units == {"sixteenth"}:
+        return "the 16th-note grid"
+    if units == {"eighth"} or not units:
+        return "the 8th-note grid"
+    return "each line's 8th- or 16th-note grid"
 
 
 def percussion_hit_counts(hits: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1775,7 +1871,10 @@ __all__ = [
     "UNRESOLVED_PERCUSSION_VOICE",
     "SCORE_PARTS",
     "SCORE_PART_CLEFS",
+    "RHYTHM_GRID_REASONS",
+    "RHYTHM_GRID_UNITS",
     "build_score_document",
+    "choose_rhythm_grids",
     "percussion_hit_counts",
     "plan_score_parts",
     "percussion_warnings",

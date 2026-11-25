@@ -90,7 +90,7 @@ def test_default_tabs_only_the_bass_stem_line(tmp_path: Path) -> None:
         details = build(client, job_id)
         root = musicxml(client, job_id)
 
-    assert details["version"] == "score-pipeline-v7"
+    assert details["version"] == "score-pipeline-v8"
     tablature = details["tablature"]
     assert tablature["origin"] == "default"
     assert tablature["request"] == {"bass": "bass", "guitar": None}
@@ -285,6 +285,7 @@ def test_schema_two_scores_stay_readable_and_report_missing_tablature(tmp_path: 
     del legacy["tonality"]
     del legacy["scoreParts"]
     del legacy["sections"]
+    del legacy["rhythmGrids"]
     del legacy["counts"]["tabNotes"], legacy["counts"]["fingeredTabNotes"]
     del legacy["timing"]["beatGrid"]
     for note in notes_of(legacy):

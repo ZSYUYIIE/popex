@@ -4185,6 +4185,12 @@ def _saved_score_payload(
             "This score was built before song sections were available; draft it "
             "again to mark where the sections change and which ones repeat.",
         )
+    elif outdated == "rhythm-grid":
+        warnings.insert(
+            0,
+            "This score was built before sixteenth-note rhythms were supported; "
+            "rebuild it so lines whose onsets show sixteenths use a sixteenth-note grid.",
+        )
     if evidence_changed:
         warnings.insert(
             0,
