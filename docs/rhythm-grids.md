@@ -13,7 +13,7 @@ The line gets a sixteenth-note grid when all of these hold:
 
 - at least **3** confident onsets count;
 - they are at least **15%** of the line's confident onsets;
-- a sixteenth lasts at least **90 ms** at the score's tempo (up to about 166 BPM). Faster than that, sixteenths are hard to read and easy to mis-detect, so the line keeps eighths and the score says the tempo was too fast.
+- a sixteenth lasts at least **90 ms** at the score's tempo (up to about 166 BPM). Faster than that, sixteenths are hard to read and easy to mis-detect, so the line keeps eighths and the score says the tempo was too fast. When the tempo moves, an onset only counts where the local sixteenth lasts 90 ms, so a fast passage cannot earn sixteenths that would be unreadable there.
 
 Otherwise the line keeps the eighth-note grid, so a few stray early or late notes never turn a straight line into a busy one.
 

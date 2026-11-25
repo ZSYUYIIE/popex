@@ -37,6 +37,8 @@ from app.config import Settings
 from app.song_sections import SectionError, validate_sections
 from app.score_construction import (
     PERCUSSION_NOTATION,
+    GRID_MIN_SUPPORTING_ONSETS,
+    GRID_MIN_SUPPORTING_SHARE,
     RHYTHM_GRID_REASONS,
     RHYTHM_GRID_UNITS,
     UNRESOLVED_PERCUSSION_VOICE,
@@ -800,8 +802,11 @@ def _validate_rhythm_grids(value: Any, measures: Sequence[Any]) -> None:
             raise _fail(f"{label} reason does not match its unit.")
         confident = _integer(grid["confidentOnsets"], f"{label}.confidentOnsets", 0, 1_000_000)
         supporting = _integer(grid["offEighthOnsets"], f"{label}.offEighthOnsets", 0, confident)
-        if unit == "sixteenth" and supporting == 0:
-            raise _fail(f"{label} claims sixteenths without supporting onsets.")
+        if unit == "sixteenth" and (
+            supporting < GRID_MIN_SUPPORTING_ONSETS
+            or supporting < GRID_MIN_SUPPORTING_SHARE * confident
+        ):
+            raise _fail(f"{label} claims sixteenths without enough supporting onsets.")
         unit_for_kind[kind] = RHYTHM_GRID_UNITS[unit]
     # The grids describe how the prediction was quantized. Corrections may
     # move a note to any sixteenth or delete a whole line, so the stored
@@ -813,7 +818,7 @@ def _validate_rhythm_grids(value: Any, measures: Sequence[Any]) -> None:
             if note.get("sourceKind", "unassigned") not in unit_for_kind:
                 raise _fail("A note's source line has no rhythm grid.")
             for key in ("quantizedBeat", "quantizedEndBeat"):
-                steps = float(note[key]) / finest
+                steps = _number(note.get(key), f"note.{key}", 0.0, 1e7) / finest
                 if abs(steps - round(steps)) > 1e-9:
                     raise _fail("A note is not on a sixteenth-note position.")
 

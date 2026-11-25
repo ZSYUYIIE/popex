@@ -576,7 +576,9 @@ def choose_rhythm_grids(
     judged against its own tracked beats. A line switches to sixteenths only
     with at least three such confident onsets making up at least 15% of its
     confident onsets, and only when a sixteenth lasts at least 90 ms at this
-    tempo. The evidence counts are returned for review.
+    tempo. On a beat grid whose tempo moves, an onset also counts only where
+    the local sixteenth lasts 90 ms, so a fast passage cannot earn sixteenths
+    that would be unreadable there. The evidence counts are returned for review.
     """
     tempo_seconds_per_beat = (
         60.0 / beat_grid.tempo_bpm if beat_grid is not None else seconds_per_beat
@@ -591,18 +593,26 @@ def choose_rhythm_grids(
             note for note in by_kind[source_kind] if note["confidence"] >= GRID_MIN_CONFIDENCE
         ]
         supporting = 0
+        locally_too_fast = 0
         for note in confident:
             start = note["startSeconds"]
             if beat_grid is None:
                 position = start / seconds_per_beat * 4.0
                 slot = round(position)
                 distance = abs(position - slot) * seconds_per_beat / 4.0
+                local_sixteenth = seconds_per_beat / 4.0
             else:
                 position = beat_grid.beat_at(start) * 4.0
                 slot = round(position)
                 distance = abs(beat_grid.seconds_at(slot / 4.0) - start)
+                local_sixteenth = (
+                    beat_grid.seconds_at(slot / 4.0 + 0.25) - beat_grid.seconds_at(slot / 4.0)
+                )
             if slot % 2 == 1 and distance <= GRID_ONSET_TOLERANCE_SECONDS:
-                supporting += 1
+                if local_sixteenth >= GRID_MIN_SIXTEENTH_SECONDS:
+                    supporting += 1
+                else:
+                    locally_too_fast += 1
         sixteenth = (
             tempo_allows
             and supporting >= GRID_MIN_SUPPORTING_ONSETS
@@ -610,7 +620,7 @@ def choose_rhythm_grids(
         )
         if sixteenth:
             reason = "off-eighth-onsets"
-        elif not tempo_allows and supporting:
+        elif (not tempo_allows and supporting) or locally_too_fast:
             reason = "tempo-too-fast"
         else:
             reason = "insufficient-evidence"
@@ -1871,6 +1881,8 @@ __all__ = [
     "UNRESOLVED_PERCUSSION_VOICE",
     "SCORE_PARTS",
     "SCORE_PART_CLEFS",
+    "GRID_MIN_SUPPORTING_ONSETS",
+    "GRID_MIN_SUPPORTING_SHARE",
     "RHYTHM_GRID_REASONS",
     "RHYTHM_GRID_UNITS",
     "build_score_document",

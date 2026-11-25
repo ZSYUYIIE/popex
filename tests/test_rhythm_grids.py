@@ -173,6 +173,29 @@ def test_beat_grid_tempo_decides_whether_sixteenths_are_readable() -> None:
     assert result["reason"] == "tempo-too-fast"
 
 
+def test_a_fast_passage_on_a_moving_grid_cannot_earn_sixteenths() -> None:
+    # Eight beats at 100 BPM, then twenty-four at 180 BPM; the average stays under 166 BPM.
+    times, now = [], 0.0
+    for index in range(33):
+        times.append(now)
+        now += 0.6 if index < 8 else 60.0 / 180.0
+    grid = BeatGrid(times, meter=4, mode="following", tempo_bpm=150.0, bar_phase_source="drums",
+                    bar_phase_confidence=0.9, onset_shift_seconds=0.0, tracked_beats=33)
+    fast_offbeats = [grid.seconds_at(step / 4) for step in range(32, 128) if step % 2 == 1]
+    result = grid_for(
+        choose_rhythm_grids(line("vocals", fast_offbeats, length=0.05), seconds_per_beat=0.4,
+                            beat_grid=grid),
+        "vocals",
+    )
+    assert (result["unit"], result["offEighthOnsets"], result["reason"]) == ("eighth", 0, "tempo-too-fast")
+    slow_offbeats = [grid.seconds_at(step / 4) for step in range(0, 32) if step % 2 == 1]
+    slow = grid_for(
+        choose_rhythm_grids(line("vocals", slow_offbeats), seconds_per_beat=0.4, beat_grid=grid),
+        "vocals",
+    )
+    assert (slow["unit"], slow["offEighthOnsets"]) == ("sixteenth", 16)
+
+
 # ---------------------------------------------------------------------------
 # Exports
 
@@ -228,6 +251,18 @@ def test_saved_scores_record_one_grid_per_line(tmp_path) -> None:
             unit="sixteenth", unitBeats=0.25, reason="off-eighth-onsets", offEighthOnsets=0
         ),
         lambda doc: doc["rhythmGrids"][0].update(offEighthOnsets=doc["rhythmGrids"][0]["confidentOnsets"] + 1),
+        # Sixteenths claimed with fewer onsets than the rule needs (3 and 15%).
+        lambda doc: doc["rhythmGrids"][0].update(
+            unit="sixteenth", unitBeats=0.25, reason="off-eighth-onsets",
+            confidentOnsets=100, offEighthOnsets=2,
+        ),
+        lambda doc: doc["rhythmGrids"][0].update(
+            unit="sixteenth", unitBeats=0.25, reason="off-eighth-onsets",
+            confidentOnsets=100, offEighthOnsets=10,
+        ),
+        # Malformed note timing must fail validation, not crash it.
+        lambda doc: next(n for m in doc["measures"] for n in m["notes"]).pop("quantizedEndBeat"),
+        lambda doc: next(n for m in doc["measures"] for n in m["notes"]).update(quantizedBeat="1.5"),
         lambda doc: doc["rhythmGrids"].append(copy.deepcopy(doc["rhythmGrids"][0])),
         lambda doc: doc.update(rhythmGrids=[]),
         lambda doc: doc.pop("rhythmGrids"),
@@ -250,13 +285,23 @@ def test_corrections_may_move_notes_off_their_predicted_grid(tmp_path) -> None:
     note["quantizedBeat"] += 0.25
     note["quantizedEndBeat"] += 0.25
     validate_score_artifact(corrected)
-    # Deleting every note of a line leaves its grid as a record of the prediction.
-    emptied = copy.deepcopy(document)
-    for measure in emptied["measures"]:
-        measure["notes"] = []
-    with pytest.raises(ScoreArtifactValidationError):
-        # Counts must still match the measures, exactly as before this cycle.
-        validate_score_artifact(emptied)
+
+
+def test_deleting_every_note_of_a_line_keeps_a_valid_corrected_score(tmp_path) -> None:
+    settings, job_id, document = _saved_document(tmp_path)
+    ids = [note["id"] for measure in document["measures"] for note in measure["notes"]]
+    with TestClient(create_app(settings)) as client:
+        for revision, note_id in enumerate(ids):
+            response = client.post(
+                f"/api/jobs/{job_id}/score/corrections",
+                json={"expectedRevision": revision,
+                      "operation": {"op": "delete_note", "target": {"noteId": note_id}}},
+            )
+            assert response.status_code == 200, response.text
+        corrected = client.get(f"/api/jobs/{job_id}/score/saved?includeMeasures=true").json()
+        musicxml = client.get(f"/api/jobs/{job_id}/score/saved/download?format=musicxml")
+    assert not [n for m in corrected["measures"] for n in m["notes"]]
+    assert musicxml.status_code == 200
 
 
 def test_pipeline_refuses_a_prediction_off_its_own_grid() -> None:
