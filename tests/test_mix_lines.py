@@ -172,6 +172,25 @@ def test_the_model_runs_once_for_all_three_lines(tmp_path, monkeypatch):
     assert first == second
 
 
+def test_a_dense_mix_stays_within_the_score_note_limit(tmp_path, monkeypatch):
+    # 2000 melody notes, 2000 bass notes and 2400 chord notes would pass the
+    # per-line limit but not the score's 5000-note limit.
+    notes = []
+    for index in range(2000):
+        start = index * 0.2
+        notes.append((start, start + 0.15, 40, 0.8))
+        notes.append((start, start + 0.15, 76, 0.8))
+    for index in range(2400):
+        start = index * 0.16
+        notes.append((start, start + 0.15, 60, 0.3 + (index % 7) / 10))
+    monkeypatch.setattr(note_model, "_full_mix_notes", lambda path: (list(notes), 401.0))
+    results = note_model.transcribe_mix_lines(tmp_path / "dense.wav")
+    counts = [len(item["events"]) for item in results]
+    assert counts == [2000, 2000, 800]
+    assert sum(counts) <= 4800
+    assert "the 800 strongest are kept" in results[2]["warnings"][1]
+
+
 def test_silence_gives_three_empty_lines_that_say_why(tmp_path):
     pytest.importorskip("onnxruntime")
     target = tmp_path / "quiet.wav"

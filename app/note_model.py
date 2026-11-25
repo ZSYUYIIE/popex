@@ -72,6 +72,8 @@ _mix_cache_lock = threading.Lock()
 _mix_cache: tuple[tuple[str, int, int], list[tuple[float, float, int, float]], float] | None = None
 # The score holds at most 5000 notes; a dense accompaniment keeps its strongest.
 _MAX_NOTES_PER_SOURCE = 2400
+# All three full-mix lines together stay within the score's note limit.
+_MAX_MIX_NOTES = 4800
 _MAX_DURATION_SECONDS = 1800.0
 _NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
@@ -530,18 +532,22 @@ def transcribe_mix_lines(audio_path: Path | str, *, algorithm_version: str = NOT
     notes, duration = _full_mix_notes(Path(audio_path))
     lines = split_mix_lines(notes)
     results = []
+    kept_total = 0
     for source_kind in MIX_LINE_KINDS:
         line_notes = lines[source_kind]
         warnings = [_MIX_LINE_WARNINGS[source_kind]]
-        if len(line_notes) > _MAX_NOTES_PER_SOURCE:
+        # The chords line comes last and gets what the score has room for.
+        limit = min(_MAX_NOTES_PER_SOURCE, max(0, _MAX_MIX_NOTES - kept_total))
+        if len(line_notes) > limit:
             warnings.append(
                 f"The {source_kind.replace('mix_', '')} line gave {len(line_notes)} notes; "
-                f"the {_MAX_NOTES_PER_SOURCE} strongest are kept."
+                f"the {limit} strongest are kept."
             )
             line_notes = sorted(
-                sorted(line_notes, key=lambda note: -note[3])[:_MAX_NOTES_PER_SOURCE],
+                sorted(line_notes, key=lambda note: -note[3])[:limit],
                 key=lambda note: (note[0], note[2]),
             )
+        kept_total += len(line_notes)
         events, evidence = _events_from_notes(line_notes, source_kind, duration)
         if not events:
             warnings.append("No notes passed the note model's thresholds for this line of the mix.")
