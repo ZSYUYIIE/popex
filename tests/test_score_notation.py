@@ -112,6 +112,7 @@ class Element {
   add(item){this.append(item);}
   remove(){if(this.parent)this.parent.children=this.parent.children.filter(item=>item!==this);}
   querySelector(selector){return this.children.find(item=>item.tag===selector)||null;}
+  querySelectorAll(selector){const found=[];const walk=node=>{for(const item of node.children){if(item.tag===selector)found.push(item);walk(item);}};walk(this);return found;}
   get selectedIndex(){return this.options.findIndex(option=>option.value===this.value);}
 }
 function element(id){if(!nodes.has(id))nodes.set(id,new Element(id==="notation-part"||id==="notation-view"?"select":"div"));return nodes.get(id);}
@@ -121,6 +122,7 @@ global.location={pathname:"/jobs/"+"a".repeat(32)+"/notation"};
 element("notation-view").value="corrected";
 element("notation-from").value="1";element("notation-through").value="2";element("notation-zoom").value="1";
 element("notation-controls").elements=["notation-view","notation-part","notation-from","notation-through","notation-zoom","notation-render"].map(element);
+element("notation-paper-size").value="a4";
 let failRender=false,forceRevision=null,xml="<?xml version='1.0'?><score-partwise/>",rendererCalls=0,parts=[{id:"drums",name:"Drums"}];
 const requested=[];
 const details=()=>({available:true,createdAt:"2026-10-16T00:00:00Z",counts:{measures:2},corrections:{revision:3},exportParts:parts,warnings:["Review drums."]});
@@ -130,10 +132,14 @@ global.fetch=async url=>{
   return new Response(JSON.stringify(url.includes("/score/saved")?details():{title:"<img src=x onerror=evil>",version:{label:"Live",kind:"live"}}));
 };
 global.DOMParser=class {parseFromString(){return {documentElement:{localName:"score-partwise"},querySelector:()=>null,querySelectorAll:()=>[]};}};
-global.opensheetmusicdisplay={OpenSheetMusicDisplay:class{constructor(stage,options){this.stage=stage;this.options=options;rendererCalls++;}async load(){}render(){if(failRender)throw new Error("simulated renderer failure");this.stage.append(new Element("svg"));}}};
+const renderers=[];
+// Like the real renderer, loading a document resets the zoom to 1.
+global.opensheetmusicdisplay={OpenSheetMusicDisplay:class{constructor(stage,options){this.stage=stage;this.options=options;this.Zoom=1;rendererCalls++;renderers.push(this);}async load(){this.Zoom=1;}render(){if(failRender)throw new Error("simulated renderer failure");this.renderedZoom=this.Zoom;this.stage.append(new Element("svg"));}}};
+global.XMLSerializer=class{serializeToString(){return "<score-partwise/>";}};
+let printed=0;global.print=()=>{printed++;};
 __AUDIO_SETUP__
 const file=__FILE__;
-let source=fs.readFileSync(file,"utf8").replace("if (match) reload();","globalThis.t={reload,render,boundedXml,endpoint,element}; if (match) reload();");
+let source=fs.readFileSync(file,"utf8").replace("if (match) reload();","globalThis.t={reload,render,boundedXml,endpoint,element,printScore}; if (match) reload();");
 eval(source);
 (async()=>{for(let i=0;i<8;i++)await new Promise(resolve=>setImmediate(resolve)); __BODY__})().catch(error=>{console.error(error);process.exit(1);});
 '''.replace("__FILE__", json.dumps(str(ROOT / "app/static/score-notation.js"))).replace("__BODY__", body).replace("__AUDIO_SETUP__", audio_setup)
@@ -189,3 +195,50 @@ await t.render({preventDefault(){}});
 console.log(JSON.stringify({focused:t.element("notation-render").focused,disabled:t.element("notation-render").disabled}));
 ''')
     assert result == {"focused": True, "disabled": False}
+
+
+def test_notation_size_is_applied_after_the_document_loads():
+    # The renderer resets its zoom on load; a size set before load was ignored.
+    result = notation_node('''
+t.element("notation-zoom").value="1.5";
+await t.render({preventDefault(){}});
+console.log(JSON.stringify({zoom:renderers[0].renderedZoom}));
+''')
+    assert result["zoom"] == 1.5
+
+
+def test_print_lays_out_the_shown_bars_on_pages_and_opens_the_print_dialog():
+    result = notation_node('''
+const before={disabled:t.element("notation-print").disabled};
+await t.printScore();
+const beforeRender={printed,renderers:renderers.length};
+await t.render({preventDefault(){}});
+const afterRender=t.element("notation-print").disabled;
+t.element("notation-paper-size").value="a4";
+await t.printScore();
+const a4=renderers[1];
+t.element("notation-paper-size").value="letter";
+await t.printScore();
+const letter=renderers[2];
+failRender=true;
+await t.printScore();
+console.log(JSON.stringify({beforeRender,afterRender,printed,a4:{format:a4.options.pageFormat,zoom:a4.renderedZoom,title:a4.options.drawTitle},
+  letter:letter.options.pageFormat,message:t.element("notation-status").textContent,
+  pagesLeft:t.element("notation-print-pages").children.length}));
+''')
+    assert result["beforeRender"] == {"printed": 0, "renderers": 0}  # nothing to print yet
+    assert result["afterRender"] is False
+    assert result["a4"] == {"format": "A4_P", "zoom": 0.6, "title": False}
+    assert result["letter"] == "Letter_P"
+    assert result["printed"] == 2  # the failed layout does not open the dialog
+    assert "could not be laid out on pages" in result["message"]
+    assert result["pagesLeft"] == 0
+
+
+def test_notation_page_offers_printing_with_a_paper_size():
+    html = (ROOT / "app/templates/score-notation.html").read_text(encoding="utf-8")
+    assert '<button id="notation-print" type="button" disabled>Print or save as PDF</button>' in html
+    assert '<option value="a4">A4</option><option value="letter">US Letter</option>' in html
+    css = (ROOT / "app/static/score-notation.css").read_text(encoding="utf-8")
+    assert "body.print-pages #notation-scroll { display: none; }" in css
+    assert ".notation-print-stage > div { break-after: page; }" in css

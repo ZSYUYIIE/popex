@@ -33,7 +33,27 @@ button:disabled { cursor: wait; opacity: .65; }
 #notation-paper svg { display: block; }
 footer { padding-block: 1.5rem; border-top: 1px solid #87968d; font-size: .9rem; }
 @media (forced-colors: active) { :focus-visible { outline-color: Highlight; } #notation-scroll { forced-color-adjust: none; background: white; color: black; } input, select, button { border-color: ButtonText; } }
-@media print { form, nav, .skip, footer, #notation-retry, .notation-review { display: none; } body { padding: 0; } #notation-scroll { overflow: visible; border: 0; } }
+.notation-print-controls { display: flex; flex-wrap: wrap; gap: 1rem; align-items: end; margin-block: 1rem; }
+.notation-print-controls p { margin: 0; flex-basis: 100%; font-size: .9rem; }
+/* Printable pages are laid out off screen at A4/Letter width and shown only when printing. */
+#notation-print-pages { position: absolute; left: -10000px; top: 0; width: 794px; background: white; color: black; }
+@media print {
+  :root, body { background: white; color: black; }
+  body { padding: 0; }
+  form, nav, .skip, footer, #notation-retry, .notation-review, .notation-print-controls, #notation-warnings, noscript { display: none; }
+  header > :not(h1), main > p:not(#notation-rendered) { display: none; }
+  h1 { font-size: 16pt; margin: 0 0 1mm; }
+  #notation-rendered { font-size: 9pt; margin: 0 0 4mm; }
+  #notation-scroll { overflow: visible; border: 0; margin: 0; }
+  body.print-pages #notation-scroll { display: none; }
+  body:not(.print-pages) #notation-print-pages { display: none; }
+  #notation-print-pages { position: static; width: auto; }
+  /* Each page fits below the title line on the first sheet and on its own sheet after. */
+  #notation-print-pages svg { display: block; width: auto !important; height: auto !important; max-width: 100%; max-height: 255mm; margin-inline: auto; }
+  .notation-print-stage > div { break-after: page; }
+  .notation-print-stage > div:last-child { break-after: auto; }
+  @page { margin: 10mm; }
+}
 
 #notation-sections h2 { font-size: 1rem; margin: 1rem 0 0.25rem; }
 #notation-sections p { margin: 0 0 0.5rem; }
