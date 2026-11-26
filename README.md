@@ -638,7 +638,9 @@ Base-application requirements:
 
 - Python 3.10 or newer; Python 3.12 is recommended;
 - FFmpeg and ffprobe on `PATH`;
-- Node.js LTS on `PATH` for YouTube extraction.
+- optional: Node.js LTS on `PATH`, needed only to add recordings from YouTube links.
+
+`check_windows.ps1` lists anything missing. `run_windows.ps1` runs the check, creates `.venv`, installs PopEx and starts it; it stops with a message instead of starting when the check or the installation fails, and `-InstallOnly` installs without starting. A CI job runs these commands and the synthetic score smoke on Windows.
 
 From PowerShell in the repository root:
 

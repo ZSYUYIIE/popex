@@ -1,0 +1,94 @@
+name: Windows local launch
+
+# Runs the README's Windows commands on a real Windows machine: the dependency
+# check, the launcher (install, start, open the page), the end-to-end
+# synthetic score smoke, and the launcher refusing to start without FFmpeg.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - ".github/workflows/windows-local.yml"
+      - "scripts/check_windows.ps1"
+      - "scripts/run_windows.ps1"
+      - "scripts/smoke_score_pipeline.py"
+      - "pyproject.toml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-local:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install FFmpeg
+        shell: powershell
+        run: |
+          choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg could not be installed." }
+
+      - name: Dependency check (README command)
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\check_windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw "check_windows.ps1 reported a missing dependency." }
+
+      - name: Install with the launcher
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\scripts\run_windows.ps1 -InstallOnly
+          if ($LASTEXITCODE -ne 0) { throw "run_windows.ps1 -InstallOnly failed." }
+          powershell -ExecutionPolicy Bypass -File .\scripts\check_windows.ps1
+          if ($LASTEXITCODE -ne 0) { throw "check_windows.ps1 failed after installation." }
+
+      - name: Start the launcher and open the page (README command)
+        shell: powershell
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "popex-launcher.log"
+          $err = Join-Path $env:RUNNER_TEMP "popex-launcher.err"
+          $launcher = Start-Process powershell -PassThru -NoNewWindow `
+            -ArgumentList "-ExecutionPolicy", "Bypass", "-File", ".\scripts\run_windows.ps1" `
+            -RedirectStandardOutput $log -RedirectStandardError $err
+          $page = $null
+          for ($i = 0; $i -lt 120 -and -not $page; $i++) {
+            Start-Sleep -Seconds 5
+            try { $page = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8000/" -TimeoutSec 5 } catch { $page = $null }
+          }
+          $jobs = $null
+          if ($page) { $jobs = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8000/api/jobs" -TimeoutSec 10 }
+          taskkill /PID $launcher.Id /T /F | Out-Null
+          Get-Content $log, $err -ErrorAction SilentlyContinue | Select-Object -Last 40
+          if (-not $page) { throw "PopEx did not answer at http://127.0.0.1:8000/ after starting the launcher." }
+          if ($page.StatusCode -ne 200 -or $page.Content -notmatch "Add a recording") { throw "The PopEx page did not load." }
+          if ($jobs.StatusCode -ne 200) { throw "The PopEx API did not answer." }
+          Write-Host "PopEx started and served its page."
+
+      - name: End-to-end synthetic score smoke
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe scripts\smoke_score_pipeline.py
+          if ($LASTEXITCODE -ne 0) { throw "The synthetic score smoke failed on Windows." }
+
+      - name: The launcher stops when FFmpeg is missing
+        shell: powershell
+        run: |
+          $kept = $env:PATH -split ";" | Where-Object { $_ -and -not (Test-Path (Join-Path $_ "ffmpeg.exe")) }
+          $env:PATH = $kept -join ";"
+          if (Get-Command ffmpeg -ErrorAction SilentlyContinue) { throw "FFmpeg is still on PATH; the test cannot run." }
+          powershell -ExecutionPolicy Bypass -File .\scripts\run_windows.ps1 -InstallOnly
+          $code = $LASTEXITCODE
+          if ($code -ne 1) { throw "run_windows.ps1 should stop with exit code 1 without FFmpeg, got $code." }
+          Write-Host "The launcher refused to start without FFmpeg."
+          exit 0
