@@ -152,7 +152,7 @@ def test_score_documents_carry_tonal_context_and_key(tmp_path: Path) -> None:
         musicxml = client.get(f"/api/jobs/{job_id}/score/saved/download?format=musicxml")
         comparison_job = client.get(f"/api/jobs/{job_id}").json()
     tonality = details["tonality"]
-    assert tonality["version"] == "modal-collections-v2"
+    assert tonality["version"] == "modal-collections-v3"
     assert tonality["evidence"]["bassSource"] == "bass-stem line"
     assert tonality["primaryCandidate"] == tonality["candidates"][0]
     assert any("Tonal context suggests" in warning for warning in details["warnings"])

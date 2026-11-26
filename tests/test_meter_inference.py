@@ -89,7 +89,7 @@ def test_score_meter_prefers_the_drums_then_the_analysis_then_four_four():
 
 def test_older_scores_are_offered_a_redraft_for_the_meter():
     assert score_outdated_reason({"score_version": "score-pipeline-v9", "score_measure_count": 12}) == "meter"
-    assert score_outdated_reason({"score_version": "score-pipeline-v10", "score_measure_count": 12}) is None
+    assert score_outdated_reason({"score_version": "score-pipeline-v11", "score_measure_count": 12}) is None
     assert score_outdated_reason({"score_version": "score-pipeline-v9", "score_measure_count": 1}) is None
 
 

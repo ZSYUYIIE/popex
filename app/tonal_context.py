@@ -35,7 +35,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-TONAL_CONTEXT_VERSION = "modal-collections-v2"
+TONAL_CONTEXT_VERSION = "modal-collections-v3"
 KEY_SIGNATURE_MIN_CONFIDENCE = 0.5
 
 # collection -> (label, intervals, diatonic parent offset in semitones from
@@ -88,6 +88,22 @@ def key_signature(root: int, collection: str) -> dict[str, Any]:
     """Return the MusicXML ``fifths``/``mode`` for one tonal candidate."""
     _label, _intervals, parent_offset, mode = COLLECTIONS[collection]
     return {"fifths": _MAJOR_FIFTHS[(root - parent_offset) % 12], "mode": mode}
+
+
+def key_signature_for(
+    centre_confidence: float, signature_confidence: float, root: int, collection: str
+) -> dict[str, Any] | None:
+    """The key signature a score writes, or ``None``.
+
+    A confident tonal centre writes its signature and mode. When the centre is
+    uncertain but the notes clearly fit one signature, the signature is written
+    with mode ``none``, so the score does not claim major or minor.
+    """
+    if centre_confidence >= KEY_SIGNATURE_MIN_CONFIDENCE:
+        return key_signature(root, collection)
+    if signature_confidence >= KEY_SIGNATURE_MIN_CONFIDENCE:
+        return {"fifths": key_signature(root, collection)["fifths"], "mode": "none"}
+    return None
 
 
 def root_name(root: int, collection: str) -> str:
@@ -235,7 +251,21 @@ def _assess(histogram, bass, evidence_beats, chord_roots=None):
         and _pitch_set(item["root"], item["collection"]) == best_set
         and best["score"] - item["score"] < _MARGIN_SCALE * 0.5
     ]
-    return candidates, ambiguous[:3], best
+    # The key signature depends only on which notes are used, so readings that
+    # share it (C Ionian, A Aeolian, F Lydian) do not make it less certain.
+    signature_rival = next(
+        (
+            item for item in ranked[1:]
+            if key_signature(item["root"], item["collection"])["fifths"] != best_signature
+        ),
+        None,
+    )
+    signature_confidence = (
+        evidence
+        if signature_rival is None
+        else max(0.0, min(1.0, (best["score"] - signature_rival["score"]) / _MARGIN_SCALE)) * evidence
+    )
+    return candidates, ambiguous[:3], best, signature_confidence
 
 
 def _histograms(notes: Sequence[Mapping[str, Any]], measures_bass: Sequence[Mapping[str, Any]]):
@@ -351,9 +381,10 @@ def build_tonal_context(
             "localRegions": [],
             "chromaticismScore": None,
             "keySignature": None,
+            "signatureConfidence": None,
             "notes": ["No transcribed notes were available, so no scale or mode is suggested."],
         }
-    candidates, ambiguous, best = _assess(
+    candidates, ambiguous, best, signature_confidence = _assess(
         histogram, bass_hist if bass_notes else None, beats, chord_roots
     )
     primary = candidates[0]
@@ -375,7 +406,7 @@ def build_tonal_context(
             or window_beats < _REGION_MIN_BEATS
         ):
             continue
-        local_candidates, _ambiguous, local_best = _assess(
+        local_candidates, _ambiguous, local_best, _signature = _assess(
             normalized, bass if window_bass else None, window_beats
         )
         local = local_candidates[0]
@@ -414,20 +445,21 @@ def build_tonal_context(
             f"{primary['displayName']} shares its notes with {', '.join(ambiguous)}; "
             "tonic evidence is weak, so treat the mode as a suggestion."
         )
-    if primary["confidence"] < KEY_SIGNATURE_MIN_CONFIDENCE:
+    signature = key_signature_for(primary["confidence"], signature_confidence, best["root"], best["collection"])
+    if signature is None:
         notes_out.append(
             "Confidence is below 0.50, so no key signature is written; accidentals are explicit."
+        )
+    elif signature["mode"] == "none":
+        notes_out.append(
+            "The notes clearly fit this key signature, but the tonal centre is uncertain, "
+            "so the key is written without naming a mode."
         )
     if any(region["differsFromWhole"] for region in regions):
         notes_out.append(
             "Some bars suggest a different centre or collection: possible modulation, "
             "modal mixture, or borrowed harmony to review."
         )
-    signature = (
-        key_signature(best["root"], best["collection"])
-        if primary["confidence"] >= KEY_SIGNATURE_MIN_CONFIDENCE
-        else None
-    )
     return {
         "version": TONAL_CONTEXT_VERSION,
         "evidence": evidence,
@@ -437,6 +469,7 @@ def build_tonal_context(
         "localRegions": regions,
         "chromaticismScore": chromaticism,
         "keySignature": signature,
+        "signatureConfidence": round(signature_confidence, 3),
         "notes": notes_out,
     }
 
@@ -447,6 +480,7 @@ __all__ = [
     "TONAL_CONTEXT_VERSION",
     "build_tonal_context",
     "key_signature",
+    "key_signature_for",
     "root_name",
 ]
 
@@ -454,10 +488,12 @@ __all__ = [
 def score_key_name(document: Mapping[str, Any]) -> str | None:
     """The score's suggested key in words (for example "G Ionian (major)"), or ``None``.
 
-    Only a candidate confident enough to set the key signature is named.
+    Only a candidate confident enough to set the key signature and its mode is
+    named; a signature written without a mode names no key.
     """
     tonality = document.get("tonality")
-    if not isinstance(tonality, Mapping) or tonality.get("keySignature") is None:
+    signature = tonality.get("keySignature") if isinstance(tonality, Mapping) else None
+    if not isinstance(signature, Mapping) or signature.get("mode") == "none":
         return None
     primary = tonality.get("primaryCandidate")
     name = primary.get("displayName") if isinstance(primary, Mapping) else None
