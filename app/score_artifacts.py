@@ -380,7 +380,7 @@ def _validate_timing(value: Any, schema_version: int = 5) -> tuple[float, int]:
     tempo = _number(timing["tempoBpm"], "timing.tempoBpm", 20.0, 300.0)
     meter = _integer(timing["beatsPerMeasure"], "timing.beatsPerMeasure", 1, 12)
     _integer(timing["divisions"], "timing.divisions", 1, 9600)
-    if timing["meterSource"] not in {"analysis", "fallback-4/4"}:
+    if timing["meterSource"] not in {"analysis", "fallback-4/4", "drums-and-bass"}:
         raise _fail("timing.meterSource is invalid.")
     _optional_number(timing["tempoConfidence"], "timing.tempoConfidence", 0.0, 1.0)
     _optional_number(timing["meterConfidence"], "timing.meterConfidence", 0.0, 1.0)

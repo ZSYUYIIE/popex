@@ -31,7 +31,6 @@ from app.separation import STEM_MANIFEST_RELATIVE_PATH, load_stem_manifest
 from app.separation_artifacts import resolve_stem_artifact
 
 _LOGGER = logging.getLogger(__name__)
-_METER_FALLBACK = 4
 _MIN_AUDIO_SECONDS = 4.0
 
 
@@ -43,11 +42,6 @@ def _regular_file(path: Path) -> Path | None:
     if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
         return None
     return path
-
-
-def _meter(timing: Mapping[str, Any]) -> int:
-    meter = timing.get("meter")
-    return meter if type(meter) is int and 1 <= meter <= 12 else _METER_FALLBACK
 
 
 def _constant_beats(timing: Mapping[str, Any], duration: float) -> list[float] | None:
@@ -129,9 +123,10 @@ def _publish(
             accompaniment = bass = None
 
     # Imported here so the harmony stage does not import the score layer at load.
-    from app.score_api import score_beat_grid
+    from app.score_api import score_beat_grid, score_meter
 
-    meter = _meter(timing)
+    # The same meter decision as the score, so chord changes and bars agree.
+    meter, _source, _confidence = score_meter({"timing": timing}, raw_transcription)
     grid = score_beat_grid({"timing": timing}, raw_transcription, beats_per_measure=meter)
     if grid is not None:
         beats = list(grid.times)

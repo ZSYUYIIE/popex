@@ -36,6 +36,7 @@ from app.analysis import (
     analyze_audio,
     load_analysis,
 )
+from app.beat_grid import BEAT_GRID_VERSION
 from app.config import SUPPORTED_MEDIA_EXTENSIONS, Settings
 from app.media import (
     MediaProcessingError,
@@ -1650,7 +1651,8 @@ def create_app(
                 except AudioChordsError:
                     heard = None
                 audio_exists = (app_settings.exports_dir / job_id / "analysis.wav").is_file()
-                if heard is not None or not audio_exists:
+                stale_grid = heard is not None and heard.get("gridVersion") not in (None, BEAT_GRID_VERSION)
+                if (heard is not None and not stale_grid) or not audio_exists:
                     return StepResult("reused")
                 # Harmony from before chords were heard in the audio: run it
                 # again so the score gets the far more complete chords.
@@ -4193,6 +4195,12 @@ def _saved_score_payload(
             0,
             "This score was built before sixteenth-note rhythms were supported; "
             "rebuild it so lines whose onsets show sixteenths use a sixteenth-note grid.",
+        )
+    elif outdated == "meter":
+        warnings.insert(
+            0,
+            "This score was built before the drums and bass could set the bar length; "
+            "draft it again so a song in 3/4 gets bars of three beats.",
         )
     elif outdated == "half-bar-chords":
         warnings.insert(
