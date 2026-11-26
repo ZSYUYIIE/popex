@@ -117,9 +117,13 @@ def version_summary(
     chords: list[str] = []
     if document is not None:
         for measure in document.get("measures", ()):
-            symbol = measure.get("chordSymbol")
-            if isinstance(symbol, str) and symbol not in chords:
-                chords.append(symbol)
+            symbols = [measure.get("chordSymbol")]
+            if symbols[0] is None:
+                # Half-bar chords (schema 9) count when the bar has no whole-bar chord.
+                symbols = [change.get("symbol") for change in measure.get("chordChanges") or () if isinstance(change, dict)]
+            for symbol in symbols:
+                if isinstance(symbol, str) and symbol not in chords:
+                    chords.append(symbol)
     return {
         "jobId": record["id"],
         "title": record.get("title") or record.get("original_filename") or "Untitled recording",

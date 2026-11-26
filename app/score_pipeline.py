@@ -90,7 +90,7 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v8"
+SCORE_PIPELINE_VERSION = "score-pipeline-v9"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
@@ -100,6 +100,7 @@ PRE_PARTS_PIPELINE_VERSIONS = PRE_TONAL_CONTEXT_PIPELINE_VERSIONS | {"score-pipe
 PRE_BEAT_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline-v5"}
 PRE_SECTIONS_PIPELINE_VERSIONS = PRE_BEAT_GRID_PIPELINE_VERSIONS | {"score-pipeline-v6"}
 PRE_RHYTHM_GRID_PIPELINE_VERSIONS = PRE_SECTIONS_PIPELINE_VERSIONS | {"score-pipeline-v7"}
+PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS = PRE_RHYTHM_GRID_PIPELINE_VERSIONS | {"score-pipeline-v8"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -117,6 +118,10 @@ _MAX_MEASURE_HARMONY = 16
 _MAX_SYMBOL_LENGTH = 64
 _DOMINANT_COVERAGE = 0.5
 _COMPETING_COVERAGE = 0.25
+# A bar with no whole-bar chord may still show two half-bar chords, but each half
+# needs a clearer winner than a whole bar does.
+_HALF_DOMINANT_COVERAGE = 0.6
+_HALF_COMPETING_COVERAGE = 0.2
 
 ProgressCallback = Callable[[str, str, float], None]
 
@@ -193,8 +198,10 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     tablature applies. ``tonal-context``: a score with notes from before the
     modal tonal context. ``parts``: a score with notes from before instrument
     parts by source line. ``beat-grid``: bars from before beat-following bar
-    lines. ``sections``: a score from before song sections. Such scores stay
-    readable and downloadable.
+    lines. ``sections``: a score from before song sections. ``rhythm-grid``: a
+    score with notes from before evidence-gated sixteenth-note grids.
+    ``half-bar-chords``: a score of a recording with completed harmony from
+    before half-bar chord changes. Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -244,6 +251,8 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and notes > 0
     ):
         return "rhythm-grid"
+    if version in PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS and record.get("harmony_status") == "completed":
+        return "half-bar-chords"
     return None
 
 
@@ -578,7 +587,7 @@ def _map_harmony(
     seconds_per_beat: float,
     beats_per_measure: int,
 ) -> dict[str, int]:
-    stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0}
+    stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0, "split": 0}
     # Bars may follow tracked beats, so each bar has its own length;
     # ``seconds_per_beat`` is only the fallback for a bar without a duration.
     notated_end = measures[-1]["endSeconds"] if measures else 0.0
@@ -653,9 +662,48 @@ def _map_harmony(
         ):
             chosen = ranked[0][0]
         measure["chordSymbol"] = chosen
-        if chosen is None and coverage:
+        measure["chordChanges"] = []
+        if chosen is None and coverage and beats_per_measure % 2 == 0:
+            half_beats = beats_per_measure // 2
+            middle = measure_start + half_beats * bar_beat_seconds
+            first = _window_symbol(
+                active, measure_start, middle, _HALF_DOMINANT_COVERAGE, _HALF_COMPETING_COVERAGE
+            )
+            second = _window_symbol(
+                active, middle, measure_end, _HALF_DOMINANT_COVERAGE, _HALF_COMPETING_COVERAGE
+            )
+            if first is not None and second is not None and first != second:
+                measure["chordChanges"] = [
+                    {"beat": 0.0, "symbol": first},
+                    {"beat": float(half_beats), "symbol": second},
+                ]
+                stats["split"] += 1
+        if chosen is None and coverage and not measure["chordChanges"]:
             stats["ambiguous"] += 1
     return stats
+
+
+def _window_symbol(
+    segments: Sequence[Mapping[str, Any]],
+    start: float,
+    end: float,
+    dominant: float,
+    competing: float,
+) -> str | None:
+    """Return the one resolved symbol that clearly covers ``[start, end)``, or ``None``."""
+    coverage: dict[str, float] = {}
+    for segment in segments:
+        overlap = min(end, float(segment["rawEndSeconds"])) - max(start, float(segment["rawStartSeconds"]))
+        symbol = _segment_symbol(segment)
+        if overlap > 0 and symbol is not None:
+            coverage[symbol] = coverage.get(symbol, 0.0) + overlap
+    ranked = sorted(coverage.items(), key=lambda item: (-item[1], item[0]))
+    window = end - start
+    if ranked and ranked[0][1] >= dominant * window and not any(
+        share >= competing * window for _, share in ranked[1:]
+    ):
+        return ranked[0][0]
+    return None
 
 
 def _segment_symbol(segment: Mapping[str, Any]) -> str | None:
@@ -782,13 +830,14 @@ def construct_score(
     _check_notes_on_their_grids(measures, built["rhythmGrids"])
     for measure in measures:
         measure["harmony"] = []
+        measure["chordChanges"] = []
     seconds_per_beat = 60.0 / built["tempoBpm"]
 
     progress("mapping_harmony", "Mapping harmonic candidates to measures.", 50)
     segments, harmony_note = _load_matching_harmony(
         job_id, settings, record, identity, evidence["rawTranscription"]
     )
-    harmony_stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0}
+    harmony_stats = {"windows": 0, "unresolved": 0, "ambiguous": 0, "beyond": 0, "truncated": 0, "split": 0}
     if segments is not None:
         # Chords heard in the audio are far more complete than chords named
         # from transcribed notes, so they are used whenever they were saved
@@ -950,6 +999,11 @@ def construct_score(
             f"Chord symbols were placed in {chord_count} of {len(measures)} measure(s); "
             "they are candidates to review, not confirmed harmony."
         )
+        if harmony_stats["split"]:
+            warnings.append(
+                f"{harmony_stats['split']} measure(s) without one clear chord show two half-bar "
+                "chord symbols instead, each placed only where one candidate clearly covers its half."
+            )
         if harmony_stats["ambiguous"]:
             warnings.append(
                 f"{harmony_stats['ambiguous']} measure(s) contain competing or partial "
