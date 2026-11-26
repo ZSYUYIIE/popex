@@ -4,6 +4,20 @@ PopEx is a free and open-source, local-first music-transcription workspace for i
 
 PopEx is released under the [MIT License](LICENSE). Its core self-hosted functionality must remain usable without a subscription, mandatory paid API, mandatory cloud service, or mandatory hosted GPU.
 
+## Quick start
+
+PopEx runs on your own computer. You need Python 3.10 or newer and FFmpeg (with ffprobe) on `PATH`; nothing else is downloaded to make a score.
+
+1. Start it:
+   - **Windows:** `powershell -ExecutionPolicy Bypass -File .\scripts\run_windows.ps1`
+   - **Linux or macOS:** `python -m venv .venv && source .venv/bin/activate && pip install -e . && uvicorn app.main:app --host 127.0.0.1 --port 8000`
+   - **Docker:** `docker compose up --build`
+2. Open <http://localhost:8000>.
+3. Under **Add a recording**, choose an audio or video file (MP3, WAV, FLAC, M4A, AAC, OGG, MP4, MOV or WebM) and press **Upload and prepare**. Drafting the score starts by itself; each step shows its progress on the recording. Without stem separation, a three-minute song took about a minute on a four-core computer in testing.
+4. When the draft is ready, open the notation, play bars against the recording, correct what is wrong, and download MusicXML or MIDI for MuseScore, Sibelius, Dorico or a DAW.
+
+Without the optional stem separator, PopEx hears the full mix and writes an estimated melody (its top line), bass line (its lowest line), the chords between them, a drum part and chord symbols, all labelled as drafts. Installing the separator (see [Local setup](#local-setup)) gives cleaner vocal, bass and accompaniment lines. Your recordings and scores stay in the `data` folder on your computer.
+
 ---
 
 ## Product source of truth
