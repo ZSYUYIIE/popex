@@ -122,7 +122,7 @@ def test_score_exports_one_part_per_source_line(tmp_path: Path) -> None:
     finally:
         client.__exit__(None, None, None)
 
-    assert details["version"] == "score-pipeline-v8"
+    assert details["version"] == "score-pipeline-v9"
     assert [item["id"] for item in details["scoreParts"]] == ["lead-vocal", "pitched-lines", "accompaniment"]
     assert {part["id"] for part in details["exportParts"]} == {
         "lead-vocal", "pitched-lines", "accompaniment", "bass-tab", "drums"

@@ -4194,6 +4194,12 @@ def _saved_score_payload(
             "This score was built before sixteenth-note rhythms were supported; "
             "rebuild it so lines whose onsets show sixteenths use a sixteenth-note grid.",
         )
+    elif outdated == "half-bar-chords":
+        warnings.insert(
+            0,
+            "This score was built before bars could show two chords; draft it again "
+            "to add half-bar chord symbols where the harmony clearly changes mid-bar.",
+        )
     if evidence_changed:
         warnings.insert(
             0,

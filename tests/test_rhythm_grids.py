@@ -231,8 +231,8 @@ def _saved_document(tmp_path):
 
 def test_saved_scores_record_one_grid_per_line(tmp_path) -> None:
     _settings, _job_id, document = _saved_document(tmp_path)
-    assert document["schemaVersion"] == 8
-    assert document["pipelineVersion"] == "score-pipeline-v8"
+    assert document["schemaVersion"] == 9
+    assert document["pipelineVersion"] == "score-pipeline-v9"
     kinds = {note["sourceKind"] for measure in document["measures"] for note in measure["notes"]}
     assert [item["sourceKind"] for item in document["rhythmGrids"]] == sorted(kinds)
     assert document["layers"]["pitchedNotes"]["note"] == rhythm_grid_note(document["rhythmGrids"])
@@ -320,6 +320,7 @@ def test_schema_seven_scores_without_grids_stay_readable(tmp_path) -> None:
     _settings, _job_id, document = _saved_document(tmp_path)
     older = {key: value for key, value in document.items() if key != "rhythmGrids"}
     older["schemaVersion"] = 7
+    older["measures"] = [{k: v for k, v in m.items() if k != "chordChanges"} for m in document["measures"]]
     validate_score_artifact(older)
     with pytest.raises(ScoreArtifactValidationError):
         validate_score_artifact({**older, "rhythmGrids": document["rhythmGrids"]})
@@ -344,7 +345,7 @@ def test_scores_from_before_rhythm_grids_are_out_of_date(tmp_path) -> None:
     assert details["stale"] is True
     assert "sixteenth-note rhythms" in details["warnings"][0]
     assert score_outdated_reason({"score_version": "score-pipeline-v7", "score_note_count": 0}) is None
-    assert score_outdated_reason({"score_version": "score-pipeline-v8", "score_note_count": 9}) is None
+    assert score_outdated_reason({"score_version": "score-pipeline-v9", "score_note_count": 9}) is None
 
 
 def test_panel_explains_rhythm_grid_and_section_staleness() -> None:

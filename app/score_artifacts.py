@@ -54,10 +54,11 @@ from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consist
 from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
-# schema 4 the modal tonal context, schema 7 song sections, and schema 8 the
-# per-line rhythm grids; earlier documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 8
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8})
+# schema 4 the modal tonal context, schema 7 song sections, schema 8 the
+# per-line rhythm grids, and schema 9 half-bar chord changes; earlier
+# documents remain readable.
+SCORE_ARTIFACT_SCHEMA_VERSION = 9
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -162,6 +163,7 @@ _MEASURE_KEYS_V1 = frozenset(
     {"measureIndex", "startSeconds", "endSeconds", "notes", "chordSymbol", "harmony"}
 )
 _MEASURE_KEYS_V2 = _MEASURE_KEYS_V1 | {"percussionHits"}
+_MEASURE_KEYS_V9 = _MEASURE_KEYS_V2 | {"chordChanges"}
 _HIT_KEYS = frozenset(
     {
         "eventId",
@@ -673,7 +675,7 @@ def _validate_measures(
         measure = _mapping(raw, label)
         _exact_keys(
             measure,
-            _MEASURE_KEYS_V2 if schema_version >= 2 else _MEASURE_KEYS_V1,
+            _MEASURE_KEYS_V9 if schema_version >= 9 else _MEASURE_KEYS_V2 if schema_version >= 2 else _MEASURE_KEYS_V1,
             label,
         )
         if _integer(measure["measureIndex"], f"{label}.measureIndex") != position:
@@ -710,6 +712,8 @@ def _validate_measures(
                 _text(entry["symbol"], f"{entry_label}.symbol", 64)
                 _number(entry["confidence"], f"{entry_label}.confidence", 0.0, 1.0)
         totals["harmonyEntries"] += len(harmony)
+        if schema_version >= 9:
+            _validate_chord_changes(measure, harmony, meter, label)
         notes = _sequence(measure["notes"], f"{label}.notes", _MAX_NOTES)
         for index, raw_note in enumerate(notes):
             note_label = f"{label}.notes[{index}]"
@@ -795,6 +799,37 @@ def _validate_percussion_summary(value: Any, by_voice: Mapping[str, int]) -> Non
         raise _fail("percussion.voices does not match the measures.")
 
 
+def _validate_chord_changes(
+    measure: Mapping[str, Any], harmony: Sequence[Mapping[str, Any]], meter: int, label: str
+) -> None:
+    """Half-bar changes: none, or two different chords at the bar's start and middle.
+
+    Each symbol must come from a resolved harmonic window that overlaps its half,
+    so a saved change can always be traced back to its evidence.
+    """
+    changes = _sequence(measure["chordChanges"], f"{label}.chordChanges", 2)
+    if not changes:
+        return
+    if len(changes) != 2 or meter % 2:
+        raise _fail(f"{label}.chordChanges must split an even bar in two.")
+    halves = ((0.0, meter / 2), (meter / 2, float(meter)))
+    symbols = []
+    for (start, end), raw in zip(halves, changes):
+        change = _mapping(raw, f"{label}.chordChanges")
+        _exact_keys(change, frozenset({"beat", "symbol"}), f"{label}.chordChanges")
+        if change["beat"] != start:
+            raise _fail(f"{label}.chordChanges must start at the bar and its middle.")
+        symbol = _text(change["symbol"], f"{label}.chordChanges.symbol", 64)
+        if not any(
+            entry["symbol"] == symbol and entry["startBeat"] < end and entry["endBeat"] > start
+            for entry in harmony
+        ):
+            raise _fail(f"{label}.chordChanges names a chord without harmonic evidence.")
+        symbols.append(symbol)
+    if symbols[0] == symbols[1]:
+        raise _fail(f"{label}.chordChanges must name two different chords.")
+
+
 def _validate_rhythm_grids(value: Any, measures: Sequence[Any]) -> None:
     """Check each line's grid decision and that every note sits on its grid."""
     grids = _sequence(value, "rhythmGrids", 64)
@@ -856,6 +891,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             6: _TOP_LEVEL_KEYS_V5,
             7: _TOP_LEVEL_KEYS_V7,
             8: _TOP_LEVEL_KEYS_V8,
+            9: _TOP_LEVEL_KEYS_V8,
         }[schema_version],
         "score document",
     )
@@ -887,6 +923,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         6: _COUNT_KEYS_V3,
         7: _COUNT_KEYS_V3,
         8: _COUNT_KEYS_V3,
+        9: _COUNT_KEYS_V3,
     }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
