@@ -26,7 +26,7 @@ import statistics
 from collections.abc import Sequence
 from typing import Any
 
-BEAT_GRID_VERSION = "beat-grid-v1"
+BEAT_GRID_VERSION = "beat-grid-v2"
 GRID_MODES = frozenset({"steady", "following"})
 BAR_PHASE_SOURCES = frozenset({"drums", "analysis", "none"})
 
@@ -48,6 +48,13 @@ _MIN_DRUM_MARGIN = 0.15
 _MIN_ANALYSIS_DOWNBEATS = 4
 _MIN_ANALYSIS_SHARE = 0.8
 _MIN_ANALYSIS_METER_CONFIDENCE = 0.5
+# Meter from the drums and bass: a feature counts when it has this many hits on
+# the grid; one meter must score at least _MIN_METER_SCORE and beat the other by
+# _MIN_METER_MARGIN (scores are summed accent contrasts, see infer_meter).
+METER_CANDIDATES = (3, 4)
+_MIN_METER_VOTES = 8
+_MIN_METER_SCORE = 0.4
+_MIN_METER_MARGIN = 0.25
 # A downbeat this soon after the start (in beats) begins bar 1; a later first
 # downbeat means the recording opens with a pickup, which gets its own bar.
 _LEAD_IN_TOLERANCE_BEATS = 0.5
@@ -217,14 +224,104 @@ def _onset_shift(times: list[float], onsets: Sequence[float] | None) -> float:
     return shift if abs(shift) <= _MAX_ONSET_SHIFT_BEATS else 0.0
 
 
+def _beat_counts(times: list[float], meter: int, hits: Sequence[tuple[float, str]], voice: str) -> list[float]:
+    """Hits of one voice that fall near a grid beat, counted by beat position modulo ``meter``."""
+    counts = [0.0] * meter
+    for seconds, kind in hits:
+        if kind != voice or not math.isfinite(seconds):
+            continue
+        position = _position(times, seconds)
+        nearest = round(position)
+        if abs(position - nearest) <= _NEAR_BEAT:
+            counts[nearest % meter] += 1.0
+    return counts
+
+
+def _accent_phase(times: list[float], meter: int, drum_hits: Sequence[tuple[float, str]]) -> tuple[int, float] | None:
+    """Bar phase in meters other than 4: kick on beat 1, snare away from it."""
+    low = _beat_counts(times, meter, drum_hits, "low")
+    mid = _beat_counts(times, meter, drum_hits, "mid")
+    low_total, mid_total = sum(low), sum(mid)
+    if low_total < _MIN_DRUM_VOTES:
+        return None
+    scores = []
+    for phase in range(meter):
+        others = [low[index] for index in range(meter) if index != phase]
+        score = (low[phase] - sum(others) / len(others)) / low_total
+        if mid_total >= _MIN_DRUM_VOTES:
+            mid_others = [mid[index] for index in range(meter) if index != phase]
+            score += (sum(mid_others) / len(mid_others) - mid[phase]) / mid_total
+        scores.append((score, phase))
+    ranked = sorted(scores, key=lambda item: (-item[0], item[1]))
+    margin = ranked[0][0] - ranked[1][0]
+    if ranked[0][0] <= 0.0 or margin < _MIN_DRUM_MARGIN:
+        return None
+    return ranked[0][1], min(1.0, margin)
+
+
+def _accent_contrast(counts: Sequence[float]) -> float:
+    """How strongly one beat position stands out: 0 when all are alike, near 1 when one holds every hit."""
+    total = sum(counts)
+    if total <= 0:
+        return 0.0
+    best = max(counts)
+    return (best - total / len(counts)) / best
+
+
+def infer_meter(
+    tracked_beats: Any,
+    *,
+    drum_hits: Sequence[tuple[float, str]] | None = None,
+    bass_onsets: Sequence[float] | None = None,
+) -> tuple[int, float] | None:
+    """Beats per bar from where kicks, snares and bass notes repeat on the tracked beats.
+
+    For each candidate meter and each feature (kick hits, snare hits, bass-note
+    onsets) with enough hits near beats, the accent contrast is how much its
+    busiest beat position stands out from the average position. A waltz's kick
+    on every third beat scores high for 3 and zero for 4; a rock beat's kick on
+    1 and 3 and snare on 2 and 4 score for 4 and not for 3. The contrasts are
+    summed per meter. Returns ``(meter, margin)`` only when one meter scores at
+    least ``_MIN_METER_SCORE`` and beats the other by ``_MIN_METER_MARGIN``.
+    """
+    beats = _clean_beats(tracked_beats)
+    if beats is None:
+        return None
+    beats = _fill_gaps(beats)
+    if beats is None or len(beats) < 2 * max(METER_CANDIDATES):
+        return None
+    events: list[tuple[float, str]] = [
+        (float(seconds), voice) for seconds, voice in drum_hits or () if voice in ("low", "mid")
+    ]
+    for onset in bass_onsets or ():
+        if not isinstance(onset, bool) and isinstance(onset, (int, float)) and math.isfinite(onset):
+            events.append((float(onset), "bass"))
+    scores: dict[int, float] = {}
+    for meter in METER_CANDIDATES:
+        score = 0.0
+        for voice in ("low", "mid", "bass"):
+            counts = _beat_counts(beats, meter, events, voice)
+            if sum(counts) >= _MIN_METER_VOTES:
+                score += _accent_contrast(counts)
+        scores[meter] = score
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    (best, best_score), (_other, other_score) = ranked[0], ranked[1]
+    if best_score < _MIN_METER_SCORE or best_score - other_score < _MIN_METER_MARGIN:
+        return None
+    return best, min(1.0, best_score - other_score)
+
+
 def _drum_phase(times: list[float], meter: int, drum_hits: Sequence[tuple[float, str]] | None) -> tuple[int, float] | None:
     """Bar phase from a backbeat: snare on beats 2 and 4, kick favouring beat 1.
 
     Returns ``(index of a downbeat among the grid beats modulo meter,
-    margin)`` or ``None`` when the drums do not settle it.
+    margin)`` or ``None`` when the drums do not settle it. Other meters use
+    the kick-on-beat-1 accent alone.
     """
-    if meter != 4 or not drum_hits:
+    if not drum_hits:
         return None
+    if meter != 4:
+        return _accent_phase(times, meter, drum_hits)
     low = [0.0] * meter
     mid = [0.0] * meter
     for seconds, voice in drum_hits:
@@ -386,5 +483,7 @@ __all__ = [
     "BEAT_GRID_VERSION",
     "GRID_MODES",
     "BeatGrid",
+    "METER_CANDIDATES",
     "build_beat_grid",
+    "infer_meter",
 ]

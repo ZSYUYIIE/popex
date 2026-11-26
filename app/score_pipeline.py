@@ -90,7 +90,7 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v9"
+SCORE_PIPELINE_VERSION = "score-pipeline-v10"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
@@ -101,6 +101,7 @@ PRE_BEAT_GRID_PIPELINE_VERSIONS = PRE_PARTS_PIPELINE_VERSIONS | {"score-pipeline
 PRE_SECTIONS_PIPELINE_VERSIONS = PRE_BEAT_GRID_PIPELINE_VERSIONS | {"score-pipeline-v6"}
 PRE_RHYTHM_GRID_PIPELINE_VERSIONS = PRE_SECTIONS_PIPELINE_VERSIONS | {"score-pipeline-v7"}
 PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS = PRE_RHYTHM_GRID_PIPELINE_VERSIONS | {"score-pipeline-v8"}
+PRE_METER_PIPELINE_VERSIONS = PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS | {"score-pipeline-v9"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -201,7 +202,8 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     lines. ``sections``: a score from before song sections. ``rhythm-grid``: a
     score with notes from before evidence-gated sixteenth-note grids.
     ``half-bar-chords``: a score of a recording with completed harmony from
-    before half-bar chord changes. Such scores stay readable and downloadable.
+    before half-bar chord changes. ``meter``: bars from before the drums and
+    bass could set the meter. Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -253,6 +255,13 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         return "rhythm-grid"
     if version in PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS and record.get("harmony_status") == "completed":
         return "half-bar-chords"
+    if (
+        version in PRE_METER_PIPELINE_VERSIONS
+        and isinstance(measures, int)
+        and not isinstance(measures, bool)
+        and measures > 1
+    ):
+        return "meter"
     return None
 
 

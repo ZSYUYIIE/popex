@@ -193,7 +193,7 @@ def test_successful_construction_persists_reviewable_document(tmp_path: Path) ->
         "warnings": len(details["warnings"]),
     }
 
-    assert details["version"] == "score-pipeline-v9"
+    assert details["version"] == "score-pipeline-v10"
     assert details["builderVersion"] == "score-construction-v6"
     assert details["sources"]["transcription"] == {
         "version": "raw-transcription-v1",

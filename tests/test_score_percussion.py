@@ -464,7 +464,7 @@ def test_score_without_interpretation_maps_raw_hit_kinds(tmp_path: Path) -> None
     job_id = create_drum_job(settings)
     job, details = build_and_load(settings, job_id)
 
-    assert details["version"] == "score-pipeline-v9"
+    assert details["version"] == "score-pipeline-v10"
     assert details["layers"]["percussion"]["status"] == "included"
     assert "raw hit-kind table" in details["layers"]["percussion"]["note"]
     assert details["percussion"]["voiceSource"] == "raw-hit-kinds"

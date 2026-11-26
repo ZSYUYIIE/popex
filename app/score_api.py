@@ -27,7 +27,7 @@ from typing import Any
 from app.analysis import (
     ANALYSIS_JSON_RELATIVE_PATH,
 )
-from app.beat_grid import BeatGrid, build_beat_grid
+from app.beat_grid import BeatGrid, build_beat_grid, infer_meter
 from app.config import Settings
 from app.percussion_interpretation import broad_voice_for_hit
 from app.score_construction import (
@@ -161,20 +161,11 @@ def _record_pointer(record: Mapping[str, Any]) -> None:
         )
 
 
-def score_beat_grid(
-    analysis: Mapping[str, Any],
-    raw_transcription: Mapping[str, Any],
-    *,
-    beats_per_measure: int,
-) -> BeatGrid | None:
-    """Build the bar grid a score uses from saved analysis and transcription.
+_BASS_SOURCE_KINDS = frozenset({"bass", "mix_bass"})
 
-    Returns ``None`` when the analysis tracked too few usable beats; the score
-    then falls back to one constant tempo and says so.
-    """
-    timing = analysis.get("timing")
-    if not isinstance(timing, Mapping):
-        return None
+
+def _grid_drum_hits(raw_transcription: Mapping[str, Any]) -> tuple[list[float], list[tuple[float, str]], float]:
+    """Percussion onsets, kick- and snare-like hits, and the latest event time."""
     onsets: list[float] = []
     drum_hits: list[tuple[float, str]] = []
     end_seconds = 0.0
@@ -193,6 +184,51 @@ def score_beat_grid(
             voice, resolved = broad_voice_for_hit(hit["kind"], float(confidence))
             if resolved and voice in ("low_drum", "mid_drum"):
                 drum_hits.append((float(seconds), "low" if voice == "low_drum" else "mid"))
+    return onsets, drum_hits, end_seconds
+
+
+def score_meter(analysis: Mapping[str, Any], raw_transcription: Mapping[str, Any]) -> tuple[int, str, float | None]:
+    """Beats per bar, where they came from, and a confidence.
+
+    The drums and the bass line decide when they clearly repeat every three or
+    four beats (``drums-and-bass``); otherwise the analysis meter is used, and
+    without one the score falls back to 4/4. The harmony stage uses the same
+    decision so chords and bars agree.
+    """
+    timing = analysis.get("timing") if isinstance(analysis.get("timing"), Mapping) else {}
+    _onsets, drum_hits, _end = _grid_drum_hits(raw_transcription)
+    bass_onsets = [
+        float(event["startSeconds"])
+        for event in raw_transcription.get("pitchedNoteEvents", ())
+        if isinstance(event, Mapping)
+        and event.get("sourceKind") in _BASS_SOURCE_KINDS
+        and isinstance(event.get("startSeconds"), (int, float))
+        and not isinstance(event.get("startSeconds"), bool)
+    ]
+    inferred = infer_meter(timing.get("beatsSeconds"), drum_hits=drum_hits, bass_onsets=bass_onsets)
+    if inferred is not None:
+        return inferred[0], "drums-and-bass", inferred[1]
+    meter = timing.get("meter")
+    if type(meter) is int and 1 <= meter <= 12:
+        return meter, "analysis", _optional_confidence(timing.get("meterConfidence"))
+    return _METER_FALLBACK, "fallback-4/4", None
+
+
+def score_beat_grid(
+    analysis: Mapping[str, Any],
+    raw_transcription: Mapping[str, Any],
+    *,
+    beats_per_measure: int,
+) -> BeatGrid | None:
+    """Build the bar grid a score uses from saved analysis and transcription.
+
+    Returns ``None`` when the analysis tracked too few usable beats; the score
+    then falls back to one constant tempo and says so.
+    """
+    timing = analysis.get("timing")
+    if not isinstance(timing, Mapping):
+        return None
+    onsets, drum_hits, end_seconds = _grid_drum_hits(raw_transcription)
     for event in raw_transcription.get("pitchedNoteEvents", ()):
         end = event.get("endSeconds") if isinstance(event, Mapping) else None
         if isinstance(end, (int, float)) and not isinstance(end, bool) and math.isfinite(end):
@@ -290,13 +326,7 @@ def collect_score_evidence(
             "Tempo evidence is unavailable; score preview requires analysis tempo."
         )
     tempo_stable = timing.get("tempoStable")
-    meter = timing.get("meter")
-    if type(meter) is int and 1 <= meter <= 12:
-        beats_per_measure = meter
-        meter_source = "analysis"
-    else:
-        beats_per_measure = _METER_FALLBACK
-        meter_source = "fallback-4/4"
+    beats_per_measure, meter_source, meter_confidence = score_meter(analysis, raw_transcription)
 
     pitched_inputs = [
         {
@@ -319,7 +349,7 @@ def collect_score_evidence(
         "beatsPerMeasure": beats_per_measure,
         "meterSource": meter_source,
         "tempoConfidence": _optional_confidence(timing.get("tempoConfidence")),
-        "meterConfidence": _optional_confidence(timing.get("meterConfidence")),
+        "meterConfidence": meter_confidence,
         "tempoStable": tempo_stable if isinstance(tempo_stable, bool) else None,
         "percussionEventCount": len(raw_transcription.get("percussionEvents", ())),
         "beatGrid": score_beat_grid(
@@ -389,7 +419,12 @@ def score_evidence_warnings(
         warnings.append(
             "Percussion events are present but are not rendered in this pitched-note draft."
         )
-    if meter_source != "analysis":
+    if meter_source == "drums-and-bass":
+        warnings.append(
+            "The bar length comes from where kick drum, snare and bass notes repeat; "
+            "check that bars group the beats the way you count them."
+        )
+    elif meter_source != "analysis":
         warnings.append(
             "Meter evidence is unavailable or weak; measures use an explicit "
             "4/4 draft grid and require musician review."
