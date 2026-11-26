@@ -4196,6 +4196,12 @@ def _saved_score_payload(
             "This score was built before sixteenth-note rhythms were supported; "
             "rebuild it so lines whose onsets show sixteenths use a sixteenth-note grid.",
         )
+    elif outdated == "key-signature":
+        warnings.insert(
+            0,
+            "This score was built before a key signature could be written when only the "
+            "tonal centre was uncertain; draft it again to reduce written accidentals.",
+        )
     elif outdated == "meter":
         warnings.insert(
             0,
