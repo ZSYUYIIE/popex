@@ -15,8 +15,9 @@ The pipeline reuses the reviewed score builder and exporters from
   otherwise from the documented raw hit-kind table; unresolved hits stay in an
   explicit unresolved lane and are never assigned to a specific drum;
 - guitar and bass tablature as a separate fingering layer on already
-  quantized notes: bass fingers the separated bass-stem line by default and
-  guitar only fingers a line the musician chose; pitches are never changed.
+  quantized notes: bass fingers the separated bass-stem line by default (the
+  full mix's lowest line when there is no bass stem) and guitar only fingers
+  a line the musician chose; pitches are never changed.
 
 Raw events and interpretation drafts are read, never modified. Exports are
 dry-run before publication so a saved score is always downloadable.
@@ -72,6 +73,7 @@ from app.score_construction import (
 from app.score_sources import (
     effective_tablature_request,
     score_source_fingerprint,
+    tablature_line,
     score_source_identity,
 )
 from app.song_sections import MIN_BARS_FOR_SECTIONS, find_sections, section_note
@@ -837,11 +839,13 @@ def construct_score(
     progress("fingering_tablature", "Suggesting guitar and bass fingerings.", 72)
     tab_request, tab_origin = effective_tablature_request(record)
     tab_instruments = []
+    present_kinds = set()
     for measure in measures:
         for note in measure["notes"]:
             note["tab"] = None
+            present_kinds.add(note["sourceKind"])
     for instrument_id in TAB_INSTRUMENT_ORDER:
-        source_kind = tab_request[instrument_id]
+        source_kind = tablature_line(instrument_id, tab_request, present_kinds)
         if source_kind is None:
             continue
         selected = [
@@ -980,6 +984,11 @@ def construct_score(
                 f"{item['label']} tablature found no notes on the {line}; choose another line."
             )
             continue
+        if item["sourceKind"] != tab_request[item["instrument"]]:
+            warnings.append(
+                f"There is no separated bass stem, so {item['label'].lower()} tablature "
+                f"fingers the {line}; low chord notes may appear in it."
+            )
         if item["instrument"] == "guitar":
             warnings.append(
                 f"Guitar tablature is a fingering suggestion for the {line}; "

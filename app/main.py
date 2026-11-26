@@ -403,7 +403,7 @@ class TablatureChoiceRequest(BaseModel):
 
 
 _TAB_SOURCE_LABELS = {
-    "bass": "Bass stem",
+    "bass": "Bass line (stem, or the lowest line of the mix)",
     "vocals": "Vocal stem",
     "other": "Accompaniment stem",
     "full_mix": "Full-mix melody",

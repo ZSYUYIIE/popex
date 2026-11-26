@@ -365,7 +365,7 @@ console.log(JSON.stringify({{html}}));
     assert '<label for="tab-bass-done">Bass tablature from</label>' in html
     assert '<select id="tab-guitar-done" data-action="tablature" data-instrument="guitar"' in html
     assert '<option value="full_mix" selected>Full-mix melody</option>' in html
-    assert '<option value="bass" selected>Bass stem</option>' in html
+    assert '<option value="bass" selected>Bass line (stem, or the lowest line of the mix)</option>' in html
     assert "PopEx does not detect guitar parts" in html
     assert "<strong>Tablature suggestions</strong>" in html
     assert "from the bass stem: 5 of 6 notes fingered" in html
