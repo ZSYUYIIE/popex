@@ -1,0 +1,55 @@
+name: Docker local launch
+
+# Runs the README's Docker route with the repository's own Dockerfile and
+# docker-compose.yml, unmodified: build and start, draft a score through the
+# running container over HTTP, then check the data volume survives a restart.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - ".github/workflows/docker-local.yml"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "pyproject.toml"
+      - "scripts/smoke_running_app.py"
+
+permissions:
+  contents: read
+
+jobs:
+  docker-local:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      # The README command is `docker compose up --build`; -d keeps it in the background here.
+      - name: Build and start (README command)
+        run: docker compose up --build -d
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install the smoke client
+        run: pip install numpy soundfile
+
+      - name: Draft a score through the running container
+        run: python scripts/smoke_running_app.py --base-url http://127.0.0.1:8000 --timeout 900
+
+      - name: Restart and keep the saved score
+        run: |
+          docker compose restart
+          python scripts/smoke_running_app.py --base-url http://127.0.0.1:8000 --expect-jobs 1 --timeout 300
+
+      - name: Container logs
+        if: always()
+        run: docker compose logs --no-color | tail -n 200
+
+      - name: Stop
+        if: always()
+        run: docker compose down -v
