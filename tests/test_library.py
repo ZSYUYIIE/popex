@@ -502,3 +502,36 @@ console.log(JSON.stringify({{kinds,songs,empty,message,calls,cleared:t.getElemen
                        {"title": "Midnight Train", "credits": None, "kind": "live", "label": "Live at the Hall"}]]
     assert result["message"] == " Filed in your library beside the other versions of “Midnight Train”."
     assert result["cleared"] == ""
+
+
+def test_library_refreshes_when_a_drafted_recording_changes() -> None:
+    # The library rows show each version's tempo, bars and links from its
+    # score; they must update when a draft finishes, not only on reload.
+    result = _run_node(
+        f"""
+let jobs=[{{id:"job1",status:"completed",files:[],analysis:{{status:"completed"}},score:{{status:"processing"}}}}];
+let library={json.dumps(LIBRARY)};
+const calls=[];
+t.setFetch(async (url) => {{calls.push(url);return {{ok:true,status:200,json:async()=>(url.includes("/api/library")?library:jobs)}}}});
+await loadLibrary();
+await loadJobs();
+const baseline=calls.filter(url=>url.includes("/api/library")).length;
+await loadJobs();
+const unchanged=calls.filter(url=>url.includes("/api/library")).length;
+jobs=[{{id:"job1",status:"completed",files:[],analysis:{{status:"completed"}},score:{{status:"completed",createdAt:"2026-01-01T00:00:00Z"}}}}];
+await loadJobs();
+await new Promise(resolve=>setImmediate(resolve));
+const afterDraft=calls.filter(url=>url.includes("/api/library")).length;
+library={{...library,compositions:[]}};
+await loadLibrary();
+const emptyStart=calls.filter(url=>url.includes("/api/library")).length;
+jobs=[{{id:"job1",status:"completed",files:[],analysis:{{status:"completed"}},score:{{status:"completed",createdAt:"2026-02-02T00:00:00Z"}}}}];
+await loadJobs();
+await new Promise(resolve=>setImmediate(resolve));
+const emptyAfter=calls.filter(url=>url.includes("/api/library")).length;
+console.log(JSON.stringify({{baseline,unchanged,afterDraft,emptyStart,emptyAfter}}));
+"""
+    )
+    assert result["unchanged"] == result["baseline"]
+    assert result["afterDraft"] == result["baseline"] + 1
+    assert result["emptyAfter"] == result["emptyStart"]  # no songs: nothing to refresh
