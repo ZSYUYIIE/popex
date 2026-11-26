@@ -1446,7 +1446,9 @@ def _append_directions(
         direction_type = ET.SubElement(direction, "direction-type")
         metronome = ET.SubElement(direction_type, "metronome")
         ET.SubElement(metronome, "beat-unit").text = "quarter"
-        ET.SubElement(metronome, "per-minute").text = f"{tempo:.6g}"
+        # The printed mark is a whole number a musician can set on a metronome;
+        # playback keeps the exact tempo.
+        ET.SubElement(metronome, "per-minute").text = str(int(round(tempo)))
         ET.SubElement(direction, "sound", tempo=f"{tempo:.6g}")
     rehearsal = measure.get("rehearsal")
     if rehearsal is not None:
