@@ -29,15 +29,26 @@ These are indicators, not note accuracy: the reference for that recording has ch
   | Vocals | 80 to 1200 Hz | 100 ms | one line |
   | Accompaniment | 60 to 2100 Hz | 80 ms | chords kept; at most 2400 notes, the strongest |
 
+- Without separated stems, the model hears the full mix once (30 to 2100 Hz, shortest note 80 ms) and its notes are split by register into three estimated lines, each labelled as a line of the mix, never as a stem:
+
+  | Line | Taken from | Rule |
+  | --- | --- | --- |
+  | Lowest line (`mix_bass`) | notes at or below E3 | where notes overlap, the lowest is kept: the loudest low note is often the bass's octave overtone |
+  | Top line (`mix_melody`) | remaining notes at or above G3 | where notes overlap, the highest is kept |
+  | Chords (`mix_chords`) | every other note | kept as heard; nothing detected is dropped |
+
+  Both single lines ignore notes shorter than 100 ms and weak notes that start at least 20 ms inside a note more than 1.67 times as strong (usually its overtone or undertone); those stay in the chords line. Two notes clash only when they overlap by more than a quarter of the shorter one; a smaller legato overlap keeps both, and the earlier note ends where the next begins. The score writes the top line as **Melody (top line of the full mix, draft)**, the lowest line on the **Bass line** staff, and the chords line in the **Accompaniment reduction** on a grand staff. The key-finding step uses the lowest line as its bass evidence.
+
+  On the synthetic test song (melody, bass, chords and drums mixed, with known notes) this found the melody with recall 0.98 and precision 0.86 and the bass with recall 0.70 and precision 0.68. pYIN on the same mix had written 30 notes that followed the bass and no melody.
 - Each note's confidence is the model's average activation over the note. Notes under 0.45 carry a weak-activation warning.
-- If ONNX Runtime or the model is unavailable, or the model fails on a stem, that stem uses pYIN and the transcription says so.
+- If ONNX Runtime or the model is unavailable, or the model fails on a stem or the full mix, that source uses pYIN and the transcription says so.
 
 ## Limits
 
 - Basic Pitch was trained on solo and small-ensemble recordings and synthesised multitracks. Separated pop stems contain bleed and artefacts, so expect extra or missing notes, especially in the accompaniment.
 - One-line reduction keeps the strongest note; a backing vocal louder than the lead can win.
 - Drums are not transcribed by this model.
-- The full mix still uses pYIN, which finds only a dominant melody.
+- The full-mix lines are estimates by register. The top line can follow a harmony part or a chord's top note; the lowest line can pick up low chord notes or a ghost note below the bass; instruments are not identified. Separated stems give better lines when they are available.
 
 ## Licence
 

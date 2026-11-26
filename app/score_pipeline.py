@@ -56,6 +56,7 @@ from app.score_artifacts import (
 )
 from app.percussion_interpretation import broad_voice_for_hit
 from app.score_construction import (
+    ACCOMPANIMENT_SOURCE_KINDS,
     READING_REDUCTION_MAX_PER_STAFF,
     reading_reduction,
     PERCUSSION_NOTATION,
@@ -102,6 +103,9 @@ _SOURCE_LABELS = {
     "bass": "bass-stem line",
     "other": "accompaniment-stem line",
     "full_mix": "full-mix melody line",
+    "mix_melody": "full-mix top line",
+    "mix_bass": "full-mix lowest line",
+    "mix_chords": "rest of the full mix",
 }
 SCORE_MIDI_EXPORT_VERSION = "smf-type1-parts-v3"
 SCORE_MUSICXML_EXPORT_VERSION = "musicxml-3.1-partwise-v4"
@@ -430,7 +434,7 @@ def _load_matching_parts(
             assignments.setdefault(event_id, set()).add(part_id)
     return {"parts": parts, "assignments": assignments}, (
         "Part labels come from the editable interpretation; MIDI and MusicXML "
-        "parts follow the separated source lines, not these labels."
+        "parts follow the source lines the notes were transcribed from, not these labels."
     )
 
 
@@ -996,11 +1000,18 @@ def construct_score(
             note
             for measure in measures
             for note in measure["notes"]
-            if note["tab"] is None and note["sourceKind"] == "other"
+            if note["tab"] is None and note["sourceKind"] in ACCOMPANIMENT_SOURCE_KINDS
         ]
         _reduced, left_out = reading_reduction(accompaniment)
+        kinds = {note["sourceKind"] for note in accompaniment}
+        if kinds == {"mix_chords"}:
+            collected = "the full-mix notes that are neither the top line nor the lowest line"
+        elif "mix_chords" in kinds:
+            collected = "the separated accompaniment stem and the rest of the full mix"
+        else:
+            collected = "the separated accompaniment stem"
         warnings.append(
-            "The accompaniment reduction collects the separated accompaniment stem on a "
+            f"The accompaniment reduction collects {collected} on a "
             "grand staff; it is not split into specific instruments. For reading, notes "
             "that start together are written as one chord held until the next chord, "
             f"with at most {READING_REDUCTION_MAX_PER_STAFF} notes per staff"

@@ -22,7 +22,14 @@ from app.percussion_transcription import (
     PercussionTranscriptionError,
     transcribe_percussion_audio,
 )
-from app.note_model import MODEL_SOURCE_KINDS, NoteModelError, note_model_available, transcribe_notes
+from app.note_model import (
+    MIX_LINE_KINDS,
+    MODEL_SOURCE_KINDS,
+    NoteModelError,
+    note_model_available,
+    transcribe_mix_lines,
+    transcribe_notes,
+)
 from app.pitch_transcription import PitchedTranscriptionError, transcribe_pitched_audio
 from app.separation import (
     REQUIRED_STEM_KINDS,
@@ -42,11 +49,20 @@ from app.transcription_events import (
 )
 
 
-TRANSCRIPTION_VERSION = "stem-notes-onset-v2"
+TRANSCRIPTION_VERSION = "stem-notes-onset-v3"
 DEFAULT_PITCH_VERSION = "baseline-pyin-v1"
 
 _PITCHED_STEM_KINDS = ("vocals", "bass", "other")
-_STEM_SOURCE_ORDER = {"vocals": 0, "bass": 1, "other": 2, "drums": 3, "full_mix": 4}
+_STEM_SOURCE_ORDER = {
+    "vocals": 0,
+    "bass": 1,
+    "other": 2,
+    "drums": 3,
+    "full_mix": 4,
+    "mix_melody": 5,
+    "mix_bass": 6,
+    "mix_chords": 7,
+}
 _VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 _URL_RE = re.compile(r"(?i)https?://[^\s\]\[<>()\"']+")
@@ -105,10 +121,31 @@ def transcribe_pitched_source(audio_path: Path, *, source_kind: str) -> Mapping[
     """Detect notes on one source with the best detector available for it.
 
     Separated vocal, bass and accompaniment stems use the bundled note model,
-    which hears several notes at once. The full mix, and any stem when the
-    model is unavailable or fails, use the pYIN pitch tracker, and the result
-    says so.
+    which hears several notes at once. Without stems, the full mix is heard by
+    the same model once and returned as three estimated lines under ``lines``
+    (top line, lowest line, chords). When the model is unavailable or fails,
+    the pYIN pitch tracker is used and the result says so.
     """
+    if source_kind == "full_mix":
+        if note_model_available():
+            try:
+                lines = transcribe_mix_lines(audio_path)
+            except NoteModelError:
+                fallback = "The note model could not process the full mix, so the pYIN pitch tracker was used."
+            else:
+                return {
+                    "algorithmVersion": lines[0]["algorithmVersion"],
+                    "sourceKind": "full_mix",
+                    "events": [],
+                    "warnings": [],
+                    "diagnostics": {},
+                    "lines": lines,
+                }
+        else:
+            fallback = "The note model is unavailable, so the pYIN pitch tracker was used for the full mix."
+        result = dict(transcribe_pitched_audio(audio_path, source_kind=source_kind))
+        result["warnings"] = [fallback, *list(result.get("warnings") or [])][:8]
+        return result
     if source_kind in MODEL_SOURCE_KINDS:
         if note_model_available():
             try:
@@ -180,9 +217,10 @@ def transcribe_job(
                     f"Pitched transcription for the {source_kind} stem failed; successful sources were preserved.",
                 )
                 continue
-            pitch_outputs.append(output)
-            used_stem_sources.add(source_kind)
-            _extend_detector_warnings(warnings, output)
+            for item in output:
+                pitch_outputs.append(item)
+                used_stem_sources.add(item.source_kind)
+                _extend_detector_warnings(warnings, item)
 
         if failed_stem_pitch == len(selection.pitched_inputs):
             fallback_codes.append("all_pitched_stems_to_full_mix")
@@ -204,8 +242,9 @@ def transcribe_job(
                     "Full-mix pitched transcription also failed; percussion results may still be published.",
                 )
             else:
-                pitch_outputs.append(output)
-                _extend_detector_warnings(warnings, output)
+                for item in output:
+                    pitch_outputs.append(item)
+                    _extend_detector_warnings(warnings, item)
     else:
         try:
             output = _pitch_output(
@@ -221,8 +260,9 @@ def transcribe_job(
                 "Full-mix pitched transcription failed; percussion results may still be published.",
             )
         else:
-            pitch_outputs.append(output)
-            _extend_detector_warnings(warnings, output)
+            for item in output:
+                pitch_outputs.append(item)
+                _extend_detector_warnings(warnings, item)
 
     _report(
         stage_callback,
@@ -493,18 +533,41 @@ def _pitch_output(
     analysis_version: str,
     *,
     input_origin: str,
-) -> _DetectorOutput:
+) -> list[_DetectorOutput]:
+    """Run one pitched source; a full mix may come back as several mix lines."""
     try:
         result = processor(path, source_kind=source_kind)
     except (PitchedTranscriptionError, Exception) as exc:
         raise _SourceFailure("pitched source failed") from exc
-    return _detector_output(
-        result,
-        source_kind,
-        "pitched",
-        analysis_version,
-        input_origin=input_origin,
-    )
+    lines = result.get("lines") if isinstance(result, Mapping) else None
+    if source_kind == "full_mix" and lines is not None:
+        if (
+            isinstance(lines, (str, bytes, bytearray))
+            or not isinstance(lines, Sequence)
+            or [line.get("sourceKind") if isinstance(line, Mapping) else None for line in lines]
+            != list(MIX_LINE_KINDS)
+            or result.get("sourceKind") != "full_mix"
+        ):
+            raise _SourceFailure("full-mix lines are invalid")
+        return [
+            _detector_output(
+                line,
+                line["sourceKind"],
+                "pitched",
+                analysis_version,
+                input_origin=input_origin,
+            )
+            for line in lines
+        ]
+    return [
+        _detector_output(
+            result,
+            source_kind,
+            "pitched",
+            analysis_version,
+            input_origin=input_origin,
+        )
+    ]
 
 
 def _percussion_output(

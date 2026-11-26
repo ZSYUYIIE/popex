@@ -486,7 +486,8 @@ code, kbd {
 .roll-note.vocal {
   fill: var(--part-vocal);
 }
-.roll-note.lines {
+.roll-note.lines,
+.roll-note.melody {
   fill: var(--part-lines);
 }
 .roll-note.accomp {
@@ -544,7 +545,8 @@ code, kbd {
 .roll-legend i.vocal {
   background: var(--part-vocal);
 }
-.roll-legend i.lines {
+.roll-legend i.lines,
+.roll-legend i.melody {
   background: var(--part-lines);
 }
 .roll-legend i.accomp {

@@ -10,8 +10,9 @@ where the evidence suggests a different centre or collection.
 Evidence:
 - a pitch-class histogram of quantized notes, weighted by duration (beats)
   and note confidence;
-- bass emphasis from the separated bass-stem line, or else the lowest note
-  that starts each bar, weighted the same way;
+- bass emphasis from the separated bass-stem line, else the full mix's
+  lowest line (when the mix was split into lines), else the lowest note that
+  starts each bar, weighted the same way;
 - the analysis chroma mean, when available.
 
 Scoring (documented): each collection is a probability distribution over the
@@ -255,6 +256,9 @@ def _bass_notes(measures: Sequence[Mapping[str, Any]]) -> tuple[list[Mapping[str
     stem = [note for measure in measures for note in measure["notes"] if note.get("sourceKind") == "bass"]
     if stem:
         return stem, "bass-stem line"
+    mix_line = [note for measure in measures for note in measure["notes"] if note.get("sourceKind") == "mix_bass"]
+    if mix_line:
+        return mix_line, "lowest line of the full mix"
     lowest = []
     for measure in measures:
         if measure["notes"]:

@@ -407,6 +407,9 @@ _TAB_SOURCE_LABELS = {
     "vocals": "Vocal stem",
     "other": "Accompaniment stem",
     "full_mix": "Full-mix melody",
+    "mix_melody": "Full-mix top line",
+    "mix_bass": "Full-mix lowest line",
+    "mix_chords": "Rest of the full mix",
 }
 
 
