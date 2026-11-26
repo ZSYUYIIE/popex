@@ -399,6 +399,17 @@ def test_half_bar_reference_chords_split_the_bar():
     assert shown["rootAccuracyPercent"] == 50.0
 
 
+def test_half_bar_score_chords_are_scored_over_their_halves():
+    reference = example_reference()
+    reference["chords"] = {"bars": [{"startBar": 1, "endBar": 2, "pattern": [["C", "F"]]}]}
+    score = make_score(bars=2, chords=[None, None])
+    for measure in score["measures"]:
+        measure["chordChanges"] = [{"beat": 0.0, "symbol": "C"}, {"beat": 2.0, "symbol": "F"}]
+    result = scoreboard.evaluate(score, reference)["chords"]
+    assert result["barsWithSymbol"] == 2
+    assert result["shown"]["rootAccuracyPercent"] == 100.0
+
+
 def test_no_chord_bars_are_left_out_of_the_reference_time():
     reference = example_reference()
     reference["chords"] = {"bars": [{"startBar": 1, "endBar": 4, "pattern": ["N", "C"]}]}

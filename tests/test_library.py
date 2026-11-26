@@ -222,6 +222,21 @@ def test_compare_versions_lists_chords_unique_to_each_version() -> None:
     assert result[1]["score"]["chordsOnlyHere"] == ["F"]
 
 
+def test_version_summary_counts_half_bar_chords_as_chords_used() -> None:
+    from app.library import version_summary
+
+    document = {
+        "timing": {}, "counts": {},
+        "measures": [
+            {"chordSymbol": "C", "chordChanges": []},
+            {"chordSymbol": None, "chordChanges": [{"beat": 0.0, "symbol": "Am"}, {"beat": 2.0, "symbol": "F"}]},
+            {"chordSymbol": "G", "chordChanges": [{"beat": 0.0, "symbol": "E"}, {"beat": 2.0, "symbol": "B"}]},
+        ],
+    }
+    summary = version_summary({"id": "job1"}, document, stale=False, corrections_active=0)
+    assert summary["score"]["chordsUsed"] == ["C", "Am", "F", "G"]  # a whole-bar chord wins over a pair
+
+
 # ---------------------------------------------------------------------------
 # Library panel
 

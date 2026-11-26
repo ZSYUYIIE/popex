@@ -392,6 +392,7 @@ def load_score(payload: dict[str, Any]) -> dict[str, Any]:
                 "start": start,
                 "end": end,
                 "chordSymbol": item.get("chordSymbol"),
+                "chordChanges": item.get("chordChanges") if isinstance(item.get("chordChanges"), list) else [],
                 "harmony": item.get("harmony") if isinstance(item.get("harmony"), list) else [],
                 "notes": item.get("notes") if isinstance(item.get("notes"), list) else [],
                 "hits": item.get("percussionHits") if isinstance(item.get("percussionHits"), list) else [],
@@ -575,17 +576,32 @@ def evaluate_chords(score: dict[str, Any], reference: dict[str, Any]) -> dict[st
     unreadable = 0
     bars_with_symbol = 0
     for measure in score["measures"]:
+        beat_seconds = (measure["end"] - measure["start"]) / score["beatsPerMeasure"]
         symbol = measure["chordSymbol"]
+        # A whole-bar symbol spans the bar; otherwise half-bar changes (schema 9)
+        # each span from their beat to the next change or the bar's end.
         if isinstance(symbol, str) and symbol.strip():
+            spans = [(measure["start"], measure["end"], symbol)]
+        else:
+            changes = [
+                change for change in measure.get("chordChanges") or ()
+                if isinstance(change, dict) and isinstance(change.get("symbol"), str) and _is_number(change.get("beat"))
+            ]
+            starts = [measure["start"] + float(change["beat"]) * beat_seconds for change in changes]
+            spans = [
+                (start, starts[index + 1] if index + 1 < len(starts) else measure["end"], change["symbol"])
+                for index, (start, change) in enumerate(zip(starts, changes))
+            ]
+        if spans:
             bars_with_symbol += 1
+        for start, end, text in spans:
             try:
-                chord = parse_chord(symbol)
+                chord = parse_chord(text)
             except ScoreboardError:
                 chord = None
                 unreadable += 1
-            if chord is not None:
-                shown.append((measure["start"], measure["end"], chord))
-        beat_seconds = (measure["end"] - measure["start"]) / score["beatsPerMeasure"]
+            if chord is not None and end > start:
+                shown.append((start, end, chord))
         for window in measure["harmony"]:
             if not isinstance(window, dict) or window.get("unresolved") or not isinstance(window.get("symbol"), str):
                 continue
