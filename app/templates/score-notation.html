@@ -31,6 +31,12 @@
     <p>Render up to 128 bars at a time. Change the range to read later bars; downloads always contain the complete score or part.</p>
     <p id="notation-status" role="status" aria-live="polite">Loading saved-score information…</p>
     <p id="notation-rendered"></p>
+    <div class="notation-print-controls">
+      <label>Paper<select id="notation-paper-size"><option value="a4">A4</option><option value="letter">US Letter</option></select></label>
+      <button id="notation-print" type="button" disabled>Print or save as PDF</button>
+      <p id="notation-print-note">Prints the bars shown above, laid out on pages. Choose "Save as PDF" in the print dialog to keep a PDF.</p>
+    </div>
+    <div id="notation-print-pages" aria-hidden="true"></div>
     <section class="notation-review" aria-labelledby="notation-review-title">
       <h2 id="notation-review-title">Listen against the recording</h2>
       <p>Bar timing is the draft’s estimate, not verified alignment. Playback uses this recording, not synthesized notes. Changing notation controls does not change the displayed score until Render.</p>

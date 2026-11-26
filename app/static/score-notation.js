@@ -1,12 +1,17 @@
 /* Render only PopEx's own saved MusicXML, locally and without changing it. */
 (() => {
   "use strict";
-  const $ = id => document.getElementById(id);
+  const page = document;
+  const $ = id => page.getElementById(id);
   const form = $("notation-controls"), view = $("notation-view"), part = $("notation-part");
   const from = $("notation-from"), through = $("notation-through"), zoom = $("notation-zoom");
   const renderButton = $("notation-render"), retry = $("notation-retry"), paper = $("notation-paper");
+  const printButton = $("notation-print"), paperSize = $("notation-paper-size"), printPages = $("notation-print-pages");
   const match = /^\/jobs\/([a-f0-9]{32})\/notation$/.exec(location.pathname);
-  let details = null, recording = null, busy = false, initialized = false, restoreFocus = null;
+  let details = null, recording = null, busy = false, initialized = false, restoreFocus = null, printable = null;
+  const PRINT_ZOOM = 0.6;
+  // Letter paper where it is the usual size; A4 elsewhere.
+  if (/^(en-US|en-CA|es-MX|fr-CA|en-PH)$/i.test(navigator.language || "")) paperSize.value = "letter";
   const audioReview = globalThis.PopexNotationAudio ? new globalThis.PopexNotationAudio.Review() : null;
   const text = (value, fallback = "") => typeof value === "string" ? value.slice(0, 400) : fallback;
   function status(message, error = false) {
@@ -200,8 +205,9 @@
       if (typeof Renderer !== "function") throw new Error("The local notation renderer is unavailable. Reload this page or use the MusicXML download.");
       const renderer = new Renderer(stage, {backend: "svg", autoResize: false, drawTitle: false, disableCursor: false, followCursor: false,
         cursorsOptions: [{type: 3, color: "#205f47", alpha: 0.18, follow: false}]});
-      renderer.Zoom = Number(zoom.value);
       await renderer.load(document);
+      // The renderer resets its zoom when it loads a document, so set it afterwards.
+      renderer.Zoom = Number(zoom.value);
       renderer.render();
       if (!stage.querySelector("svg")) throw new Error("No notation was rendered. Try another part or download the MusicXML.");
       stage.className = "notation-canvas";
@@ -217,6 +223,10 @@
           $("notation-audio-status").textContent = "Recording review is unavailable. The notation and downloads remain usable.";
         }
       }
+      printable = new XMLSerializer().serializeToString(document);
+      printPages.replaceChildren();
+      page.body?.classList.remove("print-pages");
+      printButton.disabled = false;
       const label = part.options[part.selectedIndex]?.textContent || "Full score";
       $("notation-rendered").textContent = `${label} · ${view.value === "original" ? "original prediction" : "with corrections"} · bars ${start}-${end} of ${details.counts.measures} · correction revision ${details.corrections?.revision ?? 0}`;
       status("Notation rendered locally. Review the transcription warnings and check it by ear.");
@@ -225,6 +235,35 @@
       status(text(error.message, "Notation could not be rendered. Retry or use the MusicXML download.") + " Any previous render remains shown; saved files and corrections are unchanged.", true);
     } finally { lock(false); renderButton.disabled = !details; }
   }
+  async function printScore() {
+    if (!printable || busy) return;
+    const Renderer = globalThis.opensheetmusicdisplay?.OpenSheetMusicDisplay;
+    printButton.disabled = true;
+    status("Laying out the shown bars on printable pages…");
+    try {
+      if (typeof Renderer !== "function") throw new Error("renderer unavailable");
+      const holder = page.createElement("div");
+      holder.className = "notation-print-stage";
+      printPages.replaceChildren(holder);
+      // Page format makes the renderer break systems between pages, never through a system.
+      const renderer = new Renderer(holder, {backend: "svg", autoResize: false, drawTitle: false,
+        pageFormat: paperSize.value === "letter" ? "Letter_P" : "A4_P", pageBackgroundColor: "#FFFFFF"});
+      // Printed music is read closer than a screen, so pages use a smaller size to fit more bars per system.
+      await renderer.load(new DOMParser().parseFromString(printable, "application/xml"));
+      renderer.Zoom = PRINT_ZOOM;
+      renderer.render();
+      const pages = holder.querySelectorAll("svg").length;
+      if (!pages) throw new Error("no pages");
+      page.body?.classList.add("print-pages");
+      status(`${pages} printable page${pages === 1 ? "" : "s"} ready. Choose "Save as PDF" in the print dialog to keep a PDF.`);
+      globalThis.print?.();
+    } catch (_) {
+      printPages.replaceChildren();
+      page.body?.classList.remove("print-pages");
+      status("The shown bars could not be laid out on pages. Your browser can still print the notation as shown, and the downloads are unchanged.", true);
+    } finally { printButton.disabled = !printable; }
+  }
+  printButton.addEventListener("click", printScore);
   form.addEventListener("submit", render);
   retry.addEventListener("click", reload);
   view.addEventListener("change", reload);

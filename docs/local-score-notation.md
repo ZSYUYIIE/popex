@@ -96,6 +96,20 @@ The notation view must show honest warnings, preserve original artifacts and
 offer retry on rendering failure. The SVG is a visual aid, not a replacement for
 the structured accessible review or a publication-quality engraving guarantee.
 
+## Printing and PDF
+
+**Print or save as PDF** lays the bars shown on screen out on A4 or US Letter
+pages (Letter by default in the US, Canada, Mexico and the Philippines, A4
+elsewhere) and opens the browser's print dialog, where "Save as PDF" keeps a PDF.
+The renderer's page format breaks lines between systems, never through one, at a
+smaller notation size than the screen so that more bars fit on a line. The
+printout shows only the recording title, the line describing what is shown, and
+the pages; controls, warnings and the review player are left out. Nothing is sent
+to a service. Printing the page without the button prints the screen layout.
+
+The **Notation size** choice is applied after the document loads; the renderer
+resets its zoom on load, so earlier builds ignored it.
+
 ## Recording review beside notation
 
 After a successful Render, the native audio player uses only that recording's
