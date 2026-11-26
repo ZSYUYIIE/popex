@@ -14,6 +14,7 @@ on:
       - "scripts/check_windows.ps1"
       - "scripts/run_windows.ps1"
       - "scripts/smoke_score_pipeline.py"
+      - "scripts/smoke_running_app.py"
       - "pyproject.toml"
 
 permissions:
@@ -53,7 +54,7 @@ jobs:
           powershell -ExecutionPolicy Bypass -File .\scripts\check_windows.ps1
           if ($LASTEXITCODE -ne 0) { throw "check_windows.ps1 failed after installation." }
 
-      - name: Start the launcher and open the page (README command)
+      - name: Start the launcher, open the page and draft a score (README command)
         shell: powershell
         run: |
           $log = Join-Path $env:RUNNER_TEMP "popex-launcher.log"
@@ -66,14 +67,18 @@ jobs:
             Start-Sleep -Seconds 5
             try { $page = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8000/" -TimeoutSec 5 } catch { $page = $null }
           }
-          $jobs = $null
-          if ($page) { $jobs = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8000/api/jobs" -TimeoutSec 10 }
+          $smoke = 1
+          if ($page) {
+            # Upload a synthetic recording and draft it through the launcher's server, as the page does.
+            .\.venv\Scripts\python.exe scripts\smoke_running_app.py --base-url http://127.0.0.1:8000 --timeout 900
+            $smoke = $LASTEXITCODE
+          }
           taskkill /PID $launcher.Id /T /F | Out-Null
           Get-Content $log, $err -ErrorAction SilentlyContinue | Select-Object -Last 40
           if (-not $page) { throw "PopEx did not answer at http://127.0.0.1:8000/ after starting the launcher." }
           if ($page.StatusCode -ne 200 -or $page.Content -notmatch "Add a recording") { throw "The PopEx page did not load." }
-          if ($jobs.StatusCode -ne 200) { throw "The PopEx API did not answer." }
-          Write-Host "PopEx started and served its page."
+          if ($smoke -ne 0) { throw "Drafting a score through the launcher's server failed." }
+          Write-Host "PopEx started, served its page and drafted a score."
 
       - name: End-to-end synthetic score smoke
         shell: powershell

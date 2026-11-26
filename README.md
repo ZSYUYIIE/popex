@@ -695,7 +695,7 @@ Docker Desktop or Docker Engine must be running:
 docker compose up --build
 ```
 
-Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, analysis JSON, stem manifests, stem WAVs, and SQLite history. The base Docker setup does not install the optional Demucs runtime or bundle model weights.
+Open <http://localhost:8000>. The `/data` volume preserves sources, WAV files, analysis JSON, stem manifests, stem WAVs, and SQLite history. The base Docker setup does not install the optional Demucs runtime or bundle model weights. A CI job runs `docker compose up --build` with this Dockerfile, drafts a score through the running container and checks the saved score survives a restart.
 
 ## Configuration
 
@@ -734,6 +734,12 @@ End-to-end synthetic smoke (requires FFmpeg and ffprobe; generates a tone melody
 
 ```bash
 python scripts/smoke_score_pipeline.py
+```
+
+The same workflow against a server that is already running (started by `docker compose up`, `run_windows.ps1` or `uvicorn`): it uploads a synthetic recording over HTTP, starts **Draft the score** as the page does, and checks the saved score, its MusicXML and MIDI downloads and the notation page:
+
+```bash
+python scripts/smoke_running_app.py --base-url http://127.0.0.1:8000
 ```
 
 Generated MusicXML can be checked against the official MusicXML 3.1 schema by pointing `POPEX_MUSICXML_XSD` at a local copy of `musicxml.xsd` (with `lxml` installed) and running `pytest -k musicxml_schema`. CI fetches the schema at a pinned W3C commit with SHA-256 checks for validation only; it is not redistributed.
