@@ -4,7 +4,7 @@ Generates a short synthetic recording (a sine-tone melody over a kick, snare
 and hi-hat pattern), then drives the real application through upload, FFmpeg
 normalization, analysis, raw transcription, interpretation, harmony and
 score construction. It asks for guitar tablature of the melody line, then
-checks that the saved draft score holds pitched notes, guitar tablature and a
+checks that the saved draft score holds pitched notes, bass and guitar tablature and a
 separate percussion part, and that the MIDI and MusicXML exports carry them. Only synthetic audio is used; nothing is downloaded.
 
 Usage::
@@ -217,7 +217,9 @@ def run(data_dir: Path) -> dict:
         original_details, details = details, corrected_details
         tab_notes = [
             note
-            for note in root.findall("part[@id='P4']/measure/note")
+            # Bass (P3, the full mix's lowest line without stems) and guitar (P4).
+            for part_id in ("P3", "P4")
+            for note in root.findall(f"part[@id='{part_id}']/measure/note")
             if note.find("notations/technical/fret") is not None
             # A note held across a bar line is written again, tied; count it once.
             and note.find("tie[@type='stop']") is None
@@ -240,7 +242,7 @@ def run(data_dir: Path) -> dict:
                 "keySignature": details["tonality"]["keySignature"],
                 "localRegions": len(details["tonality"]["localRegions"]),
             },
-            "musicxmlGuitarTabNotes": len(tab_notes),
+            "musicxmlTabNotes": len(tab_notes),
             "partDownloads": part_downloads,
             "corrections": {
                 "active": corrected_details["corrections"]["activeCount"],
@@ -278,7 +280,7 @@ def run(data_dir: Path) -> dict:
         problems.append("a part download failed")
     if summary["layers"].get("tablature") != "included":
         problems.append("tablature layer is not included")
-    if summary["musicxmlGuitarTabNotes"] != summary["counts"]["fingeredTabNotes"]:
+    if summary["musicxmlTabNotes"] != summary["counts"]["fingeredTabNotes"]:
         problems.append("MusicXML TAB notes do not match fingered notes")
     summary["problems"] = problems
     return summary

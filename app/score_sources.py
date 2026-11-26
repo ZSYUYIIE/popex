@@ -54,6 +54,27 @@ def validate_tablature_request(value: Any) -> dict[str, str | None]:
     return request
 
 
+def tablature_line(
+    instrument: str, request: Mapping[str, str | None], present_kinds: frozenset[str] | set[str]
+) -> str | None:
+    """Return the line an instrument actually fingers for a request.
+
+    Bass tablature asked for on the bass-stem line fingers the full mix's
+    lowest line when the score has no bass-stem notes but has that line (a
+    recording drafted without stems), unless guitar already fingers it.
+    """
+    source = request.get(instrument)
+    if (
+        instrument == "bass"
+        and source == "bass"
+        and "bass" not in present_kinds
+        and "mix_bass" in present_kinds
+        and "mix_bass" not in request.values()
+    ):
+        return "mix_bass"
+    return source
+
+
 def stored_tablature_request(record: Mapping[str, Any] | None) -> dict[str, str | None] | None:
     """Return the musician's saved choice, or ``None`` when the default applies."""
     if not isinstance(record, Mapping):
@@ -220,6 +241,7 @@ __all__ = [
     "effective_tablature_request",
     "encode_tablature_request",
     "stored_tablature_request",
+    "tablature_line",
     "validate_tablature_request",
     "current_score_fingerprint",
     "is_score_fingerprint",

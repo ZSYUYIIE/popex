@@ -47,6 +47,7 @@ from app.score_construction import (
 from app.score_sources import (
     is_score_fingerprint,
     score_source_fingerprint,
+    tablature_line,
     validate_tablature_request,
 )
 from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consistent
@@ -498,8 +499,20 @@ def _validate_note_tab(note: Mapping[str, Any], label: str, totals: dict[str, An
     counts["sources"].add(note.get("sourceKind"))
 
 
+def _allowed_tab_lines(instrument_id: str, request: Mapping[str, Any], present_kinds: set[Any]) -> set[Any]:
+    """The requested line, plus the full mix's lowest line for bass without a bass stem.
+
+    The lowest line need not still be present: corrections may delete all of it.
+    """
+    allowed = {request[instrument_id], tablature_line(instrument_id, request, present_kinds | {"mix_bass"})}
+    return allowed
+
+
 def _validate_tablature_summary(
-    value: Any, sources: Mapping[str, Any], by_instrument: Mapping[str, Any]
+    value: Any,
+    sources: Mapping[str, Any],
+    by_instrument: Mapping[str, Any],
+    present_kinds: set[Any] | None = None,
 ) -> None:
     summary = _mapping(value, "tablature")
     _exact_keys(summary, frozenset({"version", "origin", "request", "instruments"}), "tablature")
@@ -526,7 +539,7 @@ def _validate_tablature_summary(
             raise _fail(f"{label}.instrument is invalid.")
         listed.add(instrument_id)
         if (
-            item["sourceKind"] != request[instrument_id]
+            item["sourceKind"] not in _allowed_tab_lines(instrument_id, request, present_kinds or set())
             or item["label"] != instrument.label
             or item["tuningName"] != instrument.tuning_name
             or item["strings"] != list(instrument.strings)
@@ -894,7 +907,10 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         raise _fail("Schema-1 score documents cannot carry percussion.")
     if schema_version >= 3:
         _validate_tablature_summary(
-            document["tablature"], document["sources"], totals["tabByInstrument"]
+            document["tablature"],
+            document["sources"],
+            totals["tabByInstrument"],
+            {note.get("sourceKind") for measure in document["measures"] for note in measure["notes"]},
         )
         if (layers["tablature"] == "included") != bool(totals["fingeredTabNotes"]):
             raise _fail("The tablature layer status does not match its notes.")
