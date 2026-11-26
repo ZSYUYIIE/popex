@@ -51,14 +51,15 @@ from app.score_sources import (
     validate_tablature_request,
 )
 from app.tablature import TAB_INSTRUMENTS, TAB_STATUSES, tab_position_is_consistent
-from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature
+from app.tonal_context import COLLECTIONS, KEY_SIGNATURE_MIN_CONFIDENCE, key_signature, key_signature_for
 
 # Schema 2 adds a separate percussion part, schema 3 a tablature layer, and
 # schema 4 the modal tonal context, schema 7 song sections, schema 8 the
-# per-line rhythm grids, and schema 9 half-bar chord changes; earlier
+# per-line rhythm grids, schema 9 half-bar chord changes, and schema 10 a key
+# signature confidence separate from the tonal centre's; earlier
 # documents remain readable.
-SCORE_ARTIFACT_SCHEMA_VERSION = 9
-SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9})
+SCORE_ARTIFACT_SCHEMA_VERSION = 10
+SUPPORTED_SCORE_ARTIFACT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
 SCORE_ARTIFACT_TYPE = "popex-draft-score"
 SCORE_DIRECTORY_NAME = "score"
 
@@ -574,23 +575,26 @@ def _validate_candidate(value: Any, label: str, keys: frozenset[str]) -> Mapping
     return item
 
 
-def _validate_tonality(value: Any, measure_count: int) -> None:
+_TONALITY_KEYS = frozenset(
+    {
+        "version",
+        "evidence",
+        "primaryCandidate",
+        "candidates",
+        "ambiguousWith",
+        "localRegions",
+        "chromaticismScore",
+        "keySignature",
+        "notes",
+    }
+)
+
+
+def _validate_tonality(value: Any, measure_count: int, schema_version: int = 9) -> None:
     tonality = _mapping(value, "tonality")
     _exact_keys(
         tonality,
-        frozenset(
-            {
-                "version",
-                "evidence",
-                "primaryCandidate",
-                "candidates",
-                "ambiguousWith",
-                "localRegions",
-                "chromaticismScore",
-                "keySignature",
-                "notes",
-            }
-        ),
+        _TONALITY_KEYS | {"signatureConfidence"} if schema_version >= 10 else _TONALITY_KEYS,
         "tonality",
     )
     if not isinstance(tonality["version"], str) or not _VERSION.fullmatch(tonality["version"]):
@@ -636,11 +640,28 @@ def _validate_tonality(value: Any, measure_count: int) -> None:
     if tonality["chromaticismScore"] is not None:
         _number(tonality["chromaticismScore"], "tonality.chromaticismScore", 0.0, 1.0)
     signature = tonality["keySignature"]
-    expected = (
-        key_signature(primary["rootPitchClass"], primary["collection"])
-        if primary is not None and primary["confidence"] >= KEY_SIGNATURE_MIN_CONFIDENCE
-        else None
-    )
+    if schema_version >= 10:
+        # Schema 10: a confident note collection writes its signature even when
+        # the tonal centre is uncertain, then without naming a mode.
+        signature_confidence = tonality["signatureConfidence"]
+        if primary is None:
+            if signature_confidence is not None:
+                raise _fail("tonality.signatureConfidence needs a primary candidate.")
+            expected = None
+        else:
+            signature_confidence = _number(
+                signature_confidence, "tonality.signatureConfidence", 0.0, 1.0
+            )
+            expected = key_signature_for(
+                primary["confidence"], signature_confidence,
+                primary["rootPitchClass"], primary["collection"],
+            )
+    else:
+        expected = (
+            key_signature(primary["rootPitchClass"], primary["collection"])
+            if primary is not None and primary["confidence"] >= KEY_SIGNATURE_MIN_CONFIDENCE
+            else None
+        )
     if signature != expected:
         raise _fail("tonality.keySignature does not follow the primary candidate.")
     for index, note in enumerate(_sequence(tonality["notes"], "tonality.notes", 4)):
@@ -892,6 +913,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
             7: _TOP_LEVEL_KEYS_V7,
             8: _TOP_LEVEL_KEYS_V8,
             9: _TOP_LEVEL_KEYS_V8,
+            10: _TOP_LEVEL_KEYS_V8,
         }[schema_version],
         "score document",
     )
@@ -924,6 +946,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         7: _COUNT_KEYS_V3,
         8: _COUNT_KEYS_V3,
         9: _COUNT_KEYS_V3,
+        10: _COUNT_KEYS_V3,
     }[schema_version]
     _exact_keys(counts, count_keys, "counts")
     for key in sorted(count_keys):
@@ -952,7 +975,7 @@ def validate_score_artifact(payload: Any) -> dict[str, Any]:
         if (layers["tablature"] == "included") != bool(totals["fingeredTabNotes"]):
             raise _fail("The tablature layer status does not match its notes.")
     if schema_version >= 4:
-        _validate_tonality(document["tonality"], len(document["measures"]))
+        _validate_tonality(document["tonality"], len(document["measures"]), schema_version)
     if schema_version >= 5:
         untabbed = [
             note

@@ -117,7 +117,7 @@ _FLAT_STEP_BASE = ("C", "D", "D", "E", "E", "F", "G", "G", "A", "A", "B", "B")
 _FLAT_STEP_ALTER = (0, -1, 0, -1, 0, 0, -1, 0, -1, 0, -1, 0)
 _SHARP_ORDER = ("F", "C", "G", "D", "A", "E", "B")
 _KEY_MODES = frozenset(
-    {"major", "minor", "dorian", "phrygian", "lydian", "mixolydian", "aeolian", "ionian", "locrian"}
+    {"major", "minor", "dorian", "phrygian", "lydian", "mixolydian", "aeolian", "ionian", "locrian", "none"}
 )
 _MIDI_MINOR_MODES = frozenset({"minor", "aeolian"})
 _STEP_BASE = ("C", "C", "D", "D", "E", "F", "F", "G", "G", "A", "A", "B")

@@ -132,7 +132,7 @@ def test_built_scores_carry_sections_or_say_why_not(tmp_path) -> None:
     from app.score_artifacts import validate_score_artifact
 
     document = _built_document(tmp_path)
-    assert document["schemaVersion"] == 9
+    assert document["schemaVersion"] == 10
     sections = document["sections"]
     assert sections["version"] == SECTIONS_VERSION
     # The fixture is a few bars long, so it carries a note instead of guesses.
@@ -149,6 +149,8 @@ def test_schema_six_scores_without_sections_stay_readable(tmp_path) -> None:
     older = {key: value for key, value in document.items() if key not in {"sections", "rhythmGrids"}}
     older["schemaVersion"] = 6
     older["measures"] = [{k: v for k, v in m.items() if k != "chordChanges"} for m in document["measures"]]
+    if isinstance(older.get("tonality"), dict):
+        older["tonality"] = {k: v for k, v in older["tonality"].items() if k != "signatureConfidence"}
     assert validate_score_artifact(older)["schemaVersion"] == 6
     assert "<rehearsal" not in score_to_musicxml_text(score_export_document(older))
     with pytest.raises(ScoreArtifactValidationError):

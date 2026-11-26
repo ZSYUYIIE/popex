@@ -90,7 +90,7 @@ from app.tablature import (
 )
 from app.transcription_draft import TranscriptionDraftError, load_transcription_draft
 
-SCORE_PIPELINE_VERSION = "score-pipeline-v10"
+SCORE_PIPELINE_VERSION = "score-pipeline-v11"
 PRE_DRUM_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1"})
 PRE_TABLATURE_PIPELINE_VERSIONS = frozenset({"score-pipeline-v1", "score-pipeline-v2"})
 PRE_TONAL_CONTEXT_PIPELINE_VERSIONS = frozenset(
@@ -102,6 +102,7 @@ PRE_SECTIONS_PIPELINE_VERSIONS = PRE_BEAT_GRID_PIPELINE_VERSIONS | {"score-pipel
 PRE_RHYTHM_GRID_PIPELINE_VERSIONS = PRE_SECTIONS_PIPELINE_VERSIONS | {"score-pipeline-v7"}
 PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS = PRE_RHYTHM_GRID_PIPELINE_VERSIONS | {"score-pipeline-v8"}
 PRE_METER_PIPELINE_VERSIONS = PRE_HALF_BAR_CHORD_PIPELINE_VERSIONS | {"score-pipeline-v9"}
+PRE_SIGNATURE_PIPELINE_VERSIONS = PRE_METER_PIPELINE_VERSIONS | {"score-pipeline-v10"}
 _SOURCE_LABELS = {
     "vocals": "vocal-stem line",
     "bass": "bass-stem line",
@@ -203,7 +204,9 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
     score with notes from before evidence-gated sixteenth-note grids.
     ``half-bar-chords``: a score of a recording with completed harmony from
     before half-bar chord changes. ``meter``: bars from before the drums and
-    bass could set the meter. Such scores stay readable and downloadable.
+    bass could set the meter. ``key-signature``: a score with notes from before
+    a key signature could be written when only the tonal centre was uncertain.
+    Such scores stay readable and downloadable.
     """
     version = record.get("score_version")
     count = record.get("percussion_event_count")
@@ -262,6 +265,8 @@ def score_outdated_reason(record: Mapping[str, Any]) -> str | None:
         and measures > 1
     ):
         return "meter"
+    if version in PRE_SIGNATURE_PIPELINE_VERSIONS and isinstance(notes, int) and not isinstance(notes, bool) and notes > 0:
+        return "key-signature"
     return None
 
 
@@ -1106,6 +1111,9 @@ def construct_score(
             f"({round(primary_tonality['confidence'] * 100)}% confidence); "
             + (
                 "the key signature follows it, but it is a suggestion to review."
+                if tonality["keySignature"] is not None and tonality["keySignature"]["mode"] != "none"
+                else "the notes clearly fit its key signature, which is written without naming "
+                "major, minor or a mode, since the tonal centre is uncertain."
                 if tonality["keySignature"] is not None
                 else f"below {KEY_SIGNATURE_MIN_CONFIDENCE:.2f}, so no key signature is written."
             )
