@@ -286,6 +286,16 @@ def test_musicxml_parses_and_marks_draft() -> None:
     assert root.find(".//pitch") is not None
     assert root.find(".//metronome/beat-unit") is not None
     assert root.find(".//metronome/per-minute") is not None
+
+
+def test_the_printed_tempo_mark_is_a_whole_number_and_playback_stays_exact():
+    document = build_score_document(
+        [{"id": "n1", "startSeconds": 0.0, "endSeconds": 0.4, "midiNote": 60, "confidence": 0.9}],
+        tempo_bpm=100.055,
+    )
+    root = ET.fromstring(score_to_musicxml_text(document))
+    assert root.findtext(".//metronome/per-minute") == "100"
+    assert root.find(".//direction/sound").get("tempo") == "100.055"
     encoding = root.find("identification/encoding")
     assert encoding is not None
     assert not (encoding.text or "").strip()
